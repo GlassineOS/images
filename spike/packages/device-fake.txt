@@ -1,0 +1,13 @@
+alsa-ucm-conf
+blueman
+blueman-pyc
+bluez
+bluez-btmgmt
+bluez-libs
+bluez-openrc
+iw
+wpa_supplicant
+wpa_supplicant-openrc
+htop
+tmux
+strace

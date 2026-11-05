@@ -1,0 +1,12 @@
+adwaita-fonts
+adwaita-fonts-mono
+adwaita-fonts-sans
+adwaita-icon-theme
+font-alias
+font-cursor-misc
+font-dejavu
+font-eb-garamond
+font-go-mono-nerd
+font-misc-misc
+font-urw-base35
+hicolor-icon-theme
