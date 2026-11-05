@@ -13,7 +13,7 @@ there are no lockfiles.
 | `Dockerfile` | `alpine` → `glassine-common` → `eink` → `device-fake` → `validation` → `base-export` |
 | `packages/<stage>.txt` | plain package names per stage (627 Alpine packages) |
 | `device-fake/` | the device stage's files, `COPY`'d over the tree |
-| `materialize.sh DIR ID [PARENT_ID]` | `DIR/base-ID.tar` → `bases/ID` subvolume, full stream, delta against the parent, receive and compare, timings |
+| `materialize.sh DIR ID [PARENT_ID]` | `DIR/base-ID.tar` → `bases/ID` subvolume, full stream, delta against the parent, receive and compare, timings. This is the existing content-sync method (tar → subvolume, snapshot the parent + `rsync --checksum`, `send -p`), written generically. It worked as it is, so no other materialization method was tried |
 | `tree-manifest.py ROOT` | one line per entry: type, owner, mode, size, sha256 or link target, hardlink group, every xattr |
 | `probe/` | the fidelity probe: one file of each kind a base must keep |
 
@@ -62,15 +62,18 @@ Each case builds on the one before it (parent in brackets).
 |---|---|---|---|
 | A: first build, empty caches | 91 s | (full 294 MB) | |
 | A2: no change, cached | 8 s | none: tar byte-identical to A | |
-| A3: no change, `--no-cache` (A) | 101 s | 152 KiB | `etc/machine-id`, 12 fontconfig caches, `var/log/apk.log`; 5,973 `utimes` |
+| A3: no change, `--no-cache`, download cache warm (A) | 101 s | 152 KiB | `etc/machine-id`, 12 fontconfig caches, `var/log/apk.log`; 5,973 `utimes` |
 | B: one config file added in `device-fake` (A3) | 12 s | 4 KiB | that file |
 | C: 2 packages added to `device-fake` (B) | 16 s | 1.8 MiB | their files, `world`, `installed`, `apk.log` |
 | D: 1 package added to `glassine-common` (C) | 46 s | 1.0 MiB | its files, plus A3's drift: machine-id, fontconfig, ~6,000 `utimes` |
 
 - **Rewritten timestamps don't defeat the delta**, because the sync compares content
   (`rsync --checksum`): a file with the same bytes and a new mtime costs one `utimes`
-  record, about 25 bytes zstd'd. `NORMALIZE_MTIME` exists in the script but wasn't
-  needed.
+  record, about 25 bytes zstd'd. In case D the changed mtimes were on 2,943 symlinks and
+  2,038 directories, which apk creates with the install time, and on 995 files. The
+  files are generated ones (`passwd`, `group`, `shadow`, the apk database, caches);
+  regular files from packages keep the package's mtime. `NORMALIZE_MTIME` exists in the
+  script but wasn't needed.
 - **Sharing:** after a delta the new base has 0.3–2.6 MiB exclusive on the receiving
   Btrfs, the rest shared with its parent (`btrfs filesystem du`).
 - A rerun stage regenerates whatever its install scripts and triggers write. The bytes
@@ -109,5 +112,7 @@ A device-config change goes from edit to verified delta in under a minute.
 - A native arm64 build (QEMU only).
 - A real GHCR push. The OCI export stands in for it.
 - `FROM alpine` against an empty root made with `apk --root`.
+- `apk audit` or a database consistency check on the result. The three `apk` transactions
+  across stages succeeded, nothing more was checked.
 - Live `apk upgrade` and package replay on a base from these stages.
 - A kernel stage.
