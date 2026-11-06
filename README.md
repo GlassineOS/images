@@ -18,7 +18,7 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 |---|---|
 | `alpine` | Alpine 3.24 and its repositories, plus ours (`glassine-keys`) |
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
-| `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard |
+| `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session (enabled at boot) |
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
@@ -31,7 +31,7 @@ A stage lives in `stages/<stage>/`:
 |---|---|
 | `packages` | plain package names, one per line |
 | `lock` | the whole installed set after this stage, as `name=version` |
-| `rootfs/` | files copied over the tree (device stages). None may belong to a package |
+| `rootfs/` | files copied over the tree (`eink` and the device stages). None may belong to a package |
 
 **What goes where:** behavior goes in packages, which upgrade live. Configuration and
 seeds go in a stage's `rootfs/` and change only with a new base. Applications aren't in
