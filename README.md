@@ -20,6 +20,7 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard |
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration |
+| `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
 | `validation` | fails the build on what a base must not carry; adds nothing |
 | `base-export` | the tree a base is made from |

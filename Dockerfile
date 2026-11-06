@@ -52,6 +52,15 @@ RUN --mount=type=bind,source=stages/device-onyx-noteair,target=/run/stage \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-onyx-noteair/rootfs/ /
 
+# A made-up device that tests the chain: it must build on the generic stages unchanged.
+FROM eink AS device-example
+ARG LOCK=check
+RUN --mount=type=bind,source=stages/device-example,target=/run/stage \
+    --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    LOCK=$LOCK sh /run/apk-stage.sh
+COPY stages/device-example/rootfs/ /
+
 # Build leftovers out: the machine ID (dbus writes one at install time; each
 # installation makes its own, GlassineOS/hub#19) and apk's log of this build.
 FROM device-${DEVICE} AS finish
