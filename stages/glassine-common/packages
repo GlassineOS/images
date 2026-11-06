@@ -1,0 +1,48 @@
+# What every GlassineOS system needs, whatever its display or device. Applications are
+# not here: people install them as live packages. Our components' own dependencies come
+# with their packages, so they aren't listed either.
+
+# system
+alpine-base
+tzdata
+eudev
+dbus
+polkit
+
+# deployments: read-only bases, tried updates, reset (GlassineOS/boot)
+glassine-deploy
+btrfs-progs
+zstd
+
+# network
+networkmanager
+networkmanager-wifi
+networkmanager-cli
+networkmanager-openrc
+wpa_supplicant
+
+# sound and Bluetooth
+pipewire
+wireplumber
+pipewire-pulse
+pipewire-alsa
+pipewire-spa-bluez
+bluez
+bluez-openrc
+
+# graphics and the Wayland session
+mesa-dri-gallium
+seatd
+xwayland
+xdg-desktop-portal
+xdg-desktop-portal-gtk
+xdg-desktop-portal-wlr
+gsettings-desktop-schemas
+at-spi2-core
+
+# applications from Flathub and our Flatpak repository
+flatpak
+
+# one font and icon theme, so applications render
+font-dejavu
+adwaita-icon-theme

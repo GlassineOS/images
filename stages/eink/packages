@@ -1,0 +1,6 @@
+# Any e-ink device: the panel daemons, the compositor with the e-ink output, the
+# on-screen keyboard
+glassine-epdd
+glassine-epdd-desktop
+sway-glassine
+wvkbd-glassine

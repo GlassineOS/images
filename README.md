@@ -1,31 +1,66 @@
 # GlassineOS/images
 
 System images of GlassineOS: the root file systems and boot images a device installs.
-**Empty so far:** nothing builds from here yet.
+The design is [GlassineOS/hub#8](https://github.com/GlassineOS/hub/issues/8), and the
+decision is record 0013 in [GlassineOS/docs](https://github.com/GlassineOS/docs).
 
-## Plan
+**Status:** the root file system's stage chain builds. It doesn't make a base yet (a
+Btrfs subvolume and its send stream), nor a kernel or a boot image. Most of
+GlassineOS's own software isn't packaged yet either, so the tree isn't a usable system.
 
-The design is in [GlassineOS/hub#8](https://github.com/GlassineOS/hub/issues/8). In short:
+## Stages
 
-- Images are built as Dockerfile stages with BuildKit, each stage on top of the one
-  before: `alpine` → `glassine-common` → `eink` → `device-<name>`.
-- The boot image is a separate chain of stages: `boot-<device>`, built from the
-  kernel, `dtb-<device>` and `initramfs-<device>`. The kernel stays out of the root
-  file system chain, so a kernel change doesn't rebuild the root.
-- Each stage has one lockfile: the exact package versions it installed. A weekly
-  pull request updates the lockfiles, and so does a security fix.
-- The stages are kept on GHCR by digest. That is the record of every image ever built.
-- No vendor firmware anywhere. A device's firmware comes from the device itself
-  (see the device's bootstrap repository).
+```
+alpine → glassine-common → eink → device-<name> → finish → validation → base-export
+```
 
-Packages come from [GlassineOS/packages](https://github.com/GlassineOS/packages);
-the build containers from `GlassineOS/builders`.
+| Stage | Holds |
+|---|---|
+| `alpine` | Alpine 3.24 and its repositories, plus ours (`glassine-keys`) |
+| `glassine-common` | what every GlassineOS system needs, whatever its display or device |
+| `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard |
+| `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration |
+| `finish` | removes build leftovers: the machine ID, apk's log |
+| `validation` | fails the build on what a base must not carry; adds nothing |
+| `base-export` | the tree a base is made from |
 
-## Waiting for
+A stage lives in `stages/<stage>/`:
 
-The root file system model: read-only bases, deployments, and what stays writable.
-That has to be decided first, and the first step tried on a device, because the
-stages produce exactly that layout.
+| File | What |
+|---|---|
+| `packages` | plain package names, one per line |
+| `lock` | the whole installed set after this stage, as `name=version` |
+| `rootfs/` | files copied over the tree (device stages). None may belong to a package |
+
+**What goes where:** behavior goes in packages, which upgrade live. Configuration and
+seeds go in a stage's `rootfs/` and change only with a new base. Applications aren't in
+any stage, because people install them as live packages. Generic stages carry no device
+names.
+
+A new device is a new `device-<name>` stage on top of `eink` (or `glassine-common`),
+and nothing above it changes.
+
+## Locks
+
+A stage installs its plain names, then compares everything installed with its `lock`.
+A difference fails the build and says to refresh. The lock is also an input of its
+stage, so a refreshed lock rebuilds that stage and the ones after it. Versions are
+never pinned at install time: `apk add name=version` would write the pin into
+`/etc/apk/world` and block live upgrades.
+
+    scripts/lock.sh                   # rebuild from scratch, rewrite every lock
+
+A build that fails after Alpine or our repository moved on is expected: refresh the
+locks and review what changed.
+
+## Building
+
+    docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
+
+builds the default device's tree (`--build-arg DEVICE=<name>` for another). On an
+amd64 computer, arm64 runs through QEMU (`docker run --privileged --rm
+tonistiigi/binfmt --install arm64` once). Keep to the tar export: image exports drop
+`user.*` extended attributes.
 
 ## License
 
