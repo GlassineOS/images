@@ -11,4 +11,8 @@ grep -q '[<>=~]' /etc/apk/world && no "pinned versions in /etc/apk/world: $(grep
 # each installation makes its own machine ID (GlassineOS/hub#19)
 [ ! -s /etc/machine-id ] || no "/etc/machine-id is filled in"
 [ ! -e /var/log/apk.log ] || no "apk's build log in the tree"
+# every enabled service has its script
+for l in /etc/runlevels/*/*; do
+	[ -e "$l" ] || [ ! -L "$l" ] || no "enabled service without a script: $l -> $(readlink "$l")"
+done
 exit $fail

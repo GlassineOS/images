@@ -34,13 +34,14 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 
-# Any e-ink device: the panel daemons and the e-ink session.
+# Any e-ink device: the panel daemons and the e-ink session, started at boot.
 FROM glassine-common AS eink
 ARG LOCK=check
 RUN --mount=type=bind,source=stages/eink,target=/run/stage \
     --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
+COPY stages/eink/rootfs/ /
 
 # Onyx Boox Note Air: its packages and system configuration only. The copied files must
 # not belong to a package (apk-stage.sh checks), so a live upgrade never fights them.
