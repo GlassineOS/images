@@ -18,15 +18,30 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - name: Build and export each device's tree
         run: |
-          for d in $(cd stages && ls -d device-* | sed 's/^device-//'); do
+          devices=$(cd stages && ls -d device-* | sed 's/^device-//')
+          from=$(for d in $devices; do printf ' --cache-from type=gha,scope=%s' "$d"; done)
+          first=1
+          for d in $devices; do
             echo "::group::$d"
-            docker buildx build --platform linux/arm64 --build-arg DEVICE="$d" \
-              --cache-from type=gha,scope=stages --cache-to type=gha,mode=max,scope=stages \
-              -o "type=tar,dest=/tmp/$d.tar" .
+            docker buildx build --progress=plain --platform linux/arm64 --build-arg DEVICE="$d" \
+              $from --cache-to "type=gha,mode=max,scope=$d" \
+              -o "type=tar,dest=/tmp/$d.tar" . 2>&1 | tee "/tmp/$d.log"
+            [ "${PIPESTATUS[0]}" = 0 ] || exit 1
             # mounted into every RUN, so checked here rather than in validation
             if tar -tf "/tmp/$d.tar" | grep -qx 'etc/resolv.conf'; then
               echo "::error::$d: /etc/resolv.conf from the build is in the tree"; exit 1
             fi
             echo "$d: $(tar -tf "/tmp/$d.tar" | wc -l) entries, $(du -h "/tmp/$d.tar" | cut -f1)"
             echo "::endgroup::"
+            # every device after the first must reuse the generic stages as they are
+            if [ $first = 0 ]; then
+              for s in alpine glassine-common eink; do
+                n=$(sed -n "s/^#\([0-9]*\) \[$s [0-9/]*\] RUN .*/\1/p" "/tmp/$d.log" | tail -1)
+                if [ -z "$n" ] || ! grep -qx "#$n CACHED" "/tmp/$d.log"; then
+                  echo "::error::$d: stage $s was rebuilt, not reused"; exit 1
+                fi
+              done
+              echo "$d: alpine, glassine-common and eink reused from the cache"
+            fi
+            first=0
           done
