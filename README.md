@@ -53,6 +53,11 @@ never pinned at install time: `apk add name=version` would write the pin into
 A build that fails after Alpine or our repository moved on is expected: refresh the
 locks and review what changed.
 
+The `lock-refresh` workflow does this every day on an arm64 runner and keeps one pull
+request (branch `lock-refresh`) with the changed packages: on Mondays for any change,
+and on any day when a change brings a fix from Alpine's security database. It can also
+be started by hand. `scripts/lock-diff.sh` writes the pull request's description.
+
 ## Building
 
     docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
