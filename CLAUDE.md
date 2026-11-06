@@ -1,6 +1,11 @@
 # CLAUDE.md — GlassineOS/images
 
-System images (see `README.md`). Nothing builds here yet; the design is GlassineOS/hub#8.
+System images (see `README.md`); the design is GlassineOS/hub#8. Every change: build the
+chain for linux/arm64 and refresh the locks it affects (`scripts/lock.sh`).
+
+- Generic stages stay generic: no device names, no personal choices, no applications
+  (people install those live). A package earns its place in `glassine-common` only if
+  every GlassineOS system needs it.
 
 - No vendor firmware in any stage or image.
 - Commits carry an `Assisted-by:` or `Co-Authored-By:` trailer. Never add
