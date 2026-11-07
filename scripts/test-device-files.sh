@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Host test of scripts/device-files.c in an Alpine container, on made-up files only:
-# a synthetic waveform, a crafted ELF with a Qualcomm hash segment, split-image names,
-# and ordinary files that must pass (the container's own binaries, a RIFF file, a file
+# a synthetic waveform (written with the offsets the check reads, so it tests the code
+# against itself, not against the format), a crafted ELF with a Qualcomm hash segment,
+# split-image names, and ordinary files that must pass (the container's own binaries, a RIFF file, a file
 # whose offset 4 holds its size but whose header isn't a waveform).
 #   scripts/test-device-files.sh     exit 0 = all checks pass
 set -eu

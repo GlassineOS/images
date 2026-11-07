@@ -9,7 +9,15 @@
  * By contents:
  *   - an E Ink waveform (WBF): at least 256 bytes, the 32-bit little-endian length
  *     at offset 4 equal to the file size, a plausible mode count (byte 0x25 < 16)
- *     and temperature range count (byte 0x26 < 62), as the engine reads it;
+ *     and temperature range count (byte 0x26 < 62). None of these offsets is
+ *     checked here against a real waveform. The mode and temperature bytes and
+ *     their bounds agree with what the panel engine reads (compared by hand with
+ *     its source, not by a test); the engine doesn't read the length at offset 4,
+ *     which rests only on one real waveform looked at by hand, not in this
+ *     repository. The test writes its waveform with the same offsets, so it shows
+ *     that the code agrees with itself, not with the format. A waveform whose length
+ *     field isn't its size (trailing bytes) is caught only by its name (*.wbf), and
+ *     a file of zeros but for its size at offset 4 is a false positive;
  *   - a signed Qualcomm image: an ELF with a hash segment, a program header whose
  *     flags carry the segment type 2 in bits 24-26, as signed modem, DSP, Wi-Fi and
  *     GPU zap images have (whole or split: the .mdt holds the headers).

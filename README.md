@@ -25,6 +25,12 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 | `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing |
 | `base-export` | the tree a base is made from |
 
+`scripts/device-files.c` knows a waveform by header offsets that no file in this
+repository confirms: the mode and temperature counts agree with what the panel engine
+reads, the length at offset 4 rests on one real file checked by hand, and the test
+writes its waveform with the same offsets the check reads. Its header comment has the
+details.
+
 A stage lives in `stages/<stage>/`:
 
 | File | What |
