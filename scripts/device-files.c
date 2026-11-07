@@ -22,7 +22,8 @@
  *     flags carry the segment type 2 in bits 24-26, as signed modem, DSP, Wi-Fi and
  *     GPU zap images have (whole or split: the .mdt holds the headers).
  * By name, for the pieces of split images that carry no headers: *.mdt, *.mbn,
- * *.bNN next to an .mdt of the same stem, *.wbf.
+ * *.bNN next to an .mdt of the same stem, *.wbf: the suffixes in any case, the .mdt
+ * beside a .bNN in lower or upper case (.B02 next to .MDT).
  * By place: any file under /lib/firmware or /usr/lib/firmware. A base carries no
  * firmware: the kernel's goes with the kernel (modules/<release>/firmware), the
  * device's comes from the device seed. That also covers unsigned blobs (GPU
@@ -43,6 +44,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -94,21 +96,23 @@ static int is_qcom_signed(FILE *f, const unsigned char *h, size_t n)
 static int has_suffix(const char *s, const char *suf)
 {
     size_t a = strlen(s), b = strlen(suf);
-    return a >= b && !strcmp(s + a - b, suf);
+    return a >= b && !strcasecmp(s + a - b, suf);
 }
 
-/* NAME.bNN with NAME.mdt in the same directory */
+/* NAME.bNN or NAME.BNN with NAME.mdt or NAME.MDT in the same directory */
 static int is_split_segment(const char *path)
 {
     size_t n = strlen(path);
-    if (n < 5 || path[n - 4] != '.' || path[n - 3] != 'b' || path[n - 2] < '0' || path[n - 2] > '9' ||
+    if (n < 5 || path[n - 4] != '.' || (path[n - 3] != 'b' && path[n - 3] != 'B') || path[n - 2] < '0' || path[n - 2] > '9' ||
         path[n - 1] < '0' || path[n - 1] > '9')
         return 0;
     char mdt[4096];
     if (n >= sizeof mdt) return 0;
     memcpy(mdt, path, n - 3);
-    strcpy(mdt + n - 3, "mdt");
     struct stat st;
+    strcpy(mdt + n - 3, "mdt");
+    if (!lstat(mdt, &st)) return 1;
+    strcpy(mdt + n - 3, "MDT");
     return !lstat(mdt, &st);
 }
 

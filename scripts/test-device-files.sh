@@ -3,8 +3,9 @@
 # Host test of scripts/device-files.c in an Alpine container, on made-up files only:
 # a synthetic waveform (written with the offsets the check reads, so it tests the code
 # against itself, not against the format), a crafted ELF with a Qualcomm hash segment,
-# split-image names, and ordinary files that must pass (the container's own binaries, a RIFF file, a file
-# whose offset 4 holds its size but whose header isn't a waveform).
+# split-image names in either case, and ordinary files that must pass (the container's
+# own binaries, a RIFF file, a file whose offset 4 holds its size but whose header isn't
+# a waveform, a .b02 with no .mdt beside it).
 #   scripts/test-device-files.sh     exit 0 = all checks pass
 set -eu
 P=$(cd "$(dirname "$0")/.." && pwd)
@@ -33,6 +34,10 @@ open(t + "/fw/adsp.mdt", "wb").write(b"x" * 100)
 open(t + "/fw/adsp.b02", "wb").write(b"x" * 100)
 open(t + "/fw/lonely.b02", "wb").write(b"x" * 100)    # no .mdt beside it: passes
 open(t + "/fw/eink.wbf", "wb").write(b"x" * 10)
+open(t + "/fw/MODEM.MDT", "wb").write(b"x" * 100)      # the same names, upper case
+open(t + "/fw/MODEM.B03", "wb").write(b"x" * 100)
+open(t + "/fw/PANEL.WBF", "wb").write(b"x" * 10)
+open(t + "/fw/TZ.MBN", "wb").write(b"x" * 10)
 wbf(t + "/proc/x/skipped", 4096)                      # /proc is skipped
 EOF
 cp /bin/busybox $T/usr/lib/a/
@@ -46,6 +51,7 @@ check "found: exit 1" "[ $rc = 1 ]"
 check "a waveform by its header" "echo \"\$out\" | grep -qx \"/usr/lib/a/panel.bin: an E Ink waveform (WBF header)\""
 check "a signed image by its hash segment" "echo \"\$out\" | grep -q \"^/usr/lib/a/modem: a signed Qualcomm image\""
 check "split image names (.mdt, .bNN next to it, .wbf)" "echo \"\$out\" | grep -q \"^/fw/adsp.mdt:\" && echo \"\$out\" | grep -q \"^/fw/adsp.b02:\" && echo \"\$out\" | grep -q \"^/fw/eink.wbf:\""
+check "the same names in upper case (.MDT, .B03 next to it, .WBF, .MBN)" "[ \"\$(echo \"\$out\" | grep -c -e ^/fw/MODEM.MDT: -e ^/fw/MODEM.B03: -e ^/fw/PANEL.WBF: -e ^/fw/TZ.MBN:)\" = 4 ]"
 check "ordinary files pass (busybox, ELF32, RIFF, size field only, lone .b02)" "! echo \"\$out\" | grep -q -e busybox -e plain32 -e sound.wav -e notwbf -e lonely"
 check "anything under /lib/firmware and /usr/lib/firmware" "echo \"\$out\" | grep -q \"^/lib/firmware/qcom/a530_pm4.fw: firmware in the base\" && echo \"\$out\" | grep -q \"^/usr/lib/firmware/cam.fw:\""
 check "/proc skipped, symlinks not followed" "! echo \"\$out\" | grep -q -e /proc/ -e /link:"
@@ -65,6 +71,8 @@ else
 fi
 rm -rf $U /tmp/uerr
 rm -rf $T/usr/lib/a/panel.bin $T/usr/lib/a/modem $T/fw $T/usr/lib/a/link $T/usr/lib/a/link.mbn $T/lib/firmware $T/usr/lib/firmware
+# what is left: busybox, plain32, sound.wav and notwbf, and the waveform under /proc,
+# which passes only because /proc is skipped (the lone .b02 went with /fw)
 check "a clean tree: exit 0" "/tmp/device-files $T >/dev/null"
 rm -rf $T
 check "the container itself is clean (a real Alpine tree)" "/tmp/device-files / >/dev/null"
