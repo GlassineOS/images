@@ -70,8 +70,16 @@ RUN : > /etc/machine-id && rm -f /var/log/apk.log
 
 # What a base must not carry. Reads only, adds nothing. /etc/resolv.conf and /etc/hosts
 # are mounted into every RUN, so their absence is checked on the exported tree.
+# The device-file check (scripts/device-files.c), built static apart from the tree so
+# that validation adds nothing to it.
+FROM ${ALPINE} AS device-files
+RUN --mount=type=bind,source=scripts/device-files.c,target=/src/device-files.c \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add build-base && cc -O2 -static -o /device-files /src/device-files.c
+
 FROM finish AS validation
 RUN --mount=type=bind,source=scripts/validate.sh,target=/run/validate.sh \
+    --mount=type=bind,from=device-files,source=/device-files,target=/run/device-files \
     sh /run/validate.sh
 
 # The tree a base is made from.

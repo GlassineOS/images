@@ -11,6 +11,13 @@ grep -q '[<>=~]' /etc/apk/world && no "pinned versions in /etc/apk/world: $(grep
 # each installation makes its own machine ID (GlassineOS/hub#19)
 [ ! -s /etc/machine-id ] || no "/etc/machine-id is filled in"
 [ ! -e /var/log/apk.log ] || no "apk's build log in the tree"
+# nothing only a device may supply: waveforms, signed firmware, any firmware
+# (scripts/device-files.c, bind-mounted by the Dockerfile; checks by contents)
+if [ -x /run/device-files ]; then
+	/run/device-files / >&2 || no "files only a device may supply (listed above)"
+else
+	no "the device-file check is missing"
+fi
 # every enabled service has its script
 for l in /etc/runlevels/*/*; do
 	[ -e "$l" ] || [ ! -L "$l" ] || no "enabled service without a script: $l -> $(readlink "$l")"

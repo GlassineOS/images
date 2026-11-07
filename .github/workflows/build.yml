@@ -16,6 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+      - name: The device-file check on made-up files
+        run: sh scripts/test-device-files.sh
       - name: Build and export each device's tree
         run: |
           devices=$(cd stages && ls -d device-* | sed 's/^device-//')
