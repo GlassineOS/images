@@ -14,7 +14,12 @@ grep -q '[<>=~]' /etc/apk/world && no "pinned versions in /etc/apk/world: $(grep
 # nothing only a device may supply: waveforms, signed firmware, any firmware
 # (scripts/device-files.c, bind-mounted by the Dockerfile; checks by contents)
 if [ -x /run/device-files ]; then
-	/run/device-files / >&2 || no "files only a device may supply (listed above)"
+	rc=0; /run/device-files / >&2 || rc=$?
+	case $rc in
+	0) ;;
+	1) no "files only a device may supply (listed above)" ;;
+	*) no "the device-file check couldn't read the whole tree (exit $rc, listed above)" ;;
+	esac
 else
 	no "the device-file check is missing"
 fi

@@ -48,6 +48,18 @@ check "anything under /lib/firmware and /usr/lib/firmware" "echo \"\$out\" | gre
 check "/proc skipped, symlinks not followed" "! echo \"\$out\" | grep -q -e /proc/ -e /link"
 out2=$(/tmp/device-files $T/) && rc2=0 || rc2=$?
 check "ROOT with a trailing slash: the same findings, firmware included" "[ $rc2 = 1 ] && [ \"\$out2\" = \"\$out\" ] && echo \"\$out2\" | grep -q \"^/lib/firmware/qcom/a530_pm4.fw:\""
+# a waveform in a file and in a directory that a non-root user cannot read: an error
+# (exit 2, each named on stderr), not "none found". Root reads them anyway.
+U=/tmp/u; rm -rf $U; mkdir -p $U/d; cp $T/usr/lib/a/panel.bin $U/f; cp $T/usr/lib/a/panel.bin $U/d/w; chmod 000 $U/f $U/d
+if [ "$(id -u)" = 0 ] && su -s /bin/sh nobody -c true 2>/dev/null; then
+	uout=$(su -s /bin/sh nobody -c "/tmp/device-files $U" 2>/tmp/uerr) && urc=0 || urc=$?
+	cat /tmp/uerr
+	check "unreadable file and directory: exit 2, both on stderr, nothing on stdout" "[ $urc = 2 ] && [ -z \"\$uout\" ] && grep -q \"^device-files: $U/f:\" /tmp/uerr && grep -q \"^device-files: $U/d:\" /tmp/uerr"
+	check "the same tree read as root: found" "/tmp/device-files $U >/dev/null; [ \$? = 1 ]"
+else
+	echo "skipped: unreadable entries (needs root in the container to run the check as nobody)"
+fi
+rm -rf $U /tmp/uerr
 rm -rf $T/usr/lib/a/panel.bin $T/usr/lib/a/modem $T/fw $T/usr/lib/a/link $T/lib/firmware $T/usr/lib/firmware
 check "a clean tree: exit 0" "/tmp/device-files $T >/dev/null"
 rm -rf $T

@@ -21,8 +21,12 @@
  * microcode, camera firmware) that no content marks as a device's.
  * It stays on ROOT's file system (in a build step: not the kernel's /proc, /sys and
  * /dev, nor bind mounts), skips anything under ROOT/proc, /sys and /dev too, and
- * doesn't follow symlinks. */
+ * doesn't follow symlinks.
+ * What it can't read (a directory it can't list, an entry it can't stat, a file it
+ * can't open or whose header it can't read whole) is an error, printed to stderr:
+ * the exit status is then 2, whatever was found, never "none found". */
 #define _XOPEN_SOURCE 700
+#include <errno.h>
 #include <ftw.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,12 +37,18 @@
 
 static const char *root;
 static size_t rootlen;
-static int found;
+static int found, err;
 
 static void report(const char *path, const char *why)
 {
     printf("%s: %s\n", path + rootlen, why);
     found = 1;
+}
+
+static void unread(const char *path, const char *why)
+{
+    fprintf(stderr, "device-files: %s: %s\n", path, why);
+    err = 1;
 }
 
 static uint32_t le32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -95,6 +105,8 @@ static int visit(const char *path, const struct stat *st, int type, struct FTW *
 {
     const char *rel = path + rootlen;
     if (!strncmp(rel, "/proc/", 6) || !strncmp(rel, "/sys/", 5) || !strncmp(rel, "/dev/", 5)) return 0;
+    if (type == FTW_DNR) { unread(path, "can't read the directory"); return 0; }
+    if (type == FTW_NS) { unread(path, "can't stat it"); return 0; }
     if (type != FTW_F || !S_ISREG(st->st_mode)) return 0;
     if (!strncmp(rel, "/lib/firmware/", 14) || !strncmp(rel, "/usr/lib/firmware/", 18)) {
         report(path, "firmware in the base (it goes with the kernel or comes from the device seed)");
@@ -106,9 +118,14 @@ static int visit(const char *path, const struct stat *st, int type, struct FTW *
     if (is_split_segment(path)) { report(path, "a segment of a split firmware image (next to its .mdt)"); return 0; }
     if (st->st_size < 52) return 0;
     FILE *f = fopen(path, "rb");
-    if (!f) return 0;
+    if (!f) { unread(path, strerror(errno)); return 0; }
     unsigned char h[64];
     size_t n = fread(h, 1, sizeof h, f);
+    if (n < (st->st_size < (off_t)sizeof h ? (size_t)st->st_size : sizeof h)) {
+        unread(path, "can't read its header");
+        fclose(f);
+        return 0;
+    }
     if (is_wbf(h, n, st->st_size)) report(path, "an E Ink waveform (WBF header)");
     else if (is_qcom_signed(f, h, n)) report(path, "a signed Qualcomm image (ELF hash segment)");
     fclose(f);
@@ -126,5 +143,5 @@ int main(int argc, char **argv)
     root = r;
     rootlen = strcmp(root, "/") ? len : 0;
     if (nftw(root, visit, 64, FTW_PHYS | FTW_MOUNT) < 0) { perror(root); return 2; }
-    return found;
+    return err ? 2 : found;
 }
