@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Check an exported boot image against the parts it was packed from and the device's
+board.conf. Runs on the build computer:
+
+    docker buildx build --platform linux/arm64 --target boot-export -o type=local,dest=out .
+    docker buildx build --platform linux/arm64 --target kernel-export -o type=local,dest=out .
+    docker buildx build --platform linux/arm64 --target dtb-export -o type=local,dest=out .
+    docker buildx build --platform linux/arm64 --target initramfs-export -o type=local,dest=out .
+    scripts/boot-check out [DEVICE]
+
+Checks the Android boot image header v0 fields against targets/<device>/board.conf
+(and nothing else: no reference image), that the kernel is Image.gz with the device tree
+appended and the ramdisk is the initramfs followed by board.conf, the size limit, the
+glassine.img= id, and the boot record's fields.
+"""
+import hashlib, os, shlex, struct, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+errors = []
+
+
+def check(cond, msg):
+    print(('ok:   ' if cond else 'FAIL: ') + msg)
+    if not cond:
+        errors.append(msg)
+
+
+def read(p):
+    with open(p, 'rb') as f:
+        return f.read()
+
+
+def kv(path):
+    out = {}
+    for line in read(path).decode().splitlines():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            k, v = line.split('=', 1)
+            out[k.strip()] = (shlex.split(v) or [''])[0]
+    return out
+
+
+def only(d, suffix):
+    names = [n for n in sorted(os.listdir(d)) if n.endswith(suffix)] if os.path.isdir(d) else []
+    if len(names) != 1:
+        sys.exit(f'boot-check: expected one {suffix} in {d}, found {names}')
+    return os.path.join(d, names[0])
+
+
+def main(out, device):
+    board_path = os.path.join(HERE, '..', 'targets', device, 'board.conf')
+    board = kv(board_path)
+    num = lambda k: int(board[k], 0)
+    img_path = only(os.path.join(out, 'bootimg'), '.img')
+    img = read(img_path)
+    rec = {}
+    for line in read(img_path[:-4] + '.manifest').decode().splitlines():
+        k, _, v = line.partition('=')
+        rec[k] = v
+    check(rec.get('format') == '1', 'boot record format=1')
+    for k in ('id', 'device', 'kernel', 'dtb', 'initramfs', 'cmdline', 'board', 'release', 'size', 'sha256'):
+        check(k in rec, f'boot record has {k}')
+
+    check(img[:8] == b'ANDROID!', 'boot image magic')
+    (ksz, kaddr, rsz, raddr, ssz, saddr, tags, ps, hver, osv) = struct.unpack_from('<10I', img, 8)
+    check(ps == num('PAGE_SIZE'), f'page size {ps} from board.conf')
+    check(kaddr == num('KERNEL_ADDR'), f'kernel address {kaddr:#x} from board.conf')
+    check(raddr == num('RAMDISK_ADDR'), f'ramdisk address {raddr:#x} from board.conf')
+    check(saddr == num('SECOND_ADDR') and ssz == 0, f'second address {saddr:#x}, no second stage')
+    check(tags == num('TAGS_ADDR'), f'tags address {tags:#x} from board.conf')
+    check(osv == num('OS_VERSION'), f'os version {osv:#x} from board.conf')
+    check(hver == 0, 'header version 0')
+    name = img[48:64].rstrip(b'\0').decode()
+    check(name == board.get('NAME', 'glassine')[:15], f'name {name!r} from board.conf')
+    cmd = img[64:576].rstrip(b'\0').decode()
+    check(cmd == f'{board["CMDLINE"]} glassine.img={rec.get("id")}', f'cmdline: {cmd}')
+
+    rel = rec.get('kernel', '')
+    image_gz = read(os.path.join(out, 'modules', rel, 'Image.gz'))
+    dtb = read(os.path.join(out, 'boot', 'dtb', rec.get('dtb', '') + '.dtb'))
+    initramfs = read(os.path.join(out, 'boot', 'initramfs', rec.get('initramfs', '') + '.cpio.gz'))
+    up = lambda n: (n + ps - 1) // ps * ps
+    kernel = img[ps:ps + ksz]
+    ramdisk = img[ps + up(ksz):ps + up(ksz) + rsz]
+    check(kernel == image_gz + dtb, f'kernel = {rel}/Image.gz + {rec.get("dtb")}.dtb')
+    pad = initramfs + b'\0' * (-len(initramfs) % 4)
+    check(ramdisk.startswith(pad), f'ramdisk starts with {rec.get("initramfs")}.cpio.gz')
+    check(read(board_path) in ramdisk[len(pad):], 'ramdisk carries board.conf after the initramfs')
+    ident = hashlib.sha256(kernel + b'\0' + ramdisk + b'\0' + board['CMDLINE'].encode()).hexdigest()[:16]
+    check(ident == rec.get('id') and os.path.basename(img_path) == ident + '.img', f'id {ident} (glassine.img=)')
+    check(len(img) == ps + up(ksz) + up(rsz), 'image length = header + padded kernel + padded ramdisk')
+    check(len(img) <= num('PART_SIZE'), f'size {len(img)} <= PART_SIZE {num("PART_SIZE")}')
+    check(rec.get('size') == str(len(img)), 'boot record size')
+    check(rec.get('sha256') == hashlib.sha256(img).hexdigest(), 'boot record sha256')
+    check(rec.get('board') == hashlib.sha256(read(board_path)).hexdigest(), 'boot record board = sha256 of board.conf')
+    check(rec.get('device') == device, f'boot record device={rec.get("device")}')
+    check(rec.get('cmdline') == board['CMDLINE'], 'boot record cmdline = board.conf CMDLINE')
+    print(f'boot-check: {len(errors)} failure(s)')
+    return 1 if errors else 0
+
+
+if __name__ == '__main__':
+    if len(sys.argv) not in (2, 3):
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    sys.exit(main(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else 'onyx-noteair'))

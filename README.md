@@ -4,10 +4,9 @@ System images of GlassineOS: the root file systems and boot images a device inst
 The design is [GlassineOS/hub#8](https://github.com/GlassineOS/hub/issues/8), and the
 decision is record 0013 in [GlassineOS/docs](https://github.com/GlassineOS/docs).
 
-**Status:** the root file system's stage chain builds, and so do the kernel and device
-tree artifacts. It doesn't make a base yet (a Btrfs subvolume and its send stream), nor
-an initramfs or a boot image. Most of
-GlassineOS's own software isn't packaged yet either, so the tree isn't a usable system.
+**Status:** the root file system's stage chain builds, and so do the kernel, device tree,
+initramfs and boot image artifacts. It doesn't make a base yet (a Btrfs subvolume and
+its send stream). Most of GlassineOS's own software isn't packaged yet either, so the tree isn't a usable system.
 
 ## Stages
 
@@ -124,6 +123,33 @@ digest, so a new builder starts from an empty one.
 
 The `kernel` workflow builds and checks these on changes to the kernel side; started by
 hand it can also run the reproducibility check.
+
+## Initramfs and boot image
+
+```
+boot-src + alpine → initramfs → initramfs-export           boot/initramfs/<commit12>.*
+kernel + dtb + initramfs + boot-src → boot → boot-export   bootimg/<id>.img + .manifest
+```
+
+| Stage | Makes |
+|---|---|
+| `boot-src` | GlassineOS/boot at the commit pinned in the Dockerfile (`BOOT_COMMIT`) |
+| `initramfs` | boot's `build-initramfs.sh` in arm64 Alpine, with a locked package set (`stages/initramfs`). No board.conf and no kernel modules in it, so one initramfs serves every device |
+| `initramfs-export` | `boot/initramfs/<commit12>.cpio.gz` and its `.manifest` |
+| `boot` | one device's boot image, packed by boot's `lib/glassine-bootimg-pack` |
+| `boot-export` | `bootimg/<id>.img` and its boot record, `<id>.manifest` |
+
+The packer takes every header value from `targets/<device>/board.conf`, the boot section
+of the target description (GlassineOS/boot's board.conf, verbatim); no reference image
+is read. It adds the board.conf to the ramdisk, refuses a kernel that isn't the release
+its directory names, and fails when the image is larger than `PART_SIZE`. A change to the
+initramfs repacks without touching a kernel layer, and a kernel change reuses the
+initramfs.
+
+    docker buildx build --platform linux/arm64 --target boot-export -o type=local,dest=out .
+    scripts/boot-check out                # header values, parts, id, size, boot record
+
+(`boot-check` also needs the kernel, device-tree and initramfs exports in `out`.)
 
 ## License
 

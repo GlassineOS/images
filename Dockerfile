@@ -44,6 +44,9 @@ ARG LINUX_SDM660=deb74f03e647c3d0a21377168758e1a138042152
 ARG DTB_COMMIT=${LINUX_SDM660}
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
+# GlassineOS/boot: the initramfs and the boot image packer
+ARG BOOT=https://github.com/GlassineOS/boot
+ARG BOOT_COMMIT=b8d647378f928dbd88cb4b4baab248a97a07c9d8
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
@@ -152,6 +155,55 @@ RUN --mount=type=bind,source=stages/device-example,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-example/rootfs/ /
+
+# ---------------------------------------------------------------------------------------
+# The initramfs and the boot image (GlassineOS/boot's docs/kernel-artifacts.md):
+#
+#   boot-src + alpine → initramfs → initramfs-export          boot/initramfs/<commit12>.*
+#   kernel + dtb + initramfs + boot-src → boot → boot-export  bootimg/<id>.img + .manifest
+#
+# The initramfs is GlassineOS/boot's build-initramfs.sh at BOOT_COMMIT, built in arm64
+# Alpine with a locked package set (stages/initramfs). The boot image packs with boot's
+# lib/glassine-bootimg-pack and the device's targets/<device>/board.conf: no reference
+# image. A change to the initramfs repacks without touching a kernel layer.
+
+FROM --platform=linux/amd64 ${KERNEL_BUILD} AS boot-src
+ARG BOOT BOOT_COMMIT
+WORKDIR /src/boot
+RUN git init -q && git fetch -q --depth=1 "$BOOT" "$BOOT_COMMIT" \
+    && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = "$BOOT_COMMIT"
+
+FROM alpine AS initramfs
+ARG LOCK=check
+RUN --mount=type=bind,source=stages/initramfs,target=/run/stage \
+    --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    LOCK=$LOCK sh /run/apk-stage.sh
+# declared after the tools, so a new boot commit doesn't reinstall them
+ARG BOOT_COMMIT
+RUN --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
+    --mount=type=bind,source=scripts/initramfs.sh,target=/run/initramfs.sh \
+    COMMIT=$BOOT_COMMIT sh /run/initramfs.sh
+
+FROM scratch AS initramfs-export
+COPY --from=initramfs /out/ /
+
+# One device's boot image. Fails when the image doesn't fit the board's PART_SIZE, or the
+# kernel isn't the release its directory names (--expect-release).
+FROM --platform=linux/amd64 ${KERNEL_BUILD} AS boot
+ARG DEVICE
+RUN --mount=type=bind,from=kernel,source=/out/modules,target=/run/modules \
+    --mount=type=bind,from=dtb,source=/out/boot/dtb,target=/run/dtb \
+    --mount=type=bind,from=initramfs,source=/out/boot/initramfs,target=/run/initramfs \
+    --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
+    --mount=type=bind,source=targets/${DEVICE},target=/run/target \
+    --mount=type=bind,source=scripts/bootimg.sh,target=/run/bootimg.sh \
+    DEVICE=$DEVICE sh /run/bootimg.sh
+
+FROM scratch AS boot-export
+COPY --from=boot /out/ /
+# ---------------------------------------------------------------------------------------
 
 # Build leftovers out: the machine ID (dbus writes one at install time; each
 # installation makes its own, GlassineOS/hub#19) and apk's log of this build.
