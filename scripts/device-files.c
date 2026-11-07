@@ -118,8 +118,13 @@ static int visit(const char *path, const struct stat *st, int type, struct FTW *
 int main(int argc, char **argv)
 {
     if (argc != 2) { fprintf(stderr, "usage: device-files ROOT\n"); return 2; }
-    root = argv[1];
-    rootlen = strcmp(root, "/") ? strlen(root) : 0;
+    /* without trailing slashes, so that path + rootlen starts with "/" and the
+     * place rules (firmware, /proc, /sys, /dev) match whatever ROOT was given as */
+    char *r = argv[1];
+    size_t len = strlen(r);
+    while (len > 1 && r[len - 1] == '/') r[--len] = 0;
+    root = r;
+    rootlen = strcmp(root, "/") ? len : 0;
     if (nftw(root, visit, 64, FTW_PHYS | FTW_MOUNT) < 0) { perror(root); return 2; }
     return found;
 }

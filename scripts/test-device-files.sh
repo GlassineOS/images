@@ -46,6 +46,8 @@ check "split image names (.mdt, .bNN next to it, .wbf)" "echo \"\$out\" | grep -
 check "ordinary files pass (busybox, ELF32, RIFF, size field only, lone .b02)" "! echo \"\$out\" | grep -q -e busybox -e plain32 -e sound.wav -e notwbf -e lonely"
 check "anything under /lib/firmware and /usr/lib/firmware" "echo \"\$out\" | grep -q \"^/lib/firmware/qcom/a530_pm4.fw: firmware in the base\" && echo \"\$out\" | grep -q \"^/usr/lib/firmware/cam.fw:\""
 check "/proc skipped, symlinks not followed" "! echo \"\$out\" | grep -q -e /proc/ -e /link"
+out2=$(/tmp/device-files $T/) && rc2=0 || rc2=$?
+check "ROOT with a trailing slash: the same findings, firmware included" "[ $rc2 = 1 ] && [ \"\$out2\" = \"\$out\" ] && echo \"\$out2\" | grep -q \"^/lib/firmware/qcom/a530_pm4.fw:\""
 rm -rf $T/usr/lib/a/panel.bin $T/usr/lib/a/modem $T/fw $T/usr/lib/a/link $T/lib/firmware $T/usr/lib/firmware
 check "a clean tree: exit 0" "/tmp/device-files $T >/dev/null"
 rm -rf $T
