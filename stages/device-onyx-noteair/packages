@@ -1,1 +1,3 @@
-# Onyx Boox Note Air: nothing beyond the e-ink stage yet. Its configuration is in rootfs/.
+# Onyx Boox Note Air: its services and scripts (the kernel is not in the base chain).
+# Its configuration files are in rootfs/.
+device-onyx-noteair

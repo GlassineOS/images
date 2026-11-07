@@ -1,0 +1,10 @@
+// Flatpak system installs and updates from an app store (through
+// flatpak-system-helper): without logind there is no "active" session for
+// polkit's default rule, so administrators (group wheel) get the Flatpak
+// actions without a prompt. Overriding parental controls still asks.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.Flatpak.") == 0 &&
+        action.id != "org.freedesktop.Flatpak.override-parental-controls" && subject.isInGroup("wheel"))
+        return polkit.Result.YES;
+    return polkit.Result.NOT_HANDLED;
+});

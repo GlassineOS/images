@@ -33,6 +33,7 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
     --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
+COPY stages/glassine-common/rootfs/ /
 
 # Any e-ink device: the panel daemons and the e-ink session, started at boot.
 FROM glassine-common AS eink
