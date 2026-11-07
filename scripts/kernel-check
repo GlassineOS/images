@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Check exported kernel artifacts against GlassineOS/boot's docs/kernel-artifacts.md and
+the pins in the Dockerfile. Runs on the build computer, after an export:
+
+    docker buildx build --platform linux/arm64 --target kernel-export -o type=local,dest=out .
+    docker buildx build --platform linux/arm64 --target dtb-export -o type=local,dest=out .
+    scripts/kernel-check out                 # the artifacts in out/
+    scripts/kernel-check --compare out1 out2 # two exports: the same tree, byte for byte
+    scripts/kernel-check --arg LINUX_SDM660=<commit> out   # built with that --build-arg
+
+Checks the release name (format, flavor, commit, cfg6 recomputed from the configuration
+the kernel carries and the builder digest), that Image.gz is that release and was gzipped
+without a name or time, kernel.manifest (every key, every checksum recomputed), the
+modules (vermagic, no signatures, no build or source links), firmware/ against the
+pinned checksums, and each device tree and its manifest.
+"""
+import gzip, hashlib, os, re, stat, sys, zlib
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+KM_KEYS = ['format', 'release', 'source', 'config_sha256', 'image_sha256', 'modules_sha256',
+           'firmware', 'provides', 'features', 'dtbs']
+DTB_KEYS = ['format', 'device', 'sha256', 'source']
+errors = []
+
+
+def err(msg):
+    errors.append(msg)
+    print(f'FAIL: {msg}')
+
+
+def ok(msg):
+    print(f'ok:   {msg}')
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def read(path):
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def record(path, keys):
+    """A key=value record; the first line must be format=1."""
+    lines = read(path).decode().splitlines()
+    if not lines or lines[0] != 'format=1':
+        err(f'{path}: first line is not format=1')
+    rec = {}
+    for line in lines:
+        k, sep, v = line.partition('=')
+        if not sep:
+            err(f'{path}: not key=value: {line!r}')
+        elif k in rec:
+            err(f'{path}: key {k} twice')
+        rec[k] = v
+    missing = [k for k in keys if k not in rec]
+    if missing:
+        err(f'{path}: missing keys {missing}')
+    return rec
+
+
+def pins(dockerfile):
+    """ARG defaults and ADD --checksum lines from the Dockerfile."""
+    text = read(dockerfile).decode().replace('\\\n', ' ')
+    args = dict(re.findall(r'^ARG (\w+)=(\S+)', text, re.M))
+    for k, v in list(args.items()):     # one level of ${X} in a default
+        args[k] = re.sub(r'\$\{(\w+)\}', lambda m: args.get(m.group(1), m.group(0)), v)
+    fw = {}
+    for csum, dest in re.findall(r'^ADD --checksum=sha256:([0-9a-f]{64})\s+\$\{LINUX_FIRMWARE\}\S*\s+(\S+)', text, re.M):
+        fw[dest.lstrip('/')] = csum
+    return args, fw
+
+
+def tree_entries(root):
+    """(relative path, type, mode, contents sha) for every entry under root."""
+    out = []
+    for dirpath, dirs, files in os.walk(root):
+        dirs.sort()
+        for name in sorted(dirs + files):
+            p = os.path.join(dirpath, name)
+            st = os.lstat(p)
+            rel = os.path.relpath(p, root)
+            if stat.S_ISLNK(st.st_mode):
+                out.append((rel, 'link', 0, os.readlink(p)))
+            elif stat.S_ISDIR(st.st_mode):
+                out.append((rel, 'dir', stat.S_IMODE(st.st_mode), ''))
+            else:
+                out.append((rel, 'file', stat.S_IMODE(st.st_mode), sha(read(p))))
+    return sorted(out)
+
+
+def compare(a, b):
+    ea, eb = tree_entries(a), tree_entries(b)
+    if ea == eb:
+        ok(f'{a} and {b}: the same {len(ea)} entries (paths, types, modes, contents)')
+        return
+    da, db = set(ea), set(eb)
+    for e in sorted(da - db)[:20]:
+        err(f'only in {a} or different there: {e}')
+    for e in sorted(db - da)[:20]:
+        err(f'only in {b} or different there: {e}')
+
+
+def gzip_is_stable(data, name):
+    # RFC 1952: FLG at byte 3 (FNAME = 0x08), MTIME at bytes 4-7
+    if data[:2] != b'\x1f\x8b':
+        err(f'{name}: not gzip')
+    elif data[3] & 0x08 or data[4:8] != b'\0\0\0\0':
+        err(f'{name}: gzip header carries a name or a time (not gzip -n)')
+    else:
+        ok(f'{name}: gzip without name or time')
+
+
+def ikconfig(image):
+    """The .config the kernel carries (CONFIG_IKCONFIG), or None."""
+    i = image.find(b'IKCFG_ST')
+    if i < 0:
+        return None
+    return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(image[i + 8:])
+
+
+def check_kernel(out, args, fw_pins):
+    mods = os.path.join(out, 'modules')
+    rels = sorted(os.listdir(mods)) if os.path.isdir(mods) else []
+    if len(rels) != 1:
+        err(f'{mods}: expected one release, found {rels}')
+        return None
+    rel = rels[0]
+    d = os.path.join(mods, rel)
+    commit = args['LINUX_SDM660']
+    m = re.fullmatch(r'(\d+\.\d+\.\d+(?:-rc\d+)?)-([a-z0-9]+)\.([0-9a-f]{6})-g([0-9a-f]{12})', rel)
+    if not m:
+        err(f'release {rel}: not <KERNELVERSION>-<flavor>.<cfg6>-g<commit12>')
+        return None
+    kv, flavor, cfg6, c12 = m.groups()
+    (ok if c12 == commit[:12] else err)(f'release {rel}: commit12 {c12} vs pin {commit[:12]}')
+    (ok if flavor == args.get('KERNEL') else err)(f'release {rel}: flavor {flavor}')
+
+    km = record(os.path.join(d, 'kernel.manifest'), KM_KEYS)
+    unknown = sorted(set(km) - set(KM_KEYS))
+    if unknown:
+        print(f'note: kernel.manifest keys the contract doesn\'t name: {unknown}')
+    (ok if km.get('release') == rel else err)(f'kernel.manifest release={km.get("release")}')
+    want_src = f'{args["LINUX"]}@{commit}'
+    (ok if km.get('source') == want_src else err)(f'kernel.manifest source={km.get("source")}')
+
+    gz = read(os.path.join(d, 'Image.gz'))
+    gzip_is_stable(gz, 'Image.gz')
+    (ok if km.get('image_sha256') == sha(gz) else err)('kernel.manifest image_sha256 matches Image.gz')
+    image = gzip.decompress(gz)
+    (ok if b'Linux version ' + rel.encode() + b' ' in image else err)(
+        f'Image.gz says "Linux version {rel} " (what --expect-release checks)')
+    if image[56:60] != b'ARM\x64':
+        err('Image.gz: no arm64 Image header magic')
+    cfg = ikconfig(image)
+    if cfg is None:
+        err('Image.gz: no embedded configuration (CONFIG_IKCONFIG), cfg6 not checked')
+    else:
+        (ok if km.get('config_sha256') == sha(cfg) else err)(
+            'kernel.manifest config_sha256 matches the configuration in the kernel')
+        builder = args['KERNEL_BUILD'].split('@', 1)[1]
+        want6 = sha(cfg + builder.encode() + b'\n')[:6]
+        (ok if want6 == cfg6 else err)(f'cfg6 {cfg6} = sha256(.config + builder digest)[:6] {want6}')
+        lines = set(cfg.decode().splitlines())
+        for need in ['CONFIG_LOCALVERSION=""', '# CONFIG_LOCALVERSION_AUTO is not set']:
+            (ok if need in lines else err)(f'configuration has {need}')
+        for need in ['CONFIG_MODULE_SIG_KEY=""', '# CONFIG_MODULE_SIG_ALL is not set']:
+            (ok if need in lines else err)(f'no build-time signing key: {need}')
+        (err if 'CONFIG_MODULE_SIG_FORCE=y' in lines else ok)('signatures not enforced (CONFIG_MODULE_SIG_FORCE)')
+
+    # the modules tree
+    for link in ('build', 'source'):
+        if os.path.lexists(os.path.join(d, link)):
+            err(f'modules/{rel}/{link} exists')
+    for need in ('modules.dep', 'modules.alias', 'modules.order', 'modules.builtin'):
+        if not os.path.isfile(os.path.join(d, need)):
+            err(f'modules/{rel}/{need} missing (depmod at build)')
+    lines, kos, bad_vm, signed = [], 0, [], []
+    for dirpath, dirs, files in os.walk(d):
+        dirs[:] = sorted(x for x in dirs if os.path.join(dirpath, x) != os.path.join(d, 'firmware'))
+        for f in files:
+            p = os.path.join(dirpath, f)
+            r = os.path.relpath(p, d)
+            if os.path.islink(p) or not os.path.isfile(p):
+                err(f'modules/{rel}/{r}: not a regular file')
+                continue
+            data = read(p)
+            if r not in ('Image.gz', 'kernel.manifest'):
+                lines.append(f'{r} {sha(data)}\n')
+            if f.endswith('.ko'):
+                kos += 1
+                if b'vermagic=' + rel.encode() + b' ' not in data:
+                    bad_vm.append(r)
+                if data.endswith(b'~Module signature appended~\n'):
+                    signed.append(r)
+    ms = sha(''.join(sorted(lines, key=lambda s: s.split(' ')[0].encode())).encode())
+    (ok if km.get('modules_sha256') == ms else err)(f'kernel.manifest modules_sha256 matches {kos} modules + depmod files')
+    (err if bad_vm else ok)(f'vermagic {rel} in every module' + (f' (not: {bad_vm[:5]})' if bad_vm else ''))
+    (err if signed else ok)('no module carries a signature' + (f' ({signed[:5]})' if signed else ''))
+
+    # firmware/: exactly the pinned files, and listed in the manifest
+    fwdir = os.path.join(d, 'firmware')
+    have = {}
+    for dirpath, _, files in os.walk(fwdir):
+        for f in files:
+            p = os.path.join(dirpath, f)
+            have[os.path.relpath(p, fwdir)] = sha(read(p))
+    (ok if set(have) == set(fw_pins) else err)(f'firmware/ holds the pinned files {sorted(fw_pins)}')
+    for n, s in have.items():
+        if fw_pins.get(n) and fw_pins[n] != s:
+            err(f'firmware/{n}: sha256 {s} is not the pinned {fw_pins[n]}')
+    want_fw = ' '.join(f'{n}@{have[n][:16]}' for n in sorted(have, key=str.encode))
+    (ok if km.get('firmware') == want_fw else err)(f'kernel.manifest firmware={km.get("firmware")}')
+
+    for k in ('provides', 'features'):
+        if not km.get(k):
+            print(f'note: kernel.manifest {k} is empty (GlassineOS/boot has no conf/kernel-features yet)')
+    dtbs = km.get('dtbs', '').split()
+    for e in dtbs:
+        if not re.fullmatch(r'[a-z0-9-]+@[0-9a-f]{16}', e):
+            err(f'kernel.manifest dtbs: {e!r} is not <device>@<sha256-16>')
+    (ok if dtbs else err)(f'kernel.manifest dtbs={" ".join(dtbs)}')
+
+    # every file 0644, every directory 0755
+    for rel_p, typ, mode, _ in tree_entries(d):
+        if (typ == 'file' and mode != 0o644) or (typ == 'dir' and mode != 0o755):
+            err(f'modules/{rel}/{rel_p}: mode {oct(mode)}')
+    return km
+
+
+def check_dtbs(out, args, km):
+    dd = os.path.join(out, 'boot', 'dtb')
+    names = sorted(os.listdir(dd)) if os.path.isdir(dd) else []
+    dtbs = [n for n in names if n.endswith('.dtb')]
+    if not dtbs:
+        print(f'note: no device trees in {dd}')
+        return
+    for n in dtbs:
+        ident = n[:-4]
+        m = re.fullmatch(r'([a-z0-9-]+)@([0-9a-f]{16})', ident)
+        if not m:
+            err(f'{n}: not <device>@<sha256-16>.dtb')
+            continue
+        data = read(os.path.join(dd, n))
+        (ok if data[:4] == b'\xd0\x0d\xfe\xed' else err)(f'{n}: device tree magic')
+        (ok if sha(data)[:16] == m.group(2) else err)(f'{n}: name is its sha256-16')
+        rec = record(os.path.join(dd, ident + '.manifest'), DTB_KEYS)
+        (ok if rec.get('device') == m.group(1) else err)(f'{ident}.manifest device={rec.get("device")}')
+        (ok if rec.get('sha256') == sha(data) else err)(f'{ident}.manifest sha256 matches')
+        want_src = f'{args["LINUX"]}@{args["DTB_COMMIT"]}'
+        (ok if rec.get('source') == want_src else err)(f'{ident}.manifest source={rec.get("source")}')
+        if km is not None and args['DTB_COMMIT'] == args['LINUX_SDM660']:
+            (ok if ident in km.get('dtbs', '').split() else err)(
+                f'{ident} is in kernel.manifest dtbs (built at the same commit)')
+    for n in names:
+        if not n.endswith(('.dtb', '.manifest')):
+            err(f'{dd}/{n}: unexpected file')
+
+
+def main(argv):
+    over = {}
+    while len(argv) >= 2 and argv[0] == '--arg':
+        k, _, v = argv[1].partition('=')
+        over[k] = v
+        argv = argv[2:]
+    if len(argv) == 3 and argv[0] == '--compare':
+        compare(argv[1], argv[2])
+    elif len(argv) == 1:
+        args, fw = pins(os.path.join(HERE, '..', 'Dockerfile'))
+        if 'LINUX_SDM660' in over and 'DTB_COMMIT' not in over:
+            over['DTB_COMMIT'] = over['LINUX_SDM660']
+        args.update(over)
+        km = check_kernel(argv[0], args, fw) if os.path.isdir(os.path.join(argv[0], 'modules')) else None
+        check_dtbs(argv[0], args, km)
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    print(f'kernel-check: {len(errors)} failure(s)')
+    return 1 if errors else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
