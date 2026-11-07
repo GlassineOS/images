@@ -22,8 +22,14 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
-| `validation` | fails the build on what a base must not carry; adds nothing |
+| `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing. It reads the final tree, after `finish`, not each stage: a file added in one stage and removed in a later one isn't seen |
 | `base-export` | the tree a base is made from |
+
+`scripts/device-files.c` knows a waveform by header offsets that no file in this
+repository confirms: the mode and temperature counts agree with what the panel engine
+reads, the length at offset 4 rests on one real file checked by hand, and the test
+writes its waveform with the same offsets the check reads. Its header comment has the
+details.
 
 A stage lives in `stages/<stage>/`:
 
