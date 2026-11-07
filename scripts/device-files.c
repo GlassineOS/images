@@ -20,8 +20,11 @@
  * device's comes from the device seed. That also covers unsigned blobs (GPU
  * microcode, camera firmware) that no content marks as a device's.
  * It stays on ROOT's file system (in a build step: not the kernel's /proc, /sys and
- * /dev, nor bind mounts), skips anything under ROOT/proc, /sys and /dev too, and
- * doesn't follow symlinks.
+ * /dev, nor bind mounts), and skips anything under ROOT/proc, /sys and /dev too.
+ * It doesn't follow symlinks. A symlink counts by place and by name, as a file
+ * would (one under /lib/firmware, or named *.wbf, *.mdt, *.mbn or a *.bNN next to an
+ * .mdt, is reported, whether or not its target is in the tree), but not by
+ * contents: what it points to is checked where it lies, if that is in the tree.
  * What it can't read (a directory it can't list, an entry it can't stat, a file it
  * can't open or whose header it can't read whole) is an error, printed to stderr:
  * the exit status is then 2, whatever was found, never "none found". */
@@ -39,9 +42,9 @@ static const char *root;
 static size_t rootlen;
 static int found, err;
 
-static void report(const char *path, const char *why)
+static void report(const char *path, const char *why, int link)
 {
-    printf("%s: %s\n", path + rootlen, why);
+    printf("%s: %s%s\n", path + rootlen, why, link ? " (a symlink)" : "");
     found = 1;
 }
 
@@ -107,16 +110,17 @@ static int visit(const char *path, const struct stat *st, int type, struct FTW *
     if (!strncmp(rel, "/proc/", 6) || !strncmp(rel, "/sys/", 5) || !strncmp(rel, "/dev/", 5)) return 0;
     if (type == FTW_DNR) { unread(path, "can't read the directory"); return 0; }
     if (type == FTW_NS) { unread(path, "can't stat it"); return 0; }
-    if (type != FTW_F || !S_ISREG(st->st_mode)) return 0;
+    int link = type == FTW_SL;
+    if (!link && (type != FTW_F || !S_ISREG(st->st_mode))) return 0;
     if (!strncmp(rel, "/lib/firmware/", 14) || !strncmp(rel, "/usr/lib/firmware/", 18)) {
-        report(path, "firmware in the base (it goes with the kernel or comes from the device seed)");
+        report(path, "firmware in the base (it goes with the kernel or comes from the device seed)", link);
         return 0;
     }
     const char *base = path + ftw->base;
-    if (has_suffix(base, ".wbf")) { report(path, "a waveform file name (.wbf)"); return 0; }
-    if (has_suffix(base, ".mdt") || has_suffix(base, ".mbn")) { report(path, "a firmware image name (.mdt/.mbn)"); return 0; }
-    if (is_split_segment(path)) { report(path, "a segment of a split firmware image (next to its .mdt)"); return 0; }
-    if (st->st_size < 52) return 0;
+    if (has_suffix(base, ".wbf")) { report(path, "a waveform file name (.wbf)", link); return 0; }
+    if (has_suffix(base, ".mdt") || has_suffix(base, ".mbn")) { report(path, "a firmware image name (.mdt/.mbn)", link); return 0; }
+    if (is_split_segment(path)) { report(path, "a segment of a split firmware image (next to its .mdt)", link); return 0; }
+    if (link || st->st_size < 52) return 0;
     FILE *f = fopen(path, "rb");
     if (!f) { unread(path, strerror(errno)); return 0; }
     unsigned char h[64];
@@ -126,8 +130,8 @@ static int visit(const char *path, const struct stat *st, int type, struct FTW *
         fclose(f);
         return 0;
     }
-    if (is_wbf(h, n, st->st_size)) report(path, "an E Ink waveform (WBF header)");
-    else if (is_qcom_signed(f, h, n)) report(path, "a signed Qualcomm image (ELF hash segment)");
+    if (is_wbf(h, n, st->st_size)) report(path, "an E Ink waveform (WBF header)", 0);
+    else if (is_qcom_signed(f, h, n)) report(path, "a signed Qualcomm image (ELF hash segment)", 0);
     fclose(f);
     return 0;
 }

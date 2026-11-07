@@ -36,7 +36,9 @@ wbf(t + "/proc/x/skipped", 4096)                      # /proc is skipped
 EOF
 cp /bin/busybox $T/usr/lib/a/
 mkdir -p $T/lib/firmware/qcom $T/usr/lib/firmware; echo x > $T/lib/firmware/qcom/a530_pm4.fw; echo x > $T/usr/lib/firmware/cam.fw
-ln -s /tmp/t/usr/lib/a/panel.bin $T/usr/lib/a/link
+ln -s /tmp/t/usr/lib/a/panel.bin $T/usr/lib/a/link              # a plain name: not followed
+ln -s /nonexistent/blob $T/lib/firmware/linkfw                   # by place, dangling
+ln -s /somewhere/else/x.mbn $T/usr/lib/a/link.mbn                # by name, dangling
 out=$(/tmp/device-files $T) && rc=0 || rc=$?
 echo "$out"
 check "found: exit 1" "[ $rc = 1 ]"
@@ -45,7 +47,8 @@ check "a signed image by its hash segment" "echo \"\$out\" | grep -q \"^/usr/lib
 check "split image names (.mdt, .bNN next to it, .wbf)" "echo \"\$out\" | grep -q \"^/fw/adsp.mdt:\" && echo \"\$out\" | grep -q \"^/fw/adsp.b02:\" && echo \"\$out\" | grep -q \"^/fw/eink.wbf:\""
 check "ordinary files pass (busybox, ELF32, RIFF, size field only, lone .b02)" "! echo \"\$out\" | grep -q -e busybox -e plain32 -e sound.wav -e notwbf -e lonely"
 check "anything under /lib/firmware and /usr/lib/firmware" "echo \"\$out\" | grep -q \"^/lib/firmware/qcom/a530_pm4.fw: firmware in the base\" && echo \"\$out\" | grep -q \"^/usr/lib/firmware/cam.fw:\""
-check "/proc skipped, symlinks not followed" "! echo \"\$out\" | grep -q -e /proc/ -e /link"
+check "/proc skipped, symlinks not followed" "! echo \"\$out\" | grep -q -e /proc/ -e /link:"
+check "symlinks count by place and name (under /lib/firmware, *.mbn), dangling or not" "echo \"\$out\" | grep -qx \"/lib/firmware/linkfw: firmware in the base (it goes with the kernel or comes from the device seed) (a symlink)\" && echo \"\$out\" | grep -qx \"/usr/lib/a/link.mbn: a firmware image name (.mdt/.mbn) (a symlink)\""
 out2=$(/tmp/device-files $T/) && rc2=0 || rc2=$?
 check "ROOT with a trailing slash: the same findings, firmware included" "[ $rc2 = 1 ] && [ \"\$out2\" = \"\$out\" ] && echo \"\$out2\" | grep -q \"^/lib/firmware/qcom/a530_pm4.fw:\""
 # a waveform in a file and in a directory that a non-root user cannot read: an error
@@ -60,7 +63,7 @@ else
 	echo "skipped: unreadable entries (needs root in the container to run the check as nobody)"
 fi
 rm -rf $U /tmp/uerr
-rm -rf $T/usr/lib/a/panel.bin $T/usr/lib/a/modem $T/fw $T/usr/lib/a/link $T/lib/firmware $T/usr/lib/firmware
+rm -rf $T/usr/lib/a/panel.bin $T/usr/lib/a/modem $T/fw $T/usr/lib/a/link $T/usr/lib/a/link.mbn $T/lib/firmware $T/usr/lib/firmware
 check "a clean tree: exit 0" "/tmp/device-files $T >/dev/null"
 rm -rf $T
 check "the container itself is clean (a real Alpine tree)" "/tmp/device-files / >/dev/null"
