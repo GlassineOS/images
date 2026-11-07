@@ -100,6 +100,7 @@ build() {
 	cp /cache/obj/arch/arm64/boot/Image.gz "$o/Image.gz"
 	cp /cache/obj/.config /meta/config
 	echo "$rel" > /meta/release
+	rm -rf /tmp/mod /tmp/want
 	settle /out
 	echo "kernel.sh: $rel: $(find "$o" -name '*.ko' | wc -l) modules, Image.gz $(stat -c %s "$o/Image.gz") bytes"
 }
@@ -143,6 +144,7 @@ manifest() {
 	features=
 	dtbs=${dtbs# }
 	EOF
+	rm -rf /tmp/dtb-obj /tmp/dtb
 	settle /out
 	cat "$o/kernel.manifest"
 }
@@ -157,6 +159,7 @@ dtb() {
 	cp /tmp/dtb "/out/boot/dtb/$id.dtb"
 	printf 'format=1\ndevice=%s\nsha256=%s\nsource=%s@%s\n' "$DEVICE" "$(sha /tmp/dtb)" "$REPO" "$COMMIT" \
 		> "/out/boot/dtb/$id.manifest"
+	rm -rf /tmp/dtb-obj /tmp/dtb
 	settle /out
 	echo "kernel.sh: $id.dtb from $(c12 "$COMMIT")"
 }
