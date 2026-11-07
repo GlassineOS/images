@@ -167,10 +167,13 @@ COPY stages/device-example/rootfs/ /
 # lib/glassine-bootimg-pack and the device's targets/<device>/board.conf: no reference
 # image. A change to the initramfs repacks without touching a kernel layer.
 
-FROM --platform=linux/amd64 ${KERNEL_BUILD} AS boot-src
+# GlassineOS/boot at BOOT_COMMIT, fetched on the build computer's own platform (no
+# emulation on either kind of runner); git here is a fetch tool, not part of any output.
+FROM --platform=$BUILDPLATFORM ${ALPINE} AS boot-src
 ARG BOOT BOOT_COMMIT
 WORKDIR /src/boot
-RUN git init -q && git fetch -q --depth=1 "$BOOT" "$BOOT_COMMIT" \
+RUN apk add -q --no-cache git \
+    && git init -q && git fetch -q --depth=1 "$BOOT" "$BOOT_COMMIT" \
     && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
     && test "$(git rev-parse HEAD)" = "$BOOT_COMMIT"
 
