@@ -1,5 +1,6 @@
-# Builds the kernel and device-tree stages on an amd64 runner (the kernel-build image is
-# amd64 only), checks the exports with scripts/kernel-check, and on request checks that
+# Builds the kernel, device-tree, initramfs and boot image stages on an amd64 runner (the
+# kernel-build image is amd64 only), checks the exports with scripts/kernel-check and
+# scripts/boot-check, and on request checks that
 # a second build from scratch gives the same bytes. Runs when a change touches the kernel
 # side, and by hand. Nothing is published (GHCR comes later, GlassineOS/hub#8 step 8).
 # The layer cache is GitHub's, which keeps no cache mounts: a changed kernel input is a
@@ -10,16 +11,30 @@ on:
     paths:
       - Dockerfile
       - stages/kernel-*/**
+      - stages/initramfs/**
+      - stages/alpine/**
+      - keys/**
+      - scripts/apk-stage.sh
       - targets/**
       - scripts/kernel*
+      - scripts/initramfs.sh
+      - scripts/bootimg.sh
+      - scripts/boot-check
       - .github/workflows/kernel.yml
   push:
     branches: [main]
     paths:
       - Dockerfile
       - stages/kernel-*/**
+      - stages/initramfs/**
+      - stages/alpine/**
+      - keys/**
+      - scripts/apk-stage.sh
       - targets/**
       - scripts/kernel*
+      - scripts/initramfs.sh
+      - scripts/bootimg.sh
+      - scripts/boot-check
       - .github/workflows/kernel.yml
   workflow_dispatch:
     inputs:
@@ -36,18 +51,22 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      # the initramfs stage runs arm64 Alpine
+      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - name: Build and check
         run: |
-          for t in kernel-export dtb-export; do
+          for t in kernel-export dtb-export initramfs-export boot-export; do
             echo "::group::$t"
             docker buildx build --progress=plain --platform linux/arm64 --target $t \
               --cache-from type=gha,scope=kernel --cache-to type=gha,mode=max,scope=kernel \
               -o type=local,dest=/tmp/out.$t .
             echo "::endgroup::"
           done
-          mkdir -p /tmp/out && cp -a /tmp/out.kernel-export/. /tmp/out.dtb-export/. /tmp/out/
+          mkdir -p /tmp/out
+          for t in kernel-export dtb-export initramfs-export boot-export; do cp -a /tmp/out.$t/. /tmp/out/; done
           scripts/kernel-check /tmp/out
+          scripts/boot-check /tmp/out
       - name: Reproduce from scratch
         if: inputs.reproduce
         run: scripts/kernel-repro.sh /tmp/repro

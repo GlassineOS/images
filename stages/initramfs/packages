@@ -1,0 +1,7 @@
+# What GlassineOS/boot's build-initramfs.sh copies into the initramfs
+busybox-static
+busybox-extras
+e2fsprogs
+e2fsprogs-extra
+cpio
+gzip

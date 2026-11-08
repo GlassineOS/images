@@ -22,3 +22,8 @@ for d in $devices; do
 		echo "lock.sh: $s: $(wc -l < "stages/$s/lock") packages" >&2
 	done
 done
+# the initramfs's tools: on alpine, apart from the device chain
+b --no-cache-filter initramfs --target initramfs -o "type=tar,dest=$tmp/initramfs.tar"
+tar -xOf "$tmp/initramfs.tar" lib/apk/db/installed \
+	| awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' | LC_ALL=C sort > stages/initramfs/lock
+echo "lock.sh: initramfs: $(wc -l < stages/initramfs/lock) packages" >&2
