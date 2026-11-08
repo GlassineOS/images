@@ -45,8 +45,8 @@ inside a check is that check's failure):
     (record, content manifest, streams matching their sha256)
   - emulation: every platform the build needs (linux/<arch> and each constant
     FROM --platform= in the Dockerfile) that isn't the host's is listed by docker buildx
-  - a privileged container can attach a loop device to a file on a tmpfs (what
-    materialization does); it runs MATERIALIZE_IMAGE, so that image is pullable too
+  - a privileged container can attach a loop device to a file on a tmpfs, and the
+    kernel has btrfs loaded (what materialization does); it runs MATERIALIZE_IMAGE, so that image is pullable too
   - free space: 2 GiB in the artifacts folder (a build stages the tar export, ~0.5 GiB,
     and the kernel exports, ~0.1 GiB, next to the streams it writes: the full stream
     ~0.2 GiB, the modules stream ~25 MiB), 10 GiB for the docker root (the kernel's
@@ -199,6 +199,7 @@ truncate -s 8M /probe/f
 l=$(losetup -f) || { echo "probe: no free loop device"; exit 3; }
 losetup "$l" /probe/f || { echo "probe: losetup $l failed"; exit 3; }
 losetup -d "$l"
+grep -qw btrfs /proc/filesystems || { echo "probe: the kernel has no btrfs loaded (sudo modprobe btrfs)"; exit 3; }
 echo "probe: df $(df -Pk / | tail -n 1 | awk '{print $2, $4}')"
 '''
 

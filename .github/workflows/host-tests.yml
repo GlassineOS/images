@@ -11,6 +11,7 @@ on:
       - scripts/materialize-container.sh
       - scripts/glassine_pins.py
       - scripts/tree-manifest.py
+      - scripts/base_tree.py
       - scripts/test-build.sh
       - scripts/test-materialize.sh
       - Dockerfile
@@ -24,6 +25,7 @@ on:
       - scripts/materialize-container.sh
       - scripts/glassine_pins.py
       - scripts/tree-manifest.py
+      - scripts/base_tree.py
       - scripts/test-build.sh
       - scripts/test-materialize.sh
       - Dockerfile
@@ -47,4 +49,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
+      # materialization mounts btrfs on loop devices; the runner doesn't load the module
+      - run: sudo modprobe btrfs
       - run: sh scripts/test-materialize.sh
