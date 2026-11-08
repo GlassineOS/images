@@ -12,6 +12,9 @@ on:
       - Dockerfile
       - stages/kernel-*/**
       - stages/initramfs/**
+      - stages/alpine/**
+      - keys/**
+      - scripts/apk-stage.sh
       - targets/**
       - scripts/kernel*
       - scripts/initramfs.sh
@@ -24,6 +27,9 @@ on:
       - Dockerfile
       - stages/kernel-*/**
       - stages/initramfs/**
+      - stages/alpine/**
+      - keys/**
+      - scripts/apk-stage.sh
       - targets/**
       - scripts/kernel*
       - scripts/initramfs.sh

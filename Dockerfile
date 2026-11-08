@@ -46,7 +46,7 @@ ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
-ARG BOOT_COMMIT=aa3ded5747e79ad8e769a3ba7b2a85075bacfb4b
+ARG BOOT_COMMIT=2e93c7bd6b324e1f042167760929059df821ce40
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history

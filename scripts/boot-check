@@ -27,6 +27,18 @@ def check(cond, msg):
         errors.append(msg)
 
 
+def newc(entries):
+    """The packer's board.conf archive: newc, owner 0:0, mtime 0, 4-byte aligned, TRAILER!!!."""
+    out = bytearray()
+    for ino, (name, mode, data) in enumerate(entries + [('TRAILER!!!', 0, b'')], 1):
+        nb = name.encode() + b'\0'
+        fields = (ino, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(nb), 0)
+        out += b'070701' + b''.join(b'%08X' % f for f in fields) + nb
+        out += b'\0' * (-len(out) % 4) + data
+        out += b'\0' * (-len(out) % 4)
+    return bytes(out)
+
+
 def read(p):
     with open(p, 'rb') as f:
         return f.read()
@@ -92,7 +104,9 @@ def main(out, device):
     check(kernel == image_gz + dtb, f'kernel = {rel}/Image.gz + {rec.get("dtb")}.dtb')
     pad = initramfs + b'\0' * (-len(initramfs) % 4)
     check(ramdisk.startswith(pad), f'ramdisk starts with {rec.get("initramfs")}.cpio.gz')
-    check(read(board_path) in ramdisk[len(pad):], 'ramdisk carries board.conf after the initramfs')
+    check(ramdisk[len(pad):] == newc([('etc', 0o40755, b''), ('etc/glassine-boot', 0o40755, b''),
+                                      ('etc/glassine-boot/board.conf', 0o100644, read(board_path))]),
+          'ramdisk ends with exactly the board.conf archive (etc/glassine-boot/board.conf)')
     ident = hashlib.sha256(kernel + b'\0' + ramdisk + b'\0' + board['CMDLINE'].encode()).hexdigest()[:16]
     check(ident == rec.get('id') and os.path.basename(img_path) == ident + '.img', f'id {ident} (glassine.img=)')
     check(len(img) == ps + up(ksz) + up(rsz), 'image length = header + padded kernel + padded ramdisk')
