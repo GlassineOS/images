@@ -102,10 +102,10 @@ jobs:
             scripts/registry reproduce "$t" "/tmp/out/$t" ${{ inputs.reproduce && '--all' || '' }}
           done
       - name: Keep the exports for the publish job
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: always()
         # a tar keeps the modes, which the artifact store would drop
         run: tar -C /tmp -cf /tmp/exports.tar out
-      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: exports
