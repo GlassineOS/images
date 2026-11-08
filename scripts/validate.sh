@@ -28,6 +28,11 @@ a=$(/sbin/apk audit --system 2>&1) || no "apk audit failed: $a"
 rc=0; a=$(/sbin/apk add --simulate --no-network --no-progress 2>&1) || rc=$?
 o=$(echo "$a" | grep -v -e '^WARNING: opening from cache ' -e '^OK: ' || :)
 [ $rc = 0 ] && [ -z "$o" ] || no "installing the world again would change the tree (exit $rc): $(echo "$o" | tr '\n' ' ')"
+# the board keys the system reads: never a command line with the developer mode (boot's
+# rule for a board's constant command line; a developer boot image adds it for one build)
+b=/etc/glassine-bootimg/board.conf
+[ ! -e "$b" ] || ! grep '^[[:space:]]*CMDLINE=' "$b" | grep -q 'glassine\.devmode' \
+	|| no "$b: CMDLINE carries glassine.devmode"
 # kernel modules and firmware updates come with the kernel, outside the base
 for d in /lib/modules /lib/firmware/updates; do
 	[ -z "$(ls -A "$d" 2>/dev/null)" ] || no "$d isn't empty"
