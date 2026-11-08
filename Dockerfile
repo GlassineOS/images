@@ -64,7 +64,9 @@ RUN git init -q && git fetch -q --depth=1 "$LINUX" "$LINUX_SDM660" \
 
 # Firmware the sdm660 kernel depends on, from linux-firmware (redistributable; never
 # vendor files): the Adreno 5xx CP microcode, whose PFP carries the marker the driver
-# needs for its multiple rings and preemption.
+# needs for its multiple rings and preemption, and the WCN3990's ath10k firmware file
+# (firmware-5.bin: the features and interface versions ath10k uses; the WLAN firmware
+# itself runs on the modem and comes from the device).
 FROM scratch AS firmware-sdm660
 ARG LINUX_FIRMWARE
 ADD --checksum=sha256:7ab3cd917e1f875f6a8387f8bc5efcf11ce9c88542ef2fc3cbda7d4b7b163286 \
@@ -73,6 +75,10 @@ ADD --checksum=sha256:6419f35956ec7307af83723fedfba752520bacd8389eda0d0120e185e4
     ${LINUX_FIRMWARE}/qcom/a530_pm4.fw /qcom/a530_pm4.fw
 ADD --checksum=sha256:be904cd28cb292b80cdb6cf412ab0d9159d431671e987ad433c1f62e0988a9bc \
     ${LINUX_FIRMWARE}/LICENSE.qcom /LICENSE.qcom
+ADD --checksum=sha256:fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127 \
+    ${LINUX_FIRMWARE}/ath10k/WCN3990/hw1.0/firmware-5.bin /ath10k/WCN3990/hw1.0/firmware-5.bin
+ADD --checksum=sha256:337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f \
+    ${LINUX_FIRMWARE}/LICENSE.QualcommAtheros_ath10k /LICENSE.QualcommAtheros_ath10k
 
 # The kernel for SoCs of the sdm660 family: compiled once for every device whose target
 # names kernel=sdm660, with the firmware it needs. It names no device tree: those are
