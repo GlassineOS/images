@@ -50,7 +50,7 @@ ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=2e93c7bd6b324e1f042167760929059df821ce40
+ARG BOOT_COMMIT=9b0078a16986c4766eaab5329b9bf90159a4d698
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history

@@ -32,10 +32,8 @@
 #   scripts/test-boot-qemu.sh [--no-negative] [--negative-only]
 #   exit 0 = the base passed and every defective base failed
 #
-# BOOT_CHECKOUT=DIR: a local GlassineOS/boot checkout instead of BOOT_COMMIT. The
-# harness's outside-base mode is not on boot's main yet, so until BOOT_COMMIT is moved
-# to a commit that has it, the pinned path stops at once with a message and the test
-# needs BOOT_CHECKOUT. The pinned path is the default.
+# BOOT_CHECKOUT=DIR: a local GlassineOS/boot checkout instead of BOOT_COMMIT, to try a
+# harness change before it is pinned. The pinned path is the default.
 # QTEST_BOOT_TIMEOUT: seconds per boot (the harness's default: 900).
 # Needs docker (buildx, privileged containers, arm64 emulation), python3 and git.
 # Works in .out/test-boot-qemu/ under the checkout (kept for the logs).
