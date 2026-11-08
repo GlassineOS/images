@@ -6,26 +6,29 @@
 #
 # Mounts: /in/base.tar (the tar export, ro), /k (the kernel and boot exports, ro),
 # /a (the artifacts folder), /s (scripts/, ro). Environment, set by materialize:
-#   DATE      yyyymmdd (UTC)            TARGET   the target
-#   PARENT    parent base id, or empty  RELEASE  the kernel release (modules/<RELEASE>)
-#   STAGE     the staging directory under /a, where every output goes
+#   DATE      yyyymmdd (UTC) for a new base   TARGET   the target
+#   PARENT    parent base id, or empty        RELEASE  the kernel release (modules/<RELEASE>)
+#   STAGE     the staging directory under /a (a name starting with "."), where every
+#             output goes; materialize renames what it holds into place
 #   MODULES   new = make the modules stream; have = /a/modules/RELEASE.btrfs.zst exists
 #   TMPFS     tmpfs size (mount -o size=)   IMG  each btrfs file's size in bytes
 #   HOST_UID, HOST_GID  owner of the outputs
-# Inputs in STAGE: base.manifest.in (the base manifest without its base= line).
-# Outputs in STAGE: tree.manifest, packages, base.btrfs.zst, base.from-PARENT.btrfs.zst,
-# modules.btrfs.zst + modules.manifest (MODULES=new), result (key=value). Exit 3 = a
-# base with this tree exists (FR-011): result holds exists=<id>.
+# Input in STAGE: base.manifest.in (the base manifest's lines other than base=).
+# Outputs in STAGE: base/ (tree.manifest, packages, base.manifest, base.btrfs.zst,
+# base.from-PARENT.btrfs.zst) unless the base is reused, modules.btrfs.zst +
+# modules.manifest (MODULES=new), result (key=value: id, tree, reused, uuid, ...).
 set -eu
 O=/a/$STAGE
+BD=/a/$TARGET/bases
 W=/w
 say() { echo "materialize: $*"; }
 die() { echo "materialize: FAIL: $*" >&2; exit 1; }
 up() { cut -d' ' -f1 /proc/uptime; }
 T0=$(up); t0=$T0
 tick() { t0=$(up); }
-tock() { awk -v a="$t0" -v b="$(up)" -v n="$1" 'BEGIN { printf "time %-26s %6.2f s\n", n, b - a }' | tee -a $O/times; }
+tock() { awk -v a="$t0" -v b="$(up)" -v n="$1" 'BEGIN { printf "time %-26s %6.2f s\n", n, b - a }'; }
 res() { echo "$1=$2" >> $O/result; }
+val() { sed -n "s/^$1=//p" "$2" | head -n 1; }
 
 cleanup() {
 	set +e
@@ -39,7 +42,8 @@ tick
 apk add -q --no-progress btrfs-progs tar zstd rsync python3 >/dev/null || die "apk add failed"
 for i in $(seq 0 31); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done
 mkdir -p $W && mount -t tmpfs -o size="$TMPFS" tmpfs $W
-: > $O/result; : > $O/times
+: > $O/result
+mkdir $O/base
 tock "container setup"
 
 man() { python3 -I /s/tree-manifest.py "$1" > "$2"; }
@@ -77,72 +81,88 @@ put_manifest() {
 
 # 1. the reference: the tar on a plain directory
 tick; mkdir $W/ref; untar $W/ref; tock "extract (reference)"
-python3 -I /s/base_tree.py check $W/ref || die "the export carries build leftovers (FR-019)"
-tick; man $W/ref $O/tree.manifest; tock "content manifest"
-TREE=$(sha256sum $O/tree.manifest | cut -c1-64)
+python3 -I /s/base_tree.py check $W/ref || die "the export carries build leftovers (FR-020)"
+tick; man $W/ref $O/base/tree.manifest; tock "content manifest"
+# the id's hash: the content manifest, then the base manifest's lines other than base=
+TREE=$(cat $O/base/tree.manifest $O/base.manifest.in | sha256sum | cut -c1-64)
 T16=$(echo "$TREE" | cut -c1-16)
-ID=$DATE-$T16
-say "entries: $(wc -l < $O/tree.manifest), tree $TREE"
-say "id: $ID"
-res id "$ID"; res tree "$TREE"
+say "entries: $(wc -l < $O/base/tree.manifest), tree $TREE"
+res tree "$TREE"
 
-# 2. one tree is materialized once (FR-011)
-for d in /a/"$TARGET"/*-"$T16"; do
+# 2. one tree is one base (FR-011): a complete base with this tree is reused
+REUSED=
+for d in "$BD"/*-"$T16"; do
 	[ -d "$d" ] || continue
-	res exists "${d##*/}"
-	echo "materialize: base ${d##*/} has this tree ($T16); no new base made" >&2
-	exit 3
+	for f in record base.btrfs.zst tree.manifest; do
+		[ -f "$d/$f" ] || die "base ${d##*/} has this tree but no $f (incomplete; remove it)"
+	done
+	cmp -s "$d/tree.manifest" $O/base/tree.manifest || die "base ${d##*/}: same tree16, other content manifest"
+	[ "$(sha256sum < "$d/base.btrfs.zst" | cut -c1-64)" = "$(val stream_sha256 "$d/record")" ] \
+		|| die "base ${d##*/}: its full stream doesn't match its record (cut or changed)"
+	REUSED=${d##*/}
 done
-
-# 3. the base manifest, then the comparison reference with it
-{ head -n 1 $O/base.manifest.in; echo "base=$ID"; tail -n +2 $O/base.manifest.in; } > $W/base.manifest
-put_manifest $W/ref
-man $W/ref $W/ref.man
-python3 -I /s/base_tree.py packages $W/ref > $O/packages
-python3 -I /s/base_tree.py name $W/ref "$ID" || die "base manifest"
-
-# 4. the subvolume: fresh, or a snapshot of the parent with the new tree synced in by
-# content (unchanged files stay shared even with new timestamps)
-mkfs1 a
-if [ -n "$PARENT" ]; then
-	tick; receive /a/"$TARGET"/"$PARENT"/base.btrfs.zst $W/a/bases "$PARENT"; tock "receive parent"
-	tick
-	btrfs -q subvolume snapshot $W/a/bases/"$PARENT" $W/a/bases/"$ID"
-	rsync -aHAX --numeric-ids --delete --force --checksum $W/ref/ $W/a/bases/"$ID"/
-	tock "snapshot parent + sync"
+if [ -n "$REUSED" ]; then
+	ID=$REUSED
+	say "id: $ID (reused: this tree's base exists, no new subvolume or stream)"
+	res id "$ID"; res reused yes
+	rm -r $O/base
 else
-	tick
-	btrfs -q subvolume create $W/a/bases/"$ID"
-	untar $W/a/bases/"$ID"
-	put_manifest $W/a/bases/"$ID"
-	tock "extract into subvolume"
-fi
-python3 -I /s/base_tree.py name $W/a/bases/"$ID" "$ID" || die "base manifest in the subvolume"
-btrfs property set -ts $W/a/bases/"$ID" ro true
-btrfs filesystem sync $W/a
-tick; same $W/ref.man $W/a/bases/"$ID" "subvolume bases/$ID"; tock "compare subvolume"
-UUID=$(suuid $W/a/bases/"$ID")
-res uuid "$UUID"
+	ID=$DATE-$T16
+	say "id: $ID"
+	res id "$ID"; res reused no
 
-# 5. streams
-tick; btrfs -q send $W/a/bases/"$ID" | zstd -q -T0 -3 -o $O/base.btrfs.zst; tock "full stream"
-if [ -n "$PARENT" ]; then
-	tick
-	btrfs -q send -p $W/a/bases/"$PARENT" $W/a/bases/"$ID" > $W/delta.raw
-	zstd -q -T0 -3 -o $O/base.from-"$PARENT".btrfs.zst $W/delta.raw
-	tock "delta stream"
-	res delta_raw "$(wc -c < $W/delta.raw)"
-	echo "== delta: commands"
-	btrfs receive --dump < $W/delta.raw | awk '{ print $1 }' | sort | uniq -c | sort -rn
-	echo "== delta: files written"
-	btrfs receive --dump < $W/delta.raw | awk '$1 == "write" { print $2 }' | sort -u | sed "s|^\./$ID/||"
-	rm $W/delta.raw
+	# 3. the base manifest, then the comparison reference with it
+	{ head -n 1 $O/base.manifest.in; echo "base=$ID"; tail -n +2 $O/base.manifest.in; } > $W/base.manifest
+	cp $W/base.manifest $O/base/base.manifest
+	put_manifest $W/ref
+	man $W/ref $W/ref.man
+	python3 -I /s/base_tree.py packages $W/ref > $O/base/packages
+	python3 -I /s/base_tree.py name $W/ref "$ID" || die "base manifest"
+
+	# 4. the subvolume: fresh, or a snapshot of the parent with the new tree synced in
+	# by content (unchanged files stay shared even with new timestamps)
+	mkfs1 a
+	if [ -n "$PARENT" ]; then
+		tick; receive "$BD/$PARENT/base.btrfs.zst" $W/a/bases "$PARENT"; tock "receive parent"
+		tick
+		btrfs -q subvolume snapshot $W/a/bases/"$PARENT" $W/a/bases/"$ID"
+		rsync -aHAX --numeric-ids --delete --force --checksum $W/ref/ $W/a/bases/"$ID"/
+		tock "snapshot parent + sync"
+	else
+		tick
+		btrfs -q subvolume create $W/a/bases/"$ID"
+		untar $W/a/bases/"$ID"
+		put_manifest $W/a/bases/"$ID"
+		tock "extract into subvolume"
+	fi
+	python3 -I /s/base_tree.py name $W/a/bases/"$ID" "$ID" || die "base manifest in the subvolume"
+	btrfs property set -ts $W/a/bases/"$ID" ro true
+	btrfs filesystem sync $W/a
+	tick; same $W/ref.man $W/a/bases/"$ID" "subvolume bases/$ID"; tock "compare subvolume"
+	UUID=$(suuid $W/a/bases/"$ID")
+	res uuid "$UUID"
+
+	# 5. streams
+	tick; btrfs -q send $W/a/bases/"$ID" | zstd -q -T0 -3 -o $O/base/base.btrfs.zst; tock "full stream"
+	if [ -n "$PARENT" ]; then
+		tick
+		btrfs -q send -p $W/a/bases/"$PARENT" $W/a/bases/"$ID" > $W/delta.raw
+		zstd -q -T0 -3 -o $O/base/base.from-"$PARENT".btrfs.zst $W/delta.raw
+		tock "delta stream"
+		res delta_raw "$(wc -c < $W/delta.raw)"
+		echo "== delta: commands"
+		btrfs receive --dump < $W/delta.raw | awk '{ print $1 }' | sort | uniq -c | sort -rn
+		echo "== delta: files written"
+		btrfs receive --dump < $W/delta.raw | awk '$1 == "write" { print $2 }' | sort -u | sed "s|^\./$ID/||"
+		rm $W/delta.raw
+	fi
 fi
 
-# 6. modules/<release>: owned by root, every file 0644 (kernel-check), a subvolume of its own
+# 6. modules/<release>: owned by root, a subvolume of its own (FR-008)
 tick
 mkdir $W/modref && cp -a /k/modules/"$RELEASE" $W/modref/m && chown -R 0:0 $W/modref/m
 man $W/modref/m $W/modref.man
+[ -d $W/a ] || mkfs1 a
 if [ "$MODULES" = new ]; then
 	btrfs -q subvolume create $W/a/modules/"$RELEASE"
 	cp -a $W/modref/m/. $W/a/modules/"$RELEASE"/
@@ -158,23 +178,25 @@ else
 	tock "modules (existing)"
 fi
 
-# 7. receive every stream back on fresh file systems (FR-009)
+# 7. receive every new stream back on fresh file systems (FR-009)
 mkfs1 b
-tick; receive $O/base.btrfs.zst $W/b/bases "$ID"; tock "receive full"
-same $W/ref.man $W/b/bases/"$ID" "received full stream"
-python3 -I /s/base_tree.py name $W/b/bases/"$ID" "$ID" || die "base manifest, full stream"
-RUUID=$(ruuid $W/b/bases/"$ID")
-[ "$RUUID" = "$UUID" ] || die "received UUID $RUUID is not the subvolume's $UUID"
-res received_uuid "$RUUID"
+if [ -z "$REUSED" ]; then
+	tick; receive $O/base/base.btrfs.zst $W/b/bases "$ID"; tock "receive full"
+	same $W/ref.man $W/b/bases/"$ID" "received full stream"
+	python3 -I /s/base_tree.py name $W/b/bases/"$ID" "$ID" || die "base manifest, full stream"
+	RUUID=$(ruuid $W/b/bases/"$ID")
+	[ "$RUUID" = "$UUID" ] || die "received UUID $RUUID is not the subvolume's $UUID"
+	res received_uuid "$RUUID"
+fi
 if [ "$MODULES" = new ]; then
 	MS=$O/modules.btrfs.zst; else MS=/a/modules/"$RELEASE".btrfs.zst; fi
 tick; receive "$MS" $W/b/modules "$RELEASE"; tock "receive modules"
 same $W/modref.man $W/b/modules/"$RELEASE" "received modules stream"
-if [ -n "$PARENT" ]; then
+if [ -z "$REUSED" ] && [ -n "$PARENT" ]; then
 	mkfs1 c
 	tick
-	receive /a/"$TARGET"/"$PARENT"/base.btrfs.zst $W/c/bases "$PARENT"
-	receive $O/base.from-"$PARENT".btrfs.zst $W/c/bases "$ID"
+	receive "$BD/$PARENT/base.btrfs.zst" $W/c/bases "$PARENT"
+	receive $O/base/base.from-"$PARENT".btrfs.zst $W/c/bases "$ID"
 	tock "receive parent + delta"
 	same $W/ref.man $W/c/bases/"$ID" "received parent + delta"
 	python3 -I /s/base_tree.py name $W/c/bases/"$ID" "$ID" || die "base manifest, parent + delta"
@@ -184,7 +206,9 @@ if [ -n "$PARENT" ]; then
 	btrfs filesystem du -s $W/c/bases/*
 fi
 
-res stream_sha256 "$(sha256sum $O/base.btrfs.zst | cut -c1-64)"
-[ -z "$PARENT" ] || res delta_sha256 "$(sha256sum $O/base.from-"$PARENT".btrfs.zst | cut -c1-64)"
+if [ -z "$REUSED" ]; then
+	res stream_sha256 "$(sha256sum $O/base/base.btrfs.zst | cut -c1-64)"
+	[ -z "$PARENT" ] || res delta_sha256 "$(sha256sum $O/base/base.from-"$PARENT".btrfs.zst | cut -c1-64)"
+fi
 [ "$MODULES" != new ] || res modules_sha256 "$(sha256sum $O/modules.btrfs.zst | cut -c1-64)"
 t0=$T0; tock "materialize (container)"
