@@ -1,6 +1,6 @@
 # Builds the stage chain for every device on a native arm64 runner, with the locks
-# checked, and checks the exported tree. Pull requests and pushes alike; nothing is
-# published yet (GHCR comes later, GlassineOS/hub#8 step 8).
+# checked, and checks the exported tree. Pull requests and pushes alike; the base's
+# stages are not published (the kernel side is: kernel.yml, docs/registry.md).
 name: build
 on:
   push:

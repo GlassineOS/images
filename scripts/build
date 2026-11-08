@@ -31,8 +31,12 @@ Options:
   --no-cache           build every stage without BuildKit's layer cache, once per run
                        (an export reuses what an earlier export of this run built);
                        cache mounts, such as the kernel's, are kept: an empty one gives
-                       the same bytes
-  --preflight-only     run the preflight, print the build info it found, stop
+                       the same bytes. An export published under its key is still
+                       pulled (with --no-registry it is built too)
+  --no-registry        ignore the registry: build every export from source
+                       (specs/003, FR-011); the same bytes
+  --preflight-only     run the preflight, print the build info it found and which
+                       exports will be pulled and which built, stop
 
 In order (each step's time is printed, and again at the end):
   1. preflight (below); any failure ends the command before a stage builds, naming each
@@ -42,9 +46,15 @@ In order (each step's time is printed, and again at the end):
      export as the source stage's build context (docker buildx --build-context
      <stage>=<dir>), so the Dockerfile is the same for every build
   3. the exports, docker buildx for linux/<arch>: base-export as a tar, kernel-export,
-     dtb-export, initramfs-export and boot-export as local directories merged into one
-  4. scripts/kernel-check and scripts/boot-check on the merged directory (boot-check
-     with --cmdline-extra when CMDLINE_EXTRA is set)
+     dtb-export, initramfs-export and boot-export as local directories merged into one.
+     Each of the last four is pulled from the registry when it is published under its
+     key (docs/registry.md) and no local checkout reaches it: pinned by the digest the
+     registry gave for the key, so every byte is checked against it. An export built
+     here takes in the pulled ones it reads (--build-context
+     <export>=docker-image://<ref>@<digest>), and reads the export's layer cache from the
+     registry (--cache-from)
+  4. scripts/kernel-check and scripts/boot-check on the merged directory, pulled or not
+     (boot-check with --cmdline-extra when CMDLINE_EXTRA is set)
   5. scripts/materialize with the overrides (--arg), the build info (--build-info), the
      parent options and the build's start (--time)
 
@@ -70,9 +80,21 @@ inside a check is that check's failure):
     daemon's own view, also for a remote daemon); DockerRootDir on this host only when
     the probe gives none.
     BUILD_MIN_ARTIFACTS_GIB and BUILD_MIN_DOCKER_GIB change the thresholds
-  - every git input's commit (its "# branch:" ARG, with the overrides) can be fetched
-    from its repository (the URL ARG declared beside it): a shallow, treeless fetch of
-    the commit into a throwaway bare repository, which also gives its tree
+  - the registry (unless --no-registry): each export's key, and whether it is
+    published under it (docker buildx imagetools inspect, anonymous for a public
+    package). Not published, refused (a package that isn't public reads the same) or no
+    answer: the export is built here, and the preflight says why. An export that reads
+    an input from a local checkout (--local), or takes in an export that does, is built
+    here without asking the registry (specs/003, Scenario 4)
+  - every git input's commit (its "# branch:" ARG, with the overrides) that an export
+    built here fetches can be fetched from its repository (the URL ARG declared beside
+    it): a shallow, treeless fetch of the commit into a throwaway bare repository, which
+    also gives its tree. A failure names the exports that need it and why they aren't
+    pulled. An input only pulled exports use isn't fetched: its tree is the one the
+    published export names, and whether it is on its branch comes from GitHub's
+    compare API alone (no answer counts as unmerged). Each fetch has a time limit
+    (GIT_TIMEOUT seconds, default 30) and is tried again when it timed out or failed for
+    a network reason (GIT_TRIES tries, default 3)
   - each --local DIR: a directory at the top of a git checkout, with no uncommitted
     changes (tracked files, and untracked files git doesn't ignore: the same rule as
     this checkout's); a checkout of the input's repository: it has one of the
@@ -81,14 +103,17 @@ inside a check is that check's failure):
     commit is fetched from the repository as above to decide unmerged, and one the
     repository doesn't have (not pushed) is unmerged. The free space needed in the
     artifacts folder grows by one and a half times the size of each checkout's files
-  - every builder image pinned by digest (<X>_IMAGE + <X>_DIGEST) and the base image
-    (ALPINE) can be pulled (docker buildx imagetools inspect)
+  - every builder image pinned by digest (<X>_IMAGE + <X>_DIGEST) that a stage built
+    here starts from, and the base image (ALPINE), can be pulled (docker buildx
+    imagetools inspect); emulation is needed only for the platforms of those stages
 
 Build info for materialize: images_commit (git rev-parse HEAD) and images_clean (the
 checkout's tracked files and the untracked files git doesn't ignore, which a stage's COPY
 reads, are HEAD's tree), both taken at preflight and taken again after the exports: a
 change in between fails the build, input.<ARG>.tree (the fetched commit's tree),
-input.<ARG>.local (yes for an input from --local DIR), builder.<image> = its pinned digest, and unmerged: the inputs
+input.<ARG>.local (yes for an input from --local DIR), builder.<image> = its pinned
+digest, export.<export>.key and export.<export>.from (<ref>@<digest> when pulled, built
+when built here), and unmerged: the inputs
 whose commit isn't an ancestor of their branch's tip. For a github.com repository that
 is the compare API (one request: compare/<commit>...<branch> is "ahead" or "identical"
 when the commit is on the branch; GITHUB_TOKEN or GH_TOKEN is used when set). Elsewhere,
@@ -104,7 +129,9 @@ end, also on SIGTERM, SIGHUP and Ctrl-C (the running build step is stopped first
 kept as <artifacts>/.logs/<TARGET>/<start>.log.
 
 Environment: BUILD_TIMEOUT (seconds per export, default 14400), BUILD_MIN_ARTIFACTS_GIB,
-BUILD_MIN_DOCKER_GIB, MATERIALIZE_IMAGE (default alpine:3.24), and materialize's own.
+BUILD_MIN_DOCKER_GIB, MATERIALIZE_IMAGE (default alpine:3.24), GLASSINE_REGISTRY (the
+registry's prefix, default ghcr.io/glassineos), GIT_TIMEOUT, GIT_TRIES, and
+materialize's own.
 
 Exit: 0 built, 1 failed (nothing new in the artifacts folder but the log), 2 usage,
 3 preflight failed, 4 another materialization holds the host lock.
@@ -117,6 +144,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import glassine_pins  # noqa: E402
+import glassine_registry  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader('materialize', os.path.join(HERE, 'materialize'))
 _spec = importlib.util.spec_from_loader('materialize', _loader)
@@ -125,7 +153,7 @@ _loader.exec_module(materialize)
 
 # The exports of a target, in build order: the base's tree, then the kernel side.
 BASE_EXPORT = glassine_pins.BASE_STAGE
-KERNEL_EXPORTS = ['kernel-export', 'dtb-export', 'initramfs-export', 'boot-export']
+KERNEL_EXPORTS = glassine_pins.REGISTRY_EXPORTS
 GIB = 1 << 30
 ARCHES = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64',
           'armv7l': 'arm', 'riscv64': 'riscv64', 'ppc64le': 'ppc64le', 's390x': 's390x'}
@@ -142,7 +170,8 @@ def usage():
 
 def parse(argv):
     o = {'artifacts': os.path.join(REPO, 'artifacts'), 'parent': None, 'no_parent': False,
-         'args': {}, 'local': {}, 'no_cache': False, 'preflight_only': False}
+         'args': {}, 'local': {}, 'no_cache': False, 'preflight_only': False,
+         'no_registry': False}
     pos = []
     it = iter(argv)
     for a in it:
@@ -157,7 +186,7 @@ def parse(argv):
                 o['args' if a == '--build-arg' else 'local'][k] = val
             else:
                 o[a[2:]] = v
-        elif a in ('--no-parent', '--no-cache', '--preflight-only'):
+        elif a in ('--no-parent', '--no-cache', '--preflight-only', '--no-registry'):
             o[a[2:].replace('-', '_')] = True
         elif a in ('-h', '--help') or a.startswith('-'):
             usage()
@@ -308,26 +337,25 @@ def gh_merged(url, commit, branch):
     return {'ahead': True, 'identical': True, 'behind': False, 'diverged': False}.get(status)
 
 
-def git_merged(g, url, commit, branch, log):
+def git_merged(g, gf, url, commit, branch, log):
     """Is commit an ancestor of branch's tip? From a treeless fetch of the branch back to
     a day before the commit's date; unshallowed when that says no (bounded)."""
     rc, out, _ = g('show', '-s', '--format=%ct', commit)
     since = int(out.strip()) - 86400 if rc == 0 and out.strip().isdigit() else 0
     ref = f'refs/heads/{branch}'
-    rc, _, err = g('fetch', '-q', '--filter=tree:0', f'--shallow-since={since}', url,
-                   f'+{ref}:{ref}', timeout=120)
+    rc, err = gf('--filter=tree:0', f'--shallow-since={since}', url, f'+{ref}:{ref}', timeout=120)
     if rc != 0:     # nothing after that date: the tip alone
-        rc, _, err = g('fetch', '-q', '--filter=tree:0', '--depth=1', url, f'+{ref}:{ref}', timeout=120)
+        rc, err = gf('--filter=tree:0', '--depth=1', url, f'+{ref}:{ref}', timeout=120)
         if rc != 0:
-            raise Fail(f'branch {branch} can\'t be fetched from {url}: {last(err)}')
+            raise Fail(f'branch {branch} can\'t be fetched from {url}: {err}')
     if g('merge-base', '--is-ancestor', commit, ref)[0] == 0:
         return True
     rc, out, _ = g('rev-parse', '--is-shallow-repository')
     if out.strip() == 'true':
         log(f'preflight: {url} {branch}: history cut, unshallowing to decide')
-        rc, _, err = g('fetch', '-q', '--filter=tree:0', '--unshallow', url, f'+{ref}:{ref}', timeout=240)
+        rc, err = gf('--filter=tree:0', '--unshallow', url, f'+{ref}:{ref}', timeout=240)
         if rc != 0:
-            log(f'preflight: {url} {branch}: undecided ({last(err)}), counted as unmerged')
+            log(f'preflight: {url} {branch}: undecided ({err}), counted as unmerged')
             return False
         return g('merge-base', '--is-ancestor', commit, ref)[0] == 0
     return False
@@ -345,15 +373,19 @@ def check_git(work, n, url, commit, branches, log, missing_ok=False):
     def g(*a, timeout=60):
         return run(['git', '-C', d, '-c', 'protocol.version=2', *a], timeout,
                    env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+
+    def gf(*a, timeout=None):     # a fetch: time limit, tried again on network failures
+        rc, why, _ = glassine_registry.git_fetch(d, url, commit, 'preflight', list(a), timeout=timeout, log=log)
+        return rc, why
     g('init', '-q', '--bare')
     if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit):
         return [f'{commit!r} from {url} is not a full commit id'], '', {}
-    rc, _, err = g('fetch', '-q', '--depth=1', '--filter=tree:0', url, commit)
+    rc, err = gf('--depth=1', '--filter=tree:0', url, commit)
     if rc != 0 and missing_ok:
-        log(f'preflight: commit {commit} not in {url} ({last(err)}): not pushed, unmerged')
+        log(f'preflight: commit {commit} not in {url} ({err}): not pushed, unmerged')
         return [], None, {}
     if rc != 0:
-        return [f'commit {commit} not reachable in {url}: {last(err)}'], '', {}
+        return [f'commit {commit} not reachable in {url}: {err}'], '', {}
     rc, tree, err = g('rev-parse', '--verify', '-q', f'{commit}^{{tree}}')
     if rc != 0:
         return [f'commit {commit} from {url}: no tree ({last(err)})'], '', {}
@@ -362,7 +394,7 @@ def check_git(work, n, url, commit, branches, log, missing_ok=False):
         m = gh_merged(url, commit, b)
         if m is None:
             try:
-                m = git_merged(g, url, commit, b, log)
+                m = git_merged(g, gf, url, commit, b, log)
             except Fail as e:
                 fails.append((b, str(e)))
                 continue
@@ -522,7 +554,8 @@ def preflight(o, target, adir, work, log):
     """FR-004. Returns (failures, facts): facts hold what the build needs. Every check
     runs; an exception in one is that check's failure."""
     fails = []
-    facts = {'arch': '', 'info': {}, 'over': {}, 'state': ('', '', ''), 'local': {}}
+    facts = {'arch': '', 'info': {}, 'over': {}, 'state': ('', '', ''), 'local': {},
+             'keys': {}, 'pulled': {}}
     dockerfile = os.path.join(REPO, 'Dockerfile')
     stages_dir = os.path.join(REPO, 'stages')
 
@@ -611,6 +644,37 @@ def preflight(o, target, adir, work, log):
             log(f'preflight: parent {p or "none (no earlier build of " + target + ")"}')
         guard('parent', parent)
 
+    # the registry exports: each one's key, and whether it is published under it
+    def registry_plan():
+        keys = glassine_pins.export_keys(dockerfile, REPO, over, arch or 'arm64')
+        # an export reading a local checkout, or taking in one that does, is built here
+        # (a trial changes it; specs/003, Scenario 4): the registry isn't asked for it
+        local = {}
+        for e in KERNEL_EXPORTS:
+            names = [facts['local'].get(i, {}).get('name', i) for i in keys[e]['fetches'] if i in covered]
+            names += [n for t in keys[e]['takes'] for n in local.get(t, [])]
+            if names:
+                local[e] = sorted(set(names))
+        rp = glassine_registry.plan({e: v for e, v in keys.items() if e not in local},
+                                    use_registry=not o['no_registry'])
+        for e, names in local.items():
+            rp[e] = {'key': keys[e]['key'], 'pull': None, 'trees': {}, 'state': 'local',
+                     'why': f'the local checkout of {" ".join(names)}'}
+        return keys, rp
+    keys, rplan = guard('the registry', registry_plan) or ({}, {})
+    pulled = {e: rplan[e]['pull'] for e in rplan if rplan[e]['pull']}
+    built = [e for e in KERNEL_EXPORTS if e not in pulled]
+    facts['keys'], facts['pulled'] = keys, pulled
+    for e in KERNEL_EXPORTS:
+        if e in rplan:
+            log(f'preflight: {e} key {rplan[e]["key"][:16]}: ' +
+                (f'pull {pulled[e]}' if e in pulled else f'build here ({rplan[e]["why"]})'))
+    # the git inputs an export built here fetches: (input → the exports that need it)
+    need = {}
+    for e in built:
+        for i in keys.get(e, {}).get('fetches', []):
+            need.setdefault(i, []).append(e)
+
     # the git inputs: (url, commit) → the inputs and branches it serves
     branches = guard('the git inputs', glassine_pins.branches, dockerfile) or {}
     repo_args = guard('the git inputs', glassine_pins.repos, dockerfile) or {}
@@ -622,11 +686,22 @@ def preflight(o, target, adir, work, log):
         elif i in repo_args and i not in covered:
             fetches.setdefault((args.get(repo_args[i], ''), args.get(i, '')), []).append((i, b))
     builders = guard('the builder images', glassine_pins.builders, dockerfile, over) or {}
-    others = guard('the platforms', glassine_pins.platforms, dockerfile) or []
+    # the stages this build runs: the base's, and those of the exports built here
+    def used_stages():
+        names = glassine_pins.reachable(dockerfile, [BASE_EXPORT] + built, over, stop=set(pulled))
+        st = glassine_pins.stages(dockerfile, args)
+        return names, {st[n][0] for n in names}
+    names, froms = guard('the stages', used_stages) or ([], set())
+    others = guard('the platforms', glassine_pins.stage_platforms, dockerfile, names) or []
     image = os.environ.get('MATERIALIZE_IMAGE', 'alpine:3.24')
     bt = os.environ.get('BUILD_TIMEOUT', '14400')
     if not bt.isdigit() or int(bt) == 0:
         fails.append(f'BUILD_TIMEOUT={bt!r}: not a number of seconds')
+
+    def why_built(inputs):
+        es = sorted({e for i in inputs for e in need.get(i, [])}, key=KERNEL_EXPORTS.index)
+        reasons = sorted({rplan[e]['why'] for e in es if e in rplan})
+        return f' (needed to build {", ".join(es)} here, since the registry gave: {"; ".join(reasons)})' if es else ''
 
     # the slow checks, side by side
     os.makedirs(work, exist_ok=True)
@@ -634,12 +709,15 @@ def preflight(o, target, adir, work, log):
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
         f_emu = ex.submit(check_emulation, arch, others) if arch else None
         f_priv = ex.submit(check_privileged, image)
+        fetched = {key: v for key, v in fetches.items() if any(i in need for i, _ in v)}
         f_git = {key: ex.submit(check_git, work, n, key[0], key[1], sorted({b for _, b in v}), log)
-                 for n, (key, v) in enumerate(fetches.items())}
+                 for n, (key, v) in enumerate(fetched.items())}
+        f_gh = {(key, b): ex.submit(gh_merged, key[0], key[1], b)
+                for key, v in fetches.items() if key not in fetched for b in sorted({b for _, b in v})}
         f_loc = {key: ex.submit(check_git, work, len(fetches) + n, key[0], key[1],
                                 sorted({b for _, b in v}), log, True)
                  for n, (key, v) in enumerate(lfetches.items())}
-        imgs = [f'{im}@{dg}' for im, dg in builders.items()]
+        imgs = [f'{im}@{dg}' for im, dg in builders.items() if f'{im}@{dg}' in froms]
         if args.get('ALPINE'):
             imgs.append(args['ALPINE'])
         f_img = {r: ex.submit(check_image, r) for r in imgs}
@@ -651,19 +729,37 @@ def preflight(o, target, adir, work, log):
         fails += guard('free space', check_space, adir, docker_df, int(1.5 * sum(copies.values()))) or []
         unmerged = []
         for key, fut in f_git.items():
-            names = ' '.join(i for i, _ in fetches[key])
-            gf, tree, merged = guard(names, fut.result) or (['no answer'], '', {})
+            gf, tree, merged = guard(' '.join(i for i, _ in fetches[key]), fut.result) or (['no answer'], '', {})
             bad = set()
             for x in gf:
                 b, msg = x if isinstance(x, tuple) else (None, x)
                 who = [i for i, ib in fetches[key] if b is None or ib == b]
                 bad |= set(who)
-                fails.append(f'{" ".join(who)}: {msg}')
+                fails.append(f'{" ".join(who)}: {msg}{why_built(who)}')
             for i, b in fetches[key]:
                 info[f'input.{i}.tree'] = tree
                 info[f'input.{i}.local'] = 'no'
                 if i not in bad and not merged.get(b):
                     unmerged.append(i)
+        # inputs only pulled exports use: not fetched; the tree the published export names
+        for key, v in fetches.items():
+            if key in fetched:
+                continue
+            for i, b in v:
+                trees = {rplan[e]['trees'].get(i) for e in pulled if i in keys[e]['inputs']} - {None}
+                if len(trees) > 1:
+                    fails.append(f'{i}: the published exports name different trees: {" ".join(sorted(trees))}')
+                info[f'input.{i}.tree'] = trees.pop() if len(trees) == 1 else ''
+                info[f'input.{i}.local'] = 'no'
+                if not info[f'input.{i}.tree']:
+                    log(f'preflight: {i}: no tree (not fetched, and no published export names one)')
+                m = guard(f'{i} on {b}', f_gh[(key, b)].result)
+                if not m:
+                    if m is None:
+                        log(f'preflight: {i}: whether {key[1][:12]} is on {b} is undecided (not fetched, '
+                            f'no answer from the compare API), counted as unmerged')
+                    unmerged.append(i)
+        # inputs from a local checkout: the checkout's tree; fetched only to decide unmerged
         for key, fut in f_loc.items():
             names = ' '.join(i for i, _ in lfetches[key])
             gf, _, merged = guard(names, fut.result) or (['no answer'], None, {})
@@ -683,6 +779,10 @@ def preflight(o, target, adir, work, log):
             fails += guard(f'image {r}', f.result) or []
     for im, dg in builders.items():
         info[f'builder.{im}'] = dg
+    for e in KERNEL_EXPORTS:
+        if e in rplan:
+            info[f'export.{e}.key'] = rplan[e]['key']
+            info[f'export.{e}.from'] = pulled.get(e, 'built')
     head, _, clean = facts['state']
     info['images_commit'], info['images_clean'] = head, clean
     return fails, facts
@@ -841,6 +941,8 @@ def main(argv):
         if o['preflight_only']:
             for k in sorted(info):
                 log(f'{k}={info[k]}')
+            for e in KERNEL_EXPORTS:
+                log(f'{e}: ' + (f'pull {facts["pulled"][e]}' if e in facts['pulled'] else 'build here'))
             return 0
         over = facts['over']
         plat = f'linux/{facts["arch"]}'
@@ -875,17 +977,32 @@ def main(argv):
         tar = os.path.join(work, 'base.tar')
         kdir = os.path.join(work, 'k')
         dockerfile = os.path.join(REPO, 'Dockerfile')
+        keys, pulled = facts['keys'], facts['pulled']
         built = set()
         for name in [BASE_EXPORT] + KERNEL_EXPORTS:
+            if name in pulled:
+                log(f'build: {name}: pull {pulled[name]} ...')
+                t = time.monotonic()
+                why = glassine_registry.pull(name, pulled[name], os.path.join(work, 'k.' + name), plat,
+                                             os.path.join(work, 'pull'), run=log.stream, log=log)
+                if why:
+                    log(f'build: {why} (build again, or with --no-registry to build it here)')
+                    return 1
+                step(f'pull {name}', t)
+                continue
             dest = (f'type=tar,dest={tar}' if name == BASE_EXPORT
                     else f'type=local,dest={os.path.join(work, "k." + name)}')
             extra = []
+            if name in KERNEL_EXPORTS:
+                extra += glassine_registry.contexts(name, keys, pulled)
+                if not o['no_registry'] and not o['no_cache']:
+                    extra += ['--cache-from', f'type=registry,ref={glassine_registry.cache_ref(name)}']
             if o['no_cache']:
-                need = glassine_pins.reachable(dockerfile, [name], {**over, 'DEVICE': target})
+                need = glassine_pins.reachable(dockerfile, [name], {**over, 'DEVICE': target}, stop=set(pulled))
                 fresh = [n for n in need if n not in built and n not in contexts]
                 built.update(need)
                 if fresh:
-                    extra = ['--no-cache-filter', ','.join(fresh)]
+                    extra += ['--no-cache-filter', ','.join(fresh)]
             log(f'build: {name} ...')
             t = time.monotonic()
             rc, out = log.stream(common + extra + ['--target', name, '-o', dest, REPO], timeout)
