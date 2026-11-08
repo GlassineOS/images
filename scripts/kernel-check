@@ -22,6 +22,9 @@ pinned checksums, and each device tree and its manifest.
 import gzip, hashlib, os, re, stat, sys, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from glassine_pins import pins  # noqa: E402
+
 KM_KEYS = ['format', 'release', 'source', 'builder', 'layout', 'config_sha256', 'image_sha256',
            'modules_sha256', 'firmware', 'provides', 'features']
 DTB_KEYS = ['format', 'device', 'sha256']
@@ -63,21 +66,6 @@ def record(path, keys):
     if missing:
         err(f'{path}: missing keys {missing}')
     return rec
-
-
-def pins(dockerfile, over=None):
-    """ARG defaults (with --arg overrides, applied before ${X} in a default is
-    expanded, as docker does) and ADD --checksum lines from the Dockerfile."""
-    text = read(dockerfile).decode().replace('\\\n', ' ')
-    args = dict(re.findall(r'^ARG (\w+)=(\S+)', text, re.M))
-    args.update(over or {})
-    for k, v in list(args.items()):     # one level of ${X} in a default
-        args[k] = re.sub(r'\$\{(\w+)\}', lambda m: args.get(m.group(1), m.group(0)), v)
-    args['KERNEL_BUILD'] = f"{args.get('KERNEL_BUILD_IMAGE', '')}@{args.get('KERNEL_BUILD_DIGEST', '')}"
-    fw = {}
-    for csum, dest in re.findall(r'^ADD --checksum=sha256:([0-9a-f]{64})\s+\$\{LINUX_FIRMWARE\}\S*\s+(\S+)', text, re.M):
-        fw[dest.lstrip('/')] = csum
-    return args, fw
 
 
 def tree_entries(root):
