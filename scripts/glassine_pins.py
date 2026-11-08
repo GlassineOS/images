@@ -3,6 +3,7 @@
 holds them):
 
     pins(dockerfile, over)             ARG defaults with overrides, and the firmware checksums
+    branches(dockerfile)               the git inputs: {commit ARG: the branch it follows}
     stages(dockerfile)                 every FROM ... AS stage: its parent and the stages it reads
     chain(dockerfile, target, over)    the stage chain of a target's base, in build order
     locked(names, stages_dir)          the stages of names that have stages/<stage>/lock
@@ -49,6 +50,19 @@ def build_args(dockerfile, over=None):
     if 'KERNEL_BUILD' in (over or {}):
         args['KERNEL_BUILD'] = over['KERNEL_BUILD']
     return dict(sorted(args.items()))
+
+
+def branches(dockerfile):
+    """The git inputs: each ARG whose default line has "# branch: <name>" right above it,
+    with that branch, in file order."""
+    out, prev = {}, ''
+    for line in read(dockerfile).decode().splitlines():
+        m = re.match(r'ARG (\w+)=', line)
+        b = re.fullmatch(r'#\s*branch:\s*(\S+)\s*', prev)
+        if m and b:
+            out[m.group(1)] = b.group(1)
+        prev = line
+    return out
 
 
 def _expand(word, args):

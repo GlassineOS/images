@@ -38,14 +38,18 @@ ARG DEVICE=onyx-noteair
 ARG KERNEL_BUILD_IMAGE=ghcr.io/glassineos/kernel-build
 ARG KERNEL_BUILD_DIGEST=sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebca86e553ae84f3b3
 ARG LINUX=https://github.com/GlassineOS/linux
-# glassine/sdm660-7.3
+# Each git input's commit has the branch it follows on the line above it, as
+# "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
+# branch: glassine/sdm660-7.3
 ARG LINUX_SDM660=deb74f03e647c3d0a21377168758e1a138042152
 # the commit device trees build from: a fixed tree ships without a new kernel
+# branch: glassine/sdm660-7.3
 ARG DTB_COMMIT=${LINUX_SDM660}
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
+# branch: main
 ARG BOOT_COMMIT=2e93c7bd6b324e1f042167760929059df821ce40
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
