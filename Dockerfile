@@ -223,15 +223,18 @@ COPY --from=initramfs /out/ /
 # kernel isn't the release its directory names (--expect-release). It reads the other
 # exports, not their stages, so a published export given as a build context
 # (--build-context kernel-export=docker-image://...) stands in for building it.
+# CMDLINE_EXTRA: words appended to the board's command line for one build (a developer
+# image, such as glassine.devmode=usb for a device test); setting it makes the build a
+# trial, and the board's own CMDLINE never carries them.
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS boot
-ARG DEVICE
+ARG DEVICE CMDLINE_EXTRA
 RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
     --mount=type=bind,from=dtb-export,source=/boot/dtb,target=/run/dtb \
     --mount=type=bind,from=initramfs-export,source=/boot/initramfs,target=/run/initramfs \
     --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
     --mount=type=bind,source=targets/${DEVICE},target=/run/target \
     --mount=type=bind,source=scripts/bootimg.sh,target=/run/bootimg.sh \
-    DEVICE=$DEVICE sh /run/bootimg.sh
+    DEVICE=$DEVICE CMDLINE_EXTRA="$CMDLINE_EXTRA" sh /run/bootimg.sh
 
 FROM scratch AS boot-export
 COPY --from=boot /out/ /
