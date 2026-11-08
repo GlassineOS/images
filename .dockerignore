@@ -1,0 +1,3 @@
+# Never part of a build: build outputs and work files
+/artifacts
+/.out

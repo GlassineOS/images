@@ -3,3 +3,4 @@
 !/specs/*/spec.md
 /.out/
 __pycache__/
+/artifacts/

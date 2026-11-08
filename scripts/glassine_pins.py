@@ -4,6 +4,8 @@ holds them):
 
     pins(dockerfile, over)             ARG defaults with overrides, and the firmware checksums
     branches(dockerfile)               the git inputs: {commit ARG: the branch it follows}
+    repos(dockerfile)                  the git inputs: {commit ARG: the ARG naming its repository}
+    builders(dockerfile, over)         the builder images pinned by digest: {image: digest}
     stages(dockerfile)                 every FROM ... AS stage: its parent and the stages it reads
     chain(dockerfile, target, over)    the stage chain of a target's base, in build order
     locked(names, stages_dir)          the stages of names that have stages/<stage>/lock
@@ -63,6 +65,35 @@ def branches(dockerfile):
             out[m.group(1)] = b.group(1)
         prev = line
     return out
+
+
+def repos(dockerfile):
+    """Each git input's repository: the ARG declared beside it on a stage's ARG line
+    whose default is a URL (ARG LINUX LINUX_SDM660, ARG BOOT BOOT_COMMIT). An input with
+    no such ARG, or with more than one, is an error."""
+    text = _text(dockerfile)
+    urls = {k for k, v in re.findall(r'^ARG (\w+)=(\S+)', text, re.M)
+            if re.match(r'(https?|git|ssh|file)://', v)}
+    out = {}
+    for commit in branches(dockerfile):
+        found = set()
+        for line in re.findall(r'^\s*ARG\s+(.+)$', text, re.M):
+            names = [w.split('=', 1)[0] for w in line.split()]
+            if commit in names:
+                found |= urls & set(names)
+        if len(found) != 1:
+            raise ValueError(f'{dockerfile}: git input {commit}: no single repository ARG '
+                             f'declared beside it (found {sorted(found)})')
+        out[commit] = found.pop()
+    return out
+
+
+def builders(dockerfile, over=None):
+    """The builder images pinned by digest: each pair of ARGs <X>_IMAGE and <X>_DIGEST
+    (overrides applied), as {image: digest}."""
+    args, _ = pins(dockerfile, over)
+    return {args[k]: args[k[:-6] + '_DIGEST'] for k in sorted(args)
+            if k.endswith('_IMAGE') and args.get(k[:-6] + '_DIGEST')}
 
 
 def _expand(word, args):

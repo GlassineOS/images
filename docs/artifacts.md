@@ -14,6 +14,10 @@ has its own record.
 
 ## Layout
 
+`scripts/build` writes `artifacts/` in the checkout unless given another folder. Its
+work files (`.work-<pid>/`) and run logs (`.logs/<target>/<start>.log`) start with `.`
+and are never artifacts.
+
 ```
 <artifacts>/
 ├── <target>/

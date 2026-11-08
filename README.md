@@ -67,6 +67,19 @@ be started by hand. `scripts/lock-diff.sh` writes the pull request's description
 
 ## Building
 
+    scripts/build <target>
+
+builds everything a device receives for a target (a directory under `targets/`): it
+checks the host first and fails within seconds naming what is missing, builds the base's
+tree and the kernel, device tree, initramfs and boot image, checks them, and makes the
+base and the build record with `scripts/materialize` (specs/001-base-build). The result
+goes to `artifacts/` in the checkout (git-ignored; `--artifacts DIR` for another
+folder), laid out as `docs/artifacts.md` defines; each run's log is kept under
+`artifacts/.logs/<target>/`. `scripts/build --help` lists the options and the checks;
+`scripts/test-build.sh` tests the checks without a build.
+
+One stage on its own:
+
     docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
 
 builds the default device's tree (`--build-arg DEVICE=<name>` for another). On an
