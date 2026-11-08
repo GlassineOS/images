@@ -23,6 +23,11 @@ if [ -x /run/device-files ]; then
 else
 	no "the device-file check is missing"
 fi
+# a device manager scans the hardware at sysinit (coldplug), so drivers built as modules
+# load by their device's modalias
+for s in udev udev-trigger; do
+	[ -e /etc/runlevels/sysinit/$s ] || no "the device manager isn't enabled: no $s in sysinit"
+done
 # every enabled service has its script
 for l in /etc/runlevels/*/*; do
 	[ -e "$l" ] || [ ! -L "$l" ] || no "enabled service without a script: $l -> $(readlink "$l")"
