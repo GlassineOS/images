@@ -127,17 +127,17 @@ hand it can also run the reproducibility check.
 ## Initramfs and boot image
 
 ```
-boot-src + alpine → initramfs → initramfs-export           boot/initramfs/<commit12>.*
-kernel + dtb + initramfs + boot-src → boot → boot-export   bootimg/<id>.img + .manifest
+boot-src + alpine → initramfs → initramfs-export           boot/initramfs/<commit12>@<id>.*
+kernel + dtb + initramfs + boot-src → boot → boot-export   bootimg/<id>.*, select/<device>
 ```
 
 | Stage | Makes |
 |---|---|
 | `boot-src` | GlassineOS/boot at the commit pinned in the Dockerfile (`BOOT_COMMIT`) |
 | `initramfs` | boot's `build-initramfs.sh` in arm64 Alpine, with a locked package set (`stages/initramfs`). No board.conf and no kernel modules in it, so one initramfs serves every device |
-| `initramfs-export` | `boot/initramfs/<commit12>.cpio.gz` and its `.manifest` |
+| `initramfs-export` | `boot/initramfs/<commit12>@<sha256-16>.cpio.gz` and its `.manifest`: named by boot's commit and the content, since the locked tools also shape the bytes |
 | `boot` | one device's boot image, packed by boot's `lib/glassine-bootimg-pack` |
-| `boot-export` | `bootimg/<id>.img` and its boot record, `<id>.manifest` |
+| `boot-export` | `bootimg/<id>.img`, its boot record `<id>.manifest`, and `select/<device>`: the kernel, device tree and initramfs the device's update installs |
 
 The packer takes every header value from `targets/<device>/board.conf`, the boot section
 of the target description (GlassineOS/boot's board.conf, verbatim); no reference image

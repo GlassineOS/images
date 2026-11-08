@@ -11,10 +11,11 @@ board.conf. Runs on the build computer:
 
 Checks the Android boot image header v0 fields against targets/<device>/board.conf
 (and nothing else: no reference image), that the kernel is Image.gz with the device tree
-appended and the ramdisk is the initramfs followed by board.conf, the size limit, the
-glassine.img= id, and the boot record's fields.
+appended and the ramdisk is the initramfs followed by board.conf, the size limits
+(PART_SIZE, RAMDISK_MAX when set), the glassine.img= id, the boot record's fields, the
+initramfs's name and manifest, and the device's select record.
 """
-import hashlib, os, shlex, struct, sys
+import hashlib, os, re, shlex, struct, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 errors = []
@@ -48,16 +49,21 @@ def only(d, suffix):
     return os.path.join(d, names[0])
 
 
+def record(path):
+    rec = {}
+    for line in read(path).decode().splitlines():
+        k, _, v = line.partition('=')
+        rec[k] = v
+    return rec
+
+
 def main(out, device):
     board_path = os.path.join(HERE, '..', 'targets', device, 'board.conf')
     board = kv(board_path)
     num = lambda k: int(board[k], 0)
     img_path = only(os.path.join(out, 'bootimg'), '.img')
     img = read(img_path)
-    rec = {}
-    for line in read(img_path[:-4] + '.manifest').decode().splitlines():
-        k, _, v = line.partition('=')
-        rec[k] = v
+    rec = record(img_path[:-4] + '.manifest')
     check(rec.get('format') == '1', 'boot record format=1')
     for k in ('id', 'device', 'kernel', 'dtb', 'initramfs', 'cmdline', 'board', 'release', 'size', 'sha256'):
         check(k in rec, f'boot record has {k}')
@@ -91,6 +97,33 @@ def main(out, device):
     check(ident == rec.get('id') and os.path.basename(img_path) == ident + '.img', f'id {ident} (glassine.img=)')
     check(len(img) == ps + up(ksz) + up(rsz), 'image length = header + padded kernel + padded ramdisk')
     check(len(img) <= num('PART_SIZE'), f'size {len(img)} <= PART_SIZE {num("PART_SIZE")}')
+    if board.get('RAMDISK_MAX'):
+        check(rsz <= num('RAMDISK_MAX'), f'ramdisk {rsz} <= RAMDISK_MAX {num("RAMDISK_MAX")}')
+    else:
+        print(f'note: board.conf sets no RAMDISK_MAX (ramdisk {rsz} bytes)')
+    check(board.get('DEVICE') == device, f'board.conf DEVICE={board.get("DEVICE")}')
+    check(rec.get('dtb', '').startswith(device + '@'), f'device tree {rec.get("dtb")} is for {device}')
+
+    # the initramfs: <commit12>@<sha256-16>, and its manifest
+    iid = rec.get('initramfs', '')
+    m = re.fullmatch(r'([0-9a-f]{12})@([0-9a-f]{16})', iid)
+    check(bool(m), f'initramfs {iid} is <commit12>@<sha256-16>')
+    isha = hashlib.sha256(initramfs).hexdigest()
+    irec = record(os.path.join(out, 'boot', 'initramfs', iid + '.manifest'))
+    check(irec.get('format') == '1', 'initramfs manifest format=1')
+    for k in ('commit', 'sha256', 'state_format', 'needs', 'features'):
+        check(k in irec, f'initramfs manifest has {k}')
+    if m:
+        check(isha[:16] == m.group(2), 'initramfs name carries its sha256-16')
+        check(re.fullmatch(r'[0-9a-f]{40}', irec.get('commit', '')) is not None
+              and irec['commit'][:12] == m.group(1), f'initramfs manifest commit={irec.get("commit")}')
+    check(irec.get('sha256') == isha, 'initramfs manifest sha256')
+
+    # the device's update
+    sel_path = os.path.join(out, 'select', device)
+    sel = record(sel_path) if os.path.isfile(sel_path) else {}
+    want = {'format': '1', 'device': device, 'kernel': rel, 'dtb': rec.get('dtb'), 'initramfs': iid}
+    check(sel == want, f'select/{device} = {want}' + ('' if sel == want else f' (is {sel})'))
     check(rec.get('size') == str(len(img)), 'boot record size')
     check(rec.get('sha256') == hashlib.sha256(img).hexdigest(), 'boot record sha256')
     check(rec.get('board') == hashlib.sha256(read(board_path)).hexdigest(), 'boot record board = sha256 of board.conf')

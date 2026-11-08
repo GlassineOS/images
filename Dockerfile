@@ -159,8 +159,8 @@ COPY stages/device-example/rootfs/ /
 # ---------------------------------------------------------------------------------------
 # The initramfs and the boot image (GlassineOS/boot's docs/kernel-artifacts.md):
 #
-#   boot-src + alpine → initramfs → initramfs-export          boot/initramfs/<commit12>.*
-#   kernel + dtb + initramfs + boot-src → boot → boot-export  bootimg/<id>.img + .manifest
+#   boot-src + alpine → initramfs → initramfs-export          boot/initramfs/<commit12>@<id>.*
+#   kernel + dtb + initramfs + boot-src → boot → boot-export  bootimg/<id>.*, select/<device>
 #
 # The initramfs is GlassineOS/boot's build-initramfs.sh at BOOT_COMMIT, built in arm64
 # Alpine with a locked package set (stages/initramfs). The boot image packs with boot's
@@ -192,7 +192,8 @@ RUN --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
 FROM scratch AS initramfs-export
 COPY --from=initramfs /out/ /
 
-# One device's boot image. Fails when the image doesn't fit the board's PART_SIZE, or the
+# One device's boot image and its select record (which kernel, device tree and initramfs
+# the device boots). Fails when the image doesn't fit the board's PART_SIZE, or the
 # kernel isn't the release its directory names (--expect-release).
 FROM --platform=linux/amd64 ${KERNEL_BUILD} AS boot
 ARG DEVICE
