@@ -19,7 +19,7 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 | `alpine` | Alpine 3.24 and its repositories, plus ours (`glassine-keys`) |
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session and compressed swap with background-app parking (both enabled at boot) |
-| `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration |
+| `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration, and its `targets/onyx-noteair/board.conf` as `/etc/glassine-bootimg/board.conf` (the board keys the booted system reads) |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
 | `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing. It reads the final tree, after `finish`, not each stage: a file added in one stage and removed in a later one isn't seen |
