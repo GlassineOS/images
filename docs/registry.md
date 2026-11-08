@@ -167,7 +167,11 @@ registry and builds every export from source: the same bytes.
 
 A trial (a changed build argument, a checkout with changes) changes the keys of exactly
 the exports whose inputs it changes: those are built here, and the others are still
-pulled.
+pulled. A local checkout of a git input (`scripts/build --local`) is a trial even at a
+published commit: every export that reads one of that repository's inputs, and every
+export that takes such an export in, is built here from the checkout without asking the
+registry. A local checkout of `boot` builds the initramfs and the boot image here and
+still pulls the kernel and the device tree.
 
 ## Building from source
 
