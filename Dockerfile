@@ -135,7 +135,9 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
 # read-write unless fstab says otherwise. `bind,ro` keeps that bind read-only and leaves
 # the read-write binds below it (/etc, /var) alone. alpine-baselayout owns the file (a
 # protected configuration file, so apk never replaces it), hence a RUN, not rootfs/.
-RUN echo 'overlay / overlay bind,ro 0 0' > /etc/fstab
+# /tmp is a tmpfs: `/` is read-only, and only /etc, /var, /usr/local and /opt are bound
+# writable, so without it nothing could write a temporary file.
+RUN printf '%s\n' 'overlay / overlay bind,ro 0 0' 'tmpfs /tmp tmpfs nosuid,nodev,mode=1777 0 0' > /etc/fstab
 COPY stages/glassine-common/rootfs/ /
 
 # Any e-ink device: the panel daemons and the e-ink session, started at boot.
