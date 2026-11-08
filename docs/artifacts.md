@@ -72,9 +72,11 @@ and are never artifacts.
   So a change of `locks`, `needs` or `features` is another base.
 
 **Readers treat a base id as an opaque name.** They never parse, sort or compare its
-parts: a time comes from a record's `built`, a tree from its `tree`. The id's form may
-change for new bases while older ones keep theirs; a delta finds its parent by the
-received UUID, not by name.
+parts: a time comes from a record's `built`, a tree from its `tree`. A delta finds its
+parent by the received UUID, not by name. One reader doesn't follow this yet:
+GlassineOS/boot's last-resort bare boot (no current deployment's base on the device)
+takes the last base name in sort order (GlassineOS/boot#21). Until that changes, a new
+id form must sort after the old ones.
 
 A build whose `tree16` equals that of a complete base of the same target reuses it: no
 new subvolume or stream. The base manifest
