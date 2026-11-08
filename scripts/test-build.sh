@@ -21,6 +21,14 @@
 # (exit 4), --no-cache's per-export filter lists, non-UTF-8 build output, a checkout
 # changed during the build (exit 1), SIGTERM (exit 143, the build step and the work
 # directory gone), and stale work directories of dead runs removed.
+# The registry (specs/003; the stand-in answers imagetools inspect --raw from
+# $FAKE_REG): all four exports published and the source repository gone, the preflight
+# passes and the build pulls all four by digest, builds only the base, and runs the
+# checks on what it pulled; registry and repository both down, exit 3 naming both;
+# nothing published, each export built with the reason; --no-registry, nothing asked;
+# a manifest naming another key, not used; a boot trial (another BOOT_COMMIT), the
+# kernel and device tree pulled, the initramfs and boot image built here, the boot image
+# taking in the pulled ones as build contexts and reading its layer cache.
 #   scripts/test-build.sh     exit 0 = all checks pass (KEEP=1 keeps .out/test-build/)
 # Needs python3, git, flock and sh. Works in .out/test-build/ under the checkout,
 # removed at the end.
@@ -38,19 +46,28 @@ case "$1 $2" in
 "buildx inspect") echo "Name: fake"; echo "Platforms: ${FAKE_PLATFORMS-linux/amd64, linux/arm64}" ;;
 "buildx imagetools")
 	for a; do r=$a; done
+	case "$*" in *--raw*)	# the registry: a manifest from $FAKE_REG, by reference
+		echo "$r" >> "$FAKE_REG_LOG"
+		[ -n "${FAKE_REG_DOWN-}" ] && { echo "ERROR: dial tcp: lookup fake.example: connection refused" >&2; exit 1; }
+		f=$FAKE_REG/$(printf %s "$r" | tr '/:@' '___')
+		[ -f "$f" ] && { cat "$f"; exit 0; }
+		echo "ERROR: $r: not found" >&2; exit 1 ;;
+	esac
 	case "$r" in *sha256:0000000000000000*) echo "ERROR: $r: not found" >&2; exit 1 ;; esac
 	echo "Name: $r" ;;
 "buildx build")
 	echo "$*" >> "$FAKE_BUILD_LOG"
 	echo $$ > "$FAKE_BUILD_LOG.pid"
-	shift 2; t=; o=; bc=
+	shift 2; t=; o=; bc=; f=
 	while [ $# -gt 0 ]; do
 		case "$1" in
-		--target) t=$2; shift ;; -o) o=$2; shift ;;
+		--target) t=$2; shift ;; -o) o=$2; shift ;; -f) f=$2; shift ;;
 		--build-arg) case "$2" in BOOT_COMMIT=*) bc=${2#BOOT_COMMIT=} ;; esac; shift ;;
 		esac; shift
 	done
 	printf 'step 1 \377 not UTF-8\n'
+	# a pull: FROM <prefix>/images-<name>@<digest> gives <name>-export's files
+	if [ -z "$t" ] && [ -n "$f" ]; then p=$(sed -n 's/^FROM //p' "$f"); p=${p%@*}; t=${p##*/images-}-export; bc=$FAKE_BOOT_COMMIT; fi
 	[ "${FAKE_BUILD_SLEEP-}" ] && sleep "$FAKE_BUILD_SLEEP"
 	[ "$t" = "${FAKE_BUILD_FAIL-}" ] && { echo "ERROR: fake failure of $t"; exit 1; }
 	[ "$t" = base-export ] && [ "${FAKE_TOUCH-}" ] && echo touched >> "$FAKE_TOUCH"
@@ -77,6 +94,7 @@ esac
 EOF
 chmod +x "$O/bin/docker"
 export PATH="$O/bin:$PATH" FAKE_DOCKER_ROOT="$O" FAKE_BUILD_LOG="$O/buildx.log" XDG_RUNTIME_DIR="$O/rt"
+export FAKE_REG="$O/reg" FAKE_REG_LOG="$O/reg.log" GLASSINE_REGISTRY=fake.example/glassineos
 
 # --- a git copy of this checkout (tracked and untracked files, not the ignored ones)
 R=$O/repo; mkdir -p "$R"
@@ -99,7 +117,7 @@ gc() { git -C "$W" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"
 echo a > "$W/f"; gc add f; GIT_COMMITTER_DATE='2020-01-01T00:00:00Z' gc commit -q -m A
 A=$(gc rev-parse HEAD)
 echo b > "$W/f"; GIT_COMMITTER_DATE='2020-01-02T00:00:00Z' gc commit -q -am B
-B=$(gc rev-parse HEAD); BTREE=$(gc rev-parse "$B^{tree}")
+B=$(gc rev-parse HEAD); BTREE=$(gc rev-parse "$B^{tree}"); export FAKE_BOOT_COMMIT=$B
 gc checkout -q "$A"; echo c > "$W/f"; GIT_COMMITTER_DATE='2020-01-03T00:00:00Z' gc commit -q -am C
 C=$(gc rev-parse HEAD); CTREE=$(gc rev-parse "$C^{tree}")
 # every input: its commit ARG, the ARG naming its repository, its branch
@@ -349,6 +367,103 @@ check "SIGTERM: its work directory removed"        '! ls -d "$O/a.term"/.work-* 
 check "a dead run's work directory removed"        '[ ! -d "$O/a.term/.work-4194999" ]'
 check "a live process's work directory kept"       '[ -d "$O/a.term/.work-$$" ]'
 [ "$(rc term)" = 143 ] || show term
+
+# --- the registry (specs/003): exports published under their keys are pulled
+# publish OVERRIDE... -- EXPORT...: fake registry entries for EXPORTs under the keys the
+# overrides give (their annotations name the export, the key and the inputs' trees)
+publish() {
+	python3 -I - "$R" "$TARGET" "$FAKE_REG" "$BTREE" "$@" <<'PYEOF'
+import hashlib, json, os, sys
+sys.path.insert(0, sys.argv[1] + '/scripts'); import glassine_pins as g
+repo, target, reg, tree = sys.argv[1:5]; rest = sys.argv[5:]; i = rest.index('--')
+over = dict(a.split('=', 1) for a in rest[:i] if '=' in a); over['DEVICE'] = target
+keys = g.export_keys(repo + '/Dockerfile', repo, over, 'arm64')
+os.makedirs(reg, exist_ok=True)
+for e in rest[i + 1:]:
+    k = keys[e]['key']
+    ann = {'org.glassine.export': e, 'org.glassine.key': k}
+    ann.update({f'org.glassine.tree.{x.lower()}': tree for x in keys[e]['inputs']})
+    if os.environ.get('WRONG_KEY'):
+        ann['org.glassine.key'] = '0' * 64
+    man = json.dumps({'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.manifest.v1+json',
+                      'config': {}, 'layers': [], 'annotations': ann}).encode()
+    ref = f'fake.example/glassineos/images-{e[:-len("-export")]}:{k}'
+    open(os.path.join(reg, ref.replace('/', '_').replace(':', '_')), 'wb').write(man)
+    print(e, 'fake.example/glassineos/images-' + e[:-len('-export')] + '@sha256:' + hashlib.sha256(man).hexdigest())
+PYEOF
+}
+ALL="kernel-export dtb-export initramfs-export boot-export"
+PF=--preflight-only
+rm -rf "$FAKE_REG"; publish $OVER -- $ALL > "$O/published"
+from() { grep "^$1 " "$O/published" | cut -d' ' -f2; }
+
+# all four published, the kernel's repository (every input's, here) not answering
+mv "$G" "$G.off"
+: > "$FAKE_REG_LOG"
+run regall
+check "registry, all published, repository down: preflight passes" '[ "$(rc regall)" = 0 ]'
+check "registry, all published: within seconds"               'fast regall'
+check "registry, all published: every export pulled"          '[ "$(grep -c ": pull fake.example/" "$O/regall.out")" -ge 4 ] && ! grep -q ": build here" "$O/regall.out"'
+check "registry, all published: the digest in the build info" 'for e in $ALL; do has regall "^export\.$e\.from=$(from $e)$" || exit 1; done'
+check "registry, all published: each key in the build info"   '[ "$(grep -c "^export\..*\.key=[0-9a-f]\{64\}$" "$O/regall.out")" = 4 ]'
+check "registry, all published: trees from the published exports" '[ "$(grep -c "^input\..*\.tree=$BTREE$" "$O/regall.out")" = "$(echo "$INPUTS" | wc -l)" ]'
+check "registry, all published: one lookup per export"        '[ "$(wc -l < "$FAKE_REG_LOG")" = 4 ]'
+[ "$(rc regall)" = 0 ] || show regall
+# past preflight, to the host lock: four pulls, nothing built but the base
+PF=
+flock "$LOCKF" sleep 60 & HOLD=$!
+sleep 1
+: > "$FAKE_BUILD_LOG"
+run regpull
+kill $HOLD 2>/dev/null || true
+check "registry, all published: the build reaches materialize (exit 4 at the held lock)" '[ "$(rc regpull)" = 4 ]'
+check "registry, all published: four pulls, pinned by digest" '[ "$(grep -c -- "-f .*pull-[a-z]*-export.Dockerfile" "$FAKE_BUILD_LOG")" = 4 ]'
+check "registry, all published: no kernel-side export built"  '! grep -q -- "--target [a-z]*-export" "$FAKE_BUILD_LOG" || [ "$(grep -c -- "--target" "$FAKE_BUILD_LOG")" = 1 ]'
+check "registry, all published: checks run on the pulled exports" 'has regpull "build: kernel-check: stub" && has regpull "build: boot-check: stub"'
+[ "$(rc regpull)" = 4 ] || show regpull
+PF=--preflight-only
+# the registry down too: nothing can be pulled or built
+FAKE_REG_DOWN=1 run regdown
+mv "$G.off" "$G"
+fail regdown "FAIL: LINUX_SDM660.*not reachable in .*needed to build kernel-export.*registry unreachable" "registry and repository both down"
+check "registry and repository both down: the boot input named too" 'has regdown "FAIL: .*BOOT_COMMIT.*needed to build .*initramfs-export"'
+
+# nothing published under these keys: built here, the preflight says why
+rm -rf "$FAKE_REG"
+run regnone
+check "registry, nothing published: preflight passes"         '[ "$(rc regnone)" = 0 ]'
+check "registry, nothing published: each export built, why named" '[ "$(grep -c "build here (.*not published)" "$O/regnone.out")" = 4 ]'
+check "registry, nothing published: recorded as built"        '[ "$(grep -c "^export\..*\.from=built$" "$O/regnone.out")" = 4 ]'
+
+# published, but --no-registry: everything built, the registry not asked
+publish $OVER -- $ALL > /dev/null
+: > "$FAKE_REG_LOG"
+run regoff --no-registry
+check "--no-registry: preflight passes"                       '[ "$(rc regoff)" = 0 ]'
+check "--no-registry: every export built here"                '[ "$(grep -c "^export\..*\.from=built$" "$O/regoff.out")" = 4 ]'
+check "--no-registry: no lookup"                              '[ ! -s "$FAKE_REG_LOG" ]'
+
+# a manifest whose annotations name another key: not used
+rm -rf "$FAKE_REG"; WRONG_KEY=1 publish $OVER -- kernel-export > /dev/null
+run regwrong
+check "a published export naming another key: built here"     'has regwrong "kernel-export key .*build here (.*annotations name" && has regwrong "^export\.kernel-export\.from=built$"'
+
+# a boot trial (another BOOT_COMMIT): kernel and device tree pulled, the rest built here
+rm -rf "$FAKE_REG"; publish $OVER -- $ALL > "$O/published"
+PF=
+flock "$LOCKF" sleep 60 & HOLD=$!
+sleep 1
+: > "$FAKE_BUILD_LOG"
+run regtrial --build-arg "BOOT_COMMIT=$C"
+kill $HOLD 2>/dev/null || true
+PF=--preflight-only
+check "boot trial: reaches materialize"                       '[ "$(rc regtrial)" = 4 ]'
+check "boot trial: kernel and device tree pulled"             'grep -q -- "-f .*pull-kernel-export.Dockerfile" "$FAKE_BUILD_LOG" && grep -q -- "-f .*pull-dtb-export.Dockerfile" "$FAKE_BUILD_LOG"'
+check "boot trial: initramfs and boot image built here"       'grep -q -- "--target initramfs-export" "$FAKE_BUILD_LOG" && grep -q -- "--target boot-export" "$FAKE_BUILD_LOG"'
+check "boot trial: the boot image takes in the pulled kernel and device tree" 'grep -- "--target boot-export" "$FAKE_BUILD_LOG" | grep -q -- "--build-context kernel-export=docker-image://$(from kernel-export)" && grep -- "--target boot-export" "$FAKE_BUILD_LOG" | grep -q -- "--build-context dtb-export=docker-image://$(from dtb-export)"'
+check "boot trial: an export built here reads its layer cache" 'grep -- "--target boot-export" "$FAKE_BUILD_LOG" | grep -q -- "--cache-from type=registry,ref=fake.example/glassineos/images-cache:boot-export"'
+[ "$(rc regtrial)" = 4 ] || show regtrial
+rm -rf "$FAKE_REG"
 
 [ -n "${KEEP-}" ] || rm -rf "$O"
 echo "test-build: $fails failure(s)"

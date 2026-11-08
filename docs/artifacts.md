@@ -150,10 +150,12 @@ taken. The manifest never enters a base.
 | `lock.<stage>` | sha256 of `stages/<stage>/lock`, for every locked stage the base and the boot image are built from |
 | `arg.<NAME>` | every build argument in effect: the Dockerfile's defaults with the overrides applied (`DEVICE` is the target) |
 | `input.<input>.commit` | a git input's commit; `<input>` is its commit argument (`LINUX_SDM660`, `DTB_COMMIT`, `BOOT_COMMIT`) |
-| `input.<input>.tree` | that commit's tree |
+| `input.<input>.tree` | that commit's tree (when no export built here fetched the commit, the tree a pulled export's annotation names, docs/registry.md) |
 | `input.<input>.branch` | the branch it follows (the `# branch: <name>` line above the argument in `Dockerfile`) |
 | `input.<input>.local` | `yes` when it came from a local checkout, else `no` |
 | `builder.<image>` | each builder image's digest |
+| `export.<export>.key` | the key of each registry export (`kernel-export`, `dtb-export`, `initramfs-export`, `boot-export`), docs/registry.md |
+| `export.<export>.from` | where that export came from: `<package>@sha256:<digest>`, the published export pulled under its key (the digest the registry gave for the key, which the pull was checked against), or `built` when it was built on this computer |
 | `kernel_release` | the kernel release |
 | `bootimg` | the boot image id |
 | `boot_commit` | the GlassineOS/boot commit the initramfs is built from |

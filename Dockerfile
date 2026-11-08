@@ -54,13 +54,15 @@ ARG BOOT_COMMIT=2e93c7bd6b324e1f042167760929059df821ce40
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
-# for a commit id.
+# for a commit id. scripts/git-fetch.sh limits the time of each fetch and tries again on
+# network failures, and keeps the repository's objects in a cache mount, so a later
+# commit transfers only what it adds.
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS linux-sdm660-src
 ARG LINUX LINUX_SDM660
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    --mount=type=cache,id=glassine-src-linux,target=/cache/git,sharing=locked \
+    sh /run/git-fetch.sh linux-sdm660-src "$LINUX" "$LINUX_SDM660" /src/linux /cache/git
 WORKDIR /src/linux
-RUN git init -q && git fetch -q --depth=1 "$LINUX" "$LINUX_SDM660" \
-    && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = "$LINUX_SDM660"
 
 # Firmware the sdm660 kernel depends on, from linux-firmware (redistributable; never
 # vendor files): the Adreno 5xx CP microcode, whose PFP carries the marker the driver
@@ -96,15 +98,16 @@ COPY --from=kernel /out/ /
 # differs (a fixed tree ships without a new kernel).
 FROM linux-sdm660-src AS dtb-src
 ARG LINUX DTB_COMMIT
-RUN if [ "$(git rev-parse HEAD)" != "$DTB_COMMIT" ]; then \
-        git fetch -q --depth=1 "$LINUX" "$DTB_COMMIT" \
-        && git -c advice.detachedHead=false checkout -q FETCH_HEAD; fi \
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    --mount=type=cache,id=glassine-src-linux,target=/cache/git,sharing=locked \
+    if [ "$(git rev-parse HEAD)" != "$DTB_COMMIT" ]; then \
+        sh /run/git-fetch.sh dtb-src "$LINUX" "$DTB_COMMIT" /src/linux /cache/git; fi \
     && test "$(git rev-parse HEAD)" = "$DTB_COMMIT"
 
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS dtb
 ARG LINUX DTB_COMMIT DEVICE JOBS
 RUN --mount=type=bind,from=dtb-src,source=/src/linux,target=/src/linux \
-    --mount=type=bind,source=targets/${DEVICE},target=/run/target \
+    --mount=type=bind,source=targets/${DEVICE}/target,target=/run/target/target \
     --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
     REPO=$LINUX COMMIT=$DTB_COMMIT DEVICE=$DEVICE JOBS=$JOBS sh /run/kernel.sh dtb
 
@@ -172,7 +175,8 @@ COPY stages/device-example/rootfs/ /
 # The initramfs and the boot image (GlassineOS/boot's docs/kernel-artifacts.md):
 #
 #   boot-src + alpine → initramfs → initramfs-export          boot/initramfs/<commit12>@<id>.*
-#   kernel + dtb + initramfs + boot-src → boot → boot-export  bootimg/<id>.*, select/<device>
+#   kernel-export + dtb-export + initramfs-export + boot-src → boot → boot-export
+#                                                             bootimg/<id>.*, select/<device>
 #
 # The initramfs is GlassineOS/boot's build-initramfs.sh at BOOT_COMMIT, built in arm64
 # Alpine with a locked package set (stages/initramfs). The boot image packs with boot's
@@ -180,14 +184,14 @@ COPY stages/device-example/rootfs/ /
 # image. A change to the initramfs repacks without touching a kernel layer.
 
 # GlassineOS/boot at BOOT_COMMIT, fetched on the build computer's own platform (no
-# emulation on either kind of runner); git here is a fetch tool, not part of any output.
+# emulation on either kind of runner); git here is a fetch tool, not part of any output,
+# and the stage gives the same files on every platform (docs/registry.md counts on it).
 FROM --platform=$BUILDPLATFORM ${ALPINE} AS boot-src
 ARG BOOT BOOT_COMMIT
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    apk add -q --no-cache git \
+    && sh /run/git-fetch.sh boot-src "$BOOT" "$BOOT_COMMIT" /src/boot
 WORKDIR /src/boot
-RUN apk add -q --no-cache git \
-    && git init -q && git fetch -q --depth=1 "$BOOT" "$BOOT_COMMIT" \
-    && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = "$BOOT_COMMIT"
 
 FROM alpine AS initramfs
 ARG LOCK=check
@@ -206,12 +210,14 @@ COPY --from=initramfs /out/ /
 
 # One device's boot image and its select record (which kernel, device tree and initramfs
 # the device boots). Fails when the image doesn't fit the board's PART_SIZE, or the
-# kernel isn't the release its directory names (--expect-release).
+# kernel isn't the release its directory names (--expect-release). It reads the other
+# exports, not their stages, so a published export given as a build context
+# (--build-context kernel-export=docker-image://...) stands in for building it.
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS boot
 ARG DEVICE
-RUN --mount=type=bind,from=kernel,source=/out/modules,target=/run/modules \
-    --mount=type=bind,from=dtb,source=/out/boot/dtb,target=/run/dtb \
-    --mount=type=bind,from=initramfs,source=/out/boot/initramfs,target=/run/initramfs \
+RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
+    --mount=type=bind,from=dtb-export,source=/boot/dtb,target=/run/dtb \
+    --mount=type=bind,from=initramfs-export,source=/boot/initramfs,target=/run/initramfs \
     --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
     --mount=type=bind,source=targets/${DEVICE},target=/run/target \
     --mount=type=bind,source=scripts/bootimg.sh,target=/run/bootimg.sh \
