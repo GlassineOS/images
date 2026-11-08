@@ -5,6 +5,7 @@ holds them):
     pins(dockerfile, over)             ARG defaults with overrides, and the firmware checksums
     branches(dockerfile)               the git inputs: {commit ARG: the branch it follows}
     repos(dockerfile)                  the git inputs: {commit ARG: the ARG naming its repository}
+    sources(dockerfile)                the git inputs: {commit ARG: (its source stage, the source's path)}
     builders(dockerfile, over)         the builder images pinned by digest: {image: digest}
     platforms(dockerfile)              the constant platforms of FROM --platform=...
     stages(dockerfile)                 every FROM ... AS stage: its parent and the stages it reads
@@ -86,6 +87,52 @@ def repos(dockerfile):
             raise ValueError(f'{dockerfile}: git input {commit}: no single repository ARG '
                              f'declared beside it (found {sorted(found)})')
         out[commit] = found.pop()
+    return out
+
+
+def sources(dockerfile):
+    """Each git input's source stage, where its commit is fetched: the stage that
+    declares the input's ARG and its repository's ARG and runs git fetch, with the
+    directory the source is in (the stage's WORKDIR, or its parent stage's).
+    {commit ARG: (stage, path)}. An input with no such stage, or more than one, is an
+    error."""
+    text = _text(dockerfile)
+    rep = repos(dockerfile)
+    body, parent, order = {}, {}, []
+    cur = None
+    for line in text.splitlines():
+        m = re.match(r'\s*FROM\s+(?:--\S+\s+)*(\S+)\s+AS\s+(\S+)\s*$', line, re.I)
+        if m:
+            cur = m.group(2)
+            parent[cur] = m.group(1)
+            body[cur] = []
+            order.append(cur)
+        elif cur:
+            body[cur].append(line)
+
+    def workdir(stage, seen=()):
+        for line in reversed(body.get(stage, [])):
+            w = re.match(r'\s*WORKDIR\s+(\S+)\s*$', line, re.I)
+            if w:
+                return w.group(1)
+        p = parent.get(stage)
+        return workdir(p, seen + (stage,)) if p in body and p not in seen else ''
+
+    def declared(stage):
+        return {w.split('=', 1)[0] for line in body[stage]
+                for m in [re.match(r'\s*ARG\s+(.+)$', line)] if m for w in m.group(1).split()}
+
+    out = {}
+    for commit, url in rep.items():
+        found = [s for s in order if {commit, url} <= declared(s)
+                 and any(re.search(r'\bgit\b.*\bfetch\b', x) for x in body[s])]
+        if len(found) != 1:
+            raise ValueError(f'{dockerfile}: git input {commit}: no single source stage '
+                             f'fetching it (found {found})')
+        path = workdir(found[0])
+        if not path.startswith('/'):
+            raise ValueError(f'{dockerfile}: source stage {found[0]} of {commit}: no WORKDIR')
+        out[commit] = (found[0], path)
     return out
 
 

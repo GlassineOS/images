@@ -78,6 +78,17 @@ folder), laid out as `docs/artifacts.md` defines; each run's log is kept under
 `artifacts/.logs/<target>/`. `scripts/build --help` lists the options and the checks;
 `scripts/test-build.sh` tests the checks without a build.
 
+    scripts/build <target> --local BOOT_COMMIT=../boot
+
+builds the kernel or `boot` from a clean local checkout instead of the pinned commit: a
+trial, which can go to a device but is never promoted.
+
+    scripts/promote <build-id> [--at <commit>]
+
+checks a build that is not a trial against a commit of this repository (default
+`origin/main`) and the inputs' branches, and stages its record under `promoted/`
+for a commit (`docs/artifacts.md`, "Promoted builds").
+
 One stage on its own:
 
     docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
