@@ -195,7 +195,7 @@ COPY --from=initramfs /out/ /
 # One device's boot image and its select record (which kernel, device tree and initramfs
 # the device boots). Fails when the image doesn't fit the board's PART_SIZE, or the
 # kernel isn't the release its directory names (--expect-release).
-FROM --platform=linux/amd64 ${KERNEL_BUILD} AS boot
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS boot
 ARG DEVICE
 RUN --mount=type=bind,from=kernel,source=/out/modules,target=/run/modules \
     --mount=type=bind,from=dtb,source=/out/boot/dtb,target=/run/dtb \
