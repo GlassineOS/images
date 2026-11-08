@@ -164,6 +164,10 @@ RUN --mount=type=bind,source=stages/device-onyx-noteair,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-onyx-noteair/rootfs/ /
+# the board keys the booted system reads (GlassineOS/boot: glassine-bootimg, the
+# developer mode's DEVMODE_*): the target's board.conf, the same file every boot image
+# carries as /etc/glassine-boot/board.conf
+COPY --chmod=644 targets/onyx-noteair/board.conf /etc/glassine-bootimg/board.conf
 
 # A made-up device that tests the chain: it must build on the generic stages unchanged.
 FROM eink AS device-example
