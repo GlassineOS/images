@@ -165,6 +165,14 @@ A build is a trial when an input came from a local checkout, a build argument di
 from its `Dockerfile` default, or the checkout had uncommitted changes. A trial can be
 sent to a device but is never promoted.
 
+**A developer boot image.** `--build-arg CMDLINE_EXTRA=<words>` appends the words to
+the command line of the build's boot image (such as `glassine.devmode=usb`, which a
+board's `CMDLINE` never carries): the image is packed from a copy of the target's
+`board.conf` whose last line is the longer `CMDLINE`, and its boot record's `cmdline`
+and `board` describe that copy. The build record names it (`arg.CMDLINE_EXTRA`,
+`trial_reasons` `arg:CMDLINE_EXTRA`). The boot image of a build that isn't a trial
+carries no `glassine.devmode`: `scripts/boot-check` fails it otherwise.
+
 **Local checkouts.** `scripts/build --local <NAME>=<DIR>` builds every input of a
 repository from a clean checkout of it: the input's commit is the checkout's (`arg.*`
 and `input.<input>.commit` name it), `input.<input>.tree` is that commit's tree, and

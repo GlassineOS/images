@@ -31,7 +31,8 @@
 # trial, another images tree, a missing --at commit, an input tree on no commit of its
 # branch, a dirty checkout, a promoted record with other bytes, an unknown build.
 # Past preflight: a failed export (exit 1, work directory removed), a held host lock
-# (exit 4), --no-cache's per-export filter lists, non-UTF-8 build output, a checkout
+# (exit 4), CMDLINE_EXTRA passed to the boot stage and to boot-check (--cmdline-extra,
+# none without it), --no-cache's per-export filter lists, non-UTF-8 build output, a checkout
 # changed during the build (exit 1), SIGTERM (exit 143, the build step and the work
 # directory gone), and stale work directories of dead runs removed.
 #   scripts/test-build.sh     exit 0 = all checks pass (KEEP=1 keeps .out/test-build/)
@@ -103,7 +104,7 @@ export PATH="$O/bin:$PATH" FAKE_DOCKER_ROOT="$O" FAKE_BUILD_LOG="$O/buildx.log" 
 R=$O/repo; mkdir -p "$R"
 (cd "$P" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - 2>/dev/null) | tar -C "$R" -xf -
 for c in kernel-check boot-check; do
-	printf 'import sys\nprint("stub: 0 failure(s)")\n' > "$R/scripts/$c"
+	printf 'import sys\nprint("args:", *sys.argv[1:])\nprint("stub: 0 failure(s)")\n' > "$R/scripts/$c"
 done
 rg() { git -C "$R" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
 rg init -q; rg add -A; rg commit -q -m copy
@@ -413,6 +414,7 @@ check "a held lock: exit 4"                        '[ "$(rc locked)" = 4 ]'
 check "a held lock: named"                         'has locked "another materialization holds the host lock"'
 check "a held lock: work directory removed"        'nowork locked'
 check "non-UTF-8 build output: the build went on"  'has locked "build: boot-export"'
+check "boot-check without CMDLINE_EXTRA: no --cmdline-extra" 'grep -q "^args: .*/k $TARGET$" "$O"/a.locked/.logs/*/*.log'
 [ "$(rc locked)" = 4 ] || show locked
 python3 -I - "$FAKE_BUILD_LOG" "$R/scripts" "$TARGET" > "$O/filters.out" <<'EOF'
 import re, sys
@@ -433,6 +435,16 @@ check "--no-cache: every export built"             'grep -q "^exports base-expor
 check "--no-cache: each stage built once"          'grep -q "^once True$" "$O/filters.out"'
 check "--no-cache: every stage built"              'grep -q "^all True$" "$O/filters.out"'
 check "--no-cache: boot-export rebuilds only its own" 'grep -q "^boot-export ." "$O/filters.out" && ! grep "^boot-export" "$O/filters.out" | grep -q kernel'
+# a developer boot image: CMDLINE_EXTRA reaches the boot stage and boot-check
+flock "$LOCKF" sleep 60 & HOLD=$!
+sleep 1
+: > "$FAKE_BUILD_LOG"
+run devmode --build-arg "CMDLINE_EXTRA=glassine.devmode=usb"
+kill $HOLD 2>/dev/null || true
+check "CMDLINE_EXTRA: past preflight (exit 4 at the lock)" '[ "$(rc devmode)" = 4 ]'
+check "CMDLINE_EXTRA: the boot image's build gets it" 'grep -- "--target boot-export" "$FAKE_BUILD_LOG" | grep -q -- "--build-arg CMDLINE_EXTRA=glassine.devmode=usb"'
+check "CMDLINE_EXTRA: boot-check gets --cmdline-extra" 'grep -q "^args: .*/k $TARGET --cmdline-extra glassine.devmode=usb$" "$O"/a.devmode/.logs/*/*.log'
+[ "$(rc devmode)" = 4 ] || show devmode
 
 FAKE_TOUCH="$R/README.md" run changed
 git -C "$R" checkout -q README.md

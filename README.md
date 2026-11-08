@@ -83,6 +83,17 @@ folder), laid out as `docs/artifacts.md` defines; each run's log is kept under
 builds the kernel or `boot` from a clean local checkout instead of the pinned commit: a
 trial, which can go to a device but is never promoted.
 
+    scripts/build <target> --build-arg CMDLINE_EXTRA=glassine.devmode=usb
+
+builds a developer boot image: the words are appended to the command line of this one
+boot image (the boot record's `cmdline` and the board.conf the image carries say so),
+while `targets/<target>/board.conf` stays as it is. A board's own `CMDLINE` never
+carries `glassine.devmode` (GlassineOS/boot's rule: it gives anyone with a cable a root
+shell), so a device test that needs the developer mode uses this. Setting it makes the
+build a trial. `scripts/boot-check` fails a boot image whose command line carries
+`glassine.devmode` unless it is told the build's words (`--cmdline-extra`, which
+`scripts/build` passes); a build that isn't a trial never sets them.
+
     scripts/promote <build-id> [--at <commit>]
 
 checks a build that is not a trial against a commit of this repository (default
