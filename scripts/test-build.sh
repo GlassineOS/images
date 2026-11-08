@@ -9,7 +9,7 @@
 # missing lock, a missing stage of the target, an unknown --build-arg, a parent whose
 # record or stream is missing, a builder digest that can't be pulled, no emulation for
 # the target's arch, no loop devices in a privileged container, too little free space.
-#   scripts/test-build.sh     exit 0 = all checks pass
+#   scripts/test-build.sh     exit 0 = all checks pass (KEEP=1 keeps .out/test-build/)
 # Needs python3, git and sh. Works in .out/test-build/ under the checkout, removed at
 # the end.
 set -eu
@@ -116,6 +116,9 @@ fail nolock "FAIL: stage $LOCKED: no lock" "a missing lock"
 mkdir -p "$R/targets/nodevice"; cp "$R/targets/$TARGET/target" "$R/targets/nodevice/target"
 t0=$TARGET; TARGET=nodevice; run nostage; TARGET=$t0
 fail nostage "FAIL: the base chain of nodevice starts from .device-nodevice.: no such stage" "a target without its stage"
+
+run noarg --build-arg JOBS=2
+check "an ARG without a default can be set"     '[ "$(rc noarg)" = 0 ]'
 
 run badarg --build-arg NO_SUCH_ARG=1
 fail badarg "FAIL: --build-arg NO_SUCH_ARG: not an ARG" "an unknown build argument"

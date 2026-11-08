@@ -15,9 +15,10 @@ Options:
   --parent BASE_ID     the parent of a new base (default: the base of the newest build
                        record of TARGET in the artifacts folder)
   --no-parent          a new base gets no parent
-  --build-arg N=V      a build argument for every stage (repeat); must be an ARG with a
-                       default in the Dockerfile; a value other than the default makes
-                       the build a trial. DEVICE is the target and can't be set
+  --build-arg N=V      a build argument for every stage (repeat); must be an ARG of the
+                       Dockerfile; a value other than its default (or any value of one
+                       without a default, such as JOBS) makes the build a trial. DEVICE
+                       is the target and can't be set
   --no-cache           build every stage without BuildKit's layer cache, once per run
                        (an export reuses what an earlier export of this run built);
                        cache mounts, such as the kernel's, are kept: an empty one gives
@@ -335,12 +336,13 @@ def preflight(o, target, adir, work, log):
     facts['arch'] = arch
 
     # the overrides, the pins and the locks
-    defaults = glassine_pins.build_args(dockerfile, {'DEVICE': target})
+    declared = {w.split('=', 1)[0] for line in re.findall(r'^\s*ARG\s+(.+)$', glassine_pins._text(dockerfile), re.M)
+                for w in line.split()}
     for k in o['args']:
         if k == 'DEVICE':
             fails.append('--build-arg DEVICE: the target sets DEVICE')
-        elif k not in defaults:
-            fails.append(f'--build-arg {k}: not an ARG with a default in the Dockerfile')
+        elif k not in declared:
+            fails.append(f'--build-arg {k}: not an ARG of the Dockerfile')
     over = {k: v for k, v in o['args'].items() if k != 'DEVICE'}
     over['DEVICE'] = target
     args, _ = glassine_pins.pins(dockerfile, over)
