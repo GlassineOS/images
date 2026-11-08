@@ -59,6 +59,18 @@ fi
 for s in udev udev-trigger; do
 	[ -e /etc/runlevels/sysinit/$s ] || no "the device manager isn't enabled: no $s in sysinit"
 done
+# what a deployment needs to come up and go down: the machine ID before dbus (the base's
+# is empty, and dbus refuses to start on an empty one), dbus, the accept step after a
+# healthy boot, and a shutdown that stops everything, runs the switch, then leaves the
+# file systems read-only
+for s in boot/bootmisc boot/machine-id default/dbus default/glassine-deploy-accept \
+	shutdown/killprocs shutdown/glassine-switch shutdown/mount-ro; do
+	[ -e /etc/runlevels/$s ] || no "a service a deployment needs isn't enabled: ${s#*/} in ${s%/*}"
+done
+# a clock provider at boot: syslog needs one
+c=0
+for s in hwclock swclock osclock; do [ ! -e /etc/runlevels/boot/$s ] || c=1; done
+[ $c = 1 ] || no "no clock provider (hwclock, swclock or osclock) in boot"
 # every enabled service has its script
 for l in /etc/runlevels/*/*; do
 	[ -e "$l" ] || [ ! -L "$l" ] || no "enabled service without a script: $l -> $(readlink "$l")"
