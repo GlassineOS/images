@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Promote a build (specs/001-base-build, FR-018): check its record against a commit of
+this repository and the inputs' branches, then stage the record as
+promoted/<target>/<build-id>/manifest in this checkout (docs/artifacts.md). It doesn't
+commit or push; it prints what to commit.
+
+    scripts/promote BUILD [--at COMMIT] [--target TARGET] [--artifacts DIR]
+
+  BUILD          a build: its directory (<artifacts>/<target>/builds/<build-id>), its
+                 manifest, or its build id (looked up in the artifacts folder)
+  --at COMMIT    the commit of this repository the build is promoted at (default:
+                 origin/main; fetch it first)
+  --target T     the target, when a build id names builds of several targets
+  --artifacts D  the artifacts folder a build id is looked up in (default: artifacts/
+                 in this checkout)
+
+Checks (all run, each failure named):
+  - the record: format=1, its build and target keys match where it lies
+  - not a trial: trial=no with no trial_reasons, images_clean=yes and no input
+    local=yes (FR-017)
+  - the record's images_commit has the same tree as COMMIT (both must be commits of
+    this checkout)
+  - each git input (input.<ARG>.commit) has a tree, and that tree is the tree of a
+    commit on the input's branch (input.<ARG>.branch) in its repository (the
+    repository ARG beside it in the Dockerfile of images_commit, its value from the
+    record's arg.*): the branch is fetched treeless (commits only) back to 30 days before the
+    earlier of the input commit's date and the build's, and the trees of its commits
+    are searched; when the tree isn't among them and history was cut there, the
+    branch is fetched in full (bounded by a timeout) and searched again
+  - promoted/<target>/<build-id>/manifest is absent, or holds the same bytes
+
+Then the record is written there (under a temporary name, renamed) and staged with
+git add. Work files (throwaway repositories) live in <artifacts>/.work-<pid>/, removed
+at the end.
+
+Exit: 0 promoted (staged), 1 refused (nothing written), 2 usage.
+"""
+import calendar, contextlib, importlib.machinery, importlib.util, os, re, shutil
+import sys, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import glassine_pins  # noqa: E402
+
+_loader = importlib.machinery.SourceFileLoader('build', os.path.join(HERE, 'build'))
+_spec = importlib.util.spec_from_loader('build', _loader)
+build = importlib.util.module_from_spec(_spec)
+_loader.exec_module(build)
+run, last, materialize = build.run, build.last, build.materialize
+MARGIN = 30 * 86400
+
+
+def usage():
+    print(__doc__, file=sys.stderr)
+    sys.exit(2)
+
+
+def parse(argv):
+    o = {'at': 'origin/main', 'target': None, 'artifacts': os.path.join(REPO, 'artifacts')}
+    pos = []
+    it = iter(argv)
+    for a in it:
+        if a in ('--at', '--target', '--artifacts'):
+            v = next(it, None)
+            if not v:
+                usage()
+            o[a[2:]] = v
+        elif a.startswith('-'):
+            usage()
+        else:
+            pos.append(a)
+    if len(pos) != 1:
+        usage()
+    return o, pos[0]
+
+
+def find(build_arg, o):
+    """The build's manifest path."""
+    if os.path.isfile(build_arg):
+        return os.path.abspath(build_arg)
+    if os.path.isfile(os.path.join(build_arg, 'manifest')):
+        return os.path.abspath(os.path.join(build_arg, 'manifest'))
+    if not materialize.BUILD_ID.fullmatch(build_arg):
+        raise materialize.Fail(f'{build_arg}: no build directory, manifest or build id')
+    adir = os.path.abspath(o['artifacts'])
+    targets = [o['target']] if o['target'] else sorted(
+        t for t in (os.listdir(adir) if os.path.isdir(adir) else []) if not t.startswith('.'))
+    found = [os.path.join(adir, t, 'builds', build_arg, 'manifest') for t in targets]
+    found = [p for p in found if os.path.isfile(p)]
+    if not found:
+        raise materialize.Fail(f'build {build_arg}: not in {adir}')
+    if len(found) > 1:
+        raise materialize.Fail(f'build {build_arg}: in several targets ({", ".join(sorted(found))}); use --target')
+    return found[0]
+
+
+def git(*a, timeout=60):
+    return run(['git', '-C', REPO, *a], timeout)
+
+
+def tree_of(commit):
+    rc, out, _ = git('rev-parse', '--verify', '-q', f'{commit}^{{tree}}')
+    return out.strip() if rc == 0 else None
+
+
+def tree_on_branch(work, n, url, commit, tree, branch, built, log):
+    """None when tree is the tree of a commit on branch in url, else why not."""
+    d = os.path.join(work, 'git', str(n))
+    os.makedirs(d)
+
+    def g(*a, timeout=60):
+        return run(['git', '-C', d, '-c', 'protocol.version=2', *a], timeout,
+                   env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+    g('init', '-q', '--bare')
+    since = built
+    if g('fetch', '-q', '--depth=1', '--filter=tree:0', url, commit, timeout=120)[0] == 0:
+        rc, out, _ = g('show', '-s', '--format=%ct', commit)
+        if rc == 0 and out.strip().isdigit():
+            since = min(since, int(out.strip()))
+    ref = f'refs/heads/{branch}'
+    rc, _, err = g('fetch', '-q', '--filter=tree:0', f'--shallow-since={since - MARGIN}', url,
+                   f'+{ref}:{ref}', timeout=180)
+    if rc != 0:     # nothing that recent: the tip alone
+        rc, _, err = g('fetch', '-q', '--filter=tree:0', '--depth=1', url, f'+{ref}:{ref}', timeout=180)
+        if rc != 0:
+            return f'branch {branch} can\'t be fetched from {url}: {last(err)}'
+
+    def search():
+        rc, out, err = g('log', '--format=%T', ref, timeout=300)
+        if rc != 0:
+            return None, f'git log {branch}: {last(err)}'
+        trees = out.split()
+        return tree in trees, len(trees)
+    found, count = search()
+    if found is None:
+        return count
+    if not found and g('rev-parse', '--is-shallow-repository')[1].strip() == 'true':
+        log(f'promote: {url} {branch}: not in the last {count} commits, fetching the whole branch')
+        rc, _, err = g('fetch', '-q', '--filter=tree:0', '--unshallow', url, f'+{ref}:{ref}', timeout=600)
+        if rc != 0:
+            return f'tree {tree} not in the last {count} commits of {branch}, and the rest can\'t be fetched: {last(err)}'
+        found, count = search()
+        if found is None:
+            return count
+    return None if found else f'tree {tree} is the tree of no commit on {branch} in {url} ({count} commits searched)'
+
+
+def check(rec, path, o, work, log):
+    """Every FR-018 check; the list of failures."""
+    fails = []
+    bdir = os.path.dirname(path)
+    target = rec.get('target', '')
+    if rec.get('build') != os.path.basename(bdir):
+        fails.append(f'the record says build={rec.get("build")}, it lies in {os.path.basename(bdir)}')
+    if not materialize.NAME.fullmatch(target) or target.startswith('.'):
+        fails.append(f'the record names no valid target ({target!r})')
+    elif os.path.basename(os.path.dirname(os.path.dirname(bdir))) != target:
+        fails.append(f'the record says target={target}, it lies under '
+                     f'{os.path.basename(os.path.dirname(os.path.dirname(bdir)))}')
+
+    # not a trial
+    inputs = sorted({k.split('.')[1] for k in rec if re.fullmatch(r'input\.\w+\.commit', k)})
+    if rec.get('trial') != 'no' or rec.get('trial_reasons'):
+        fails.append(f'a trial ({rec.get("trial_reasons") or "trial=" + rec.get("trial", "")}): '
+                     'a trial is never promoted')
+    else:
+        if rec.get('images_clean') != 'yes':
+            fails.append(f'images_clean={rec.get("images_clean", "")}: built from a checkout with changes')
+        for i in inputs:
+            if rec.get(f'input.{i}.local') != 'no':
+                fails.append(f'input {i}: local={rec.get(f"input.{i}.local", "")}')
+
+    # this repository
+    at_tree = tree_of(o['at'])
+    ic = rec.get('images_commit', '')
+    rec_tree = tree_of(ic) if re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', ic) else None
+    if at_tree is None:
+        fails.append(f'--at {o["at"]}: not a commit of this checkout (git fetch?)')
+    if rec_tree is None:
+        fails.append(f'images_commit {ic or "(empty)"}: not a commit of this checkout (git fetch?)')
+    if at_tree and rec_tree and at_tree != rec_tree:
+        fails.append(f'images_commit {ic[:12]} has tree {rec_tree[:12]}, {o["at"]} has tree {at_tree[:12]}: '
+                     'built from other files than the commit it would be promoted at')
+
+    # the git inputs, against the repositories named in the build's Dockerfile
+    src = ic if rec_tree else o['at'] if at_tree else None
+    if src is None:
+        return fails
+    rc, df, err = git('show', f'{src}:Dockerfile')
+    if rc != 0:
+        fails.append(f'{src}: no Dockerfile ({last(err)})')
+        return fails
+    dockerfile = os.path.join(work, 'Dockerfile')
+    with open(dockerfile, 'w') as f:
+        f.write(df)
+    try:
+        repos = glassine_pins.repos(dockerfile)
+    except ValueError as e:
+        fails.append(f'{src}: {e}')
+        return fails
+    try:
+        built = calendar.timegm(time.strptime(rec.get('built', ''), '%Y-%m-%dT%H:%M:%SZ'))
+    except ValueError:
+        built = int(time.time())
+        fails.append(f'built={rec.get("built", "")}: not a time')
+    missing = sorted(set(repos) - set(inputs))
+    if missing:
+        fails.append(f'the record has no input {" ".join(missing)} (the Dockerfile at {src[:12]} pins it)')
+    for n, i in enumerate(inputs):
+        commit, tree = rec.get(f'input.{i}.commit', ''), rec.get(f'input.{i}.tree', '')
+        branch, url = rec.get(f'input.{i}.branch', ''), rec.get(f'arg.{repos.get(i, "")}', '')
+        if i not in repos:
+            fails.append(f'input {i}: no git input of the Dockerfile at {src[:12]}')
+            continue
+        if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', tree) or not branch or not url:
+            fails.append(f'input {i}: the record lacks its tree, branch or repository '
+                         f'(arg.{repos[i]})')
+            continue
+        why = tree_on_branch(work, n, url, commit, tree, branch, built, log)
+        if why:
+            fails.append(f'input {i}: {why}')
+        else:
+            log(f'promote: {i}: tree {tree[:12]} is on {branch}')
+    return fails
+
+
+def main(argv):
+    o, barg = parse(argv)
+    try:
+        path = find(barg, o)
+        rec = materialize.record(path)
+    except (materialize.Fail, OSError, UnicodeDecodeError) as e:
+        print(f'promote: FAIL: {e}', file=sys.stderr)
+        return 1
+    adir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+    work = os.path.join(adir, f'.work-{os.getpid()}')
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    try:
+        log = print
+        log(f'promote: {path} at {o["at"]}')
+        try:
+            fails = check(rec, path, o, work, log)
+        except Exception as e:      # noqa: BLE001 -- refused, with the cause
+            fails = [f'{type(e).__name__}: {e}']
+        target, bid = rec.get('target', ''), rec.get('build', '')
+        rel = os.path.join('promoted', target, bid, 'manifest')
+        dest = os.path.join(REPO, rel)
+        data = materialize.read(path)
+        if not fails and os.path.exists(dest) and materialize.read(dest) != data:
+            fails.append(f'{rel} exists with other content')
+        if fails:
+            for f in fails:
+                print(f'promote: FAIL: {f}', file=sys.stderr)
+            print(f'promote: {target}/{bid} refused, nothing written', file=sys.stderr)
+            return 1
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest + '.tmp', 'wb') as f:
+            f.write(data)
+        os.replace(dest + '.tmp', dest)
+        rc, _, err = git('add', '--', rel)
+        if rc != 0:
+            print(f'promote: FAIL: git add {rel}: {last(err)}', file=sys.stderr)
+            return 1
+        print(f'promote: {target}/{bid} staged as {rel}; commit it:')
+        print(f'  git commit -m "promoted: {target} {bid}" -- {rel}')
+        return 0
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+if __name__ == '__main__':
+    with contextlib.suppress(KeyboardInterrupt):
+        sys.exit(main(sys.argv[1:]))
+    sys.exit(130)

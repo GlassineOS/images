@@ -28,7 +28,8 @@ Options:
   --no-parent     a new base gets no parent (only its full stream)
   --arg NAME=VAL  a build argument the build used besides the Dockerfile's defaults
                   (repeat). Goes into the record (arg.*); one that differs from its
-                  default makes the build a trial. DEVICE is set to TARGET
+                  default makes the build a trial (arg:NAME), except the commit of an
+                  input from a local checkout (local:NAME). DEVICE is set to TARGET
   --build-info F  what only the build command knows, key=value, one per line (# and
                   blank lines ignored). Keys:
                     images_commit        this repository's commit
@@ -196,6 +197,19 @@ def build_info(path, inputs):
     return info
 
 
+def trial_reasons(info, inputs, args, defaults):
+    """FR-017: local:<input> for each input from a local checkout; arg:<NAME> for each
+    build argument that differs from its default, except a local input's commit (the
+    checkout gives it: local says so); dirty or clean-unknown unless the checkout was
+    clean."""
+    local = [i for i in inputs if info.get(f'input.{i}.local') == 'yes']
+    why = [f'local:{i}' for i in local]
+    why += [f'arg:{a}' for a in args if args[a] != defaults.get(a) and a not in local]
+    if info.get('images_clean') != 'yes':
+        why.append('dirty' if info.get('images_clean') == 'no' else 'clean-unknown')
+    return why
+
+
 def git(repo, *args):
     try:
         return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True,
@@ -350,10 +364,7 @@ def main(argv):
     if 'images_clean' not in info:
         s = git(repo, 'status', '--porcelain')
         info['images_clean'] = '' if s is None else ('yes' if not s.strip() else 'no')
-    why = [f'local:{i}' for i in inputs if info.get(f'input.{i}.local') == 'yes']
-    why += [f'arg:{a}' for a in args if args[a] != defaults.get(a)]
-    if info['images_clean'] != 'yes':
-        why.append('dirty' if info['images_clean'] == 'no' else 'clean-unknown')
+    why = trial_reasons(info, inputs, args, defaults)
     # no feature table exists yet (GlassineOS/boot conf/kernel-features): needs and
     # features stay empty until it does
     needs, features = '', ''
