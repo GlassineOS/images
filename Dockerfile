@@ -126,6 +126,12 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
     --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
+# A base boots as a deployment (GlassineOS/boot's docs/boot.md, "Deployments layout"):
+# its `/` is a read-only bind of the deployment's overlay, and OpenRC remounts `/`
+# read-write unless fstab says otherwise. `bind,ro` keeps that bind read-only and leaves
+# the read-write binds below it (/etc, /var) alone. alpine-baselayout owns the file (a
+# protected configuration file, so apk never replaces it), hence a RUN, not rootfs/.
+RUN echo 'overlay / overlay bind,ro 0 0' > /etc/fstab
 COPY stages/glassine-common/rootfs/ /
 
 # Any e-ink device: the panel daemons and the e-ink session, started at boot.
