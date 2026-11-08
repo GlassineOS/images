@@ -1,0 +1,23 @@
+# What a switch (an update, a reset) carries from the running deployment into the next
+# one: GlassineOS/boot docs/deployments.md, "Migrate lists". One absolute path per line,
+# a trailing / for a directory. Only state of what this stage installs; a person adds
+# their own in /etc/glassine/migrate.d/*.list. Accounts and passwords are not listed:
+# the switch merges them itself.
+
+# the person's own lists
+/etc/glassine/migrate.d/
+# Wi-Fi and network state (NetworkManager)
+/etc/NetworkManager/system-connections/
+/var/lib/NetworkManager/
+# Bluetooth pairings (bluez)
+/var/lib/bluetooth/
+# identity and time zone
+/etc/hostname
+/etc/hosts
+/etc/localtime
+/etc/timezone
+/etc/machine-id
+/var/lib/dbus/machine-id
+# software installed outside the package manager
+/usr/local/
+/opt/

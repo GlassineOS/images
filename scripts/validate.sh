@@ -60,4 +60,6 @@ done
 for l in /etc/runlevels/*/*; do
 	[ -e "$l" ] || [ ! -L "$l" ] || no "enabled service without a script: $l -> $(readlink "$l")"
 done
+# a switch carries what this list names (GlassineOS/boot docs/deployments.md)
+[ -s /usr/share/glassine/migrate.list ] || no "no migrate list (/usr/share/glassine/migrate.list)"
 exit $fail
