@@ -33,10 +33,10 @@ ARG DEVICE=onyx-noteair
 # through QEMU (hence the constant --platform, and the lint check skipped above). The
 # kernel compiles in a cache mount, so a small source change rebuilds only what it touches;
 # an empty cache gives the same result. The mount's id is KCACHE, a dash and the builder's
-# digest, so a new builder starts from an empty mount.
+# digest, so a new builder starts from an empty mount. The builder is only ever named by
+# these two (no combined argument to override), so the mount's id always follows it.
 ARG KERNEL_BUILD_IMAGE=ghcr.io/glassineos/kernel-build
 ARG KERNEL_BUILD_DIGEST=sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebca86e553ae84f3b3
-ARG KERNEL_BUILD=${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST}
 ARG LINUX=https://github.com/GlassineOS/linux
 # glassine/sdm660-7.3-config-split (the config split); moves to glassine/sdm660-7.3 once merged there
 ARG LINUX_SDM660=deb74f03e647c3d0a21377168758e1a138042152
@@ -48,7 +48,7 @@ ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
 # for a commit id.
-FROM --platform=linux/amd64 ${KERNEL_BUILD} AS linux-sdm660-src
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS linux-sdm660-src
 ARG LINUX LINUX_SDM660
 WORKDIR /src/linux
 RUN git init -q && git fetch -q --depth=1 "$LINUX" "$LINUX_SDM660" \
@@ -70,8 +70,8 @@ ADD --checksum=sha256:be904cd28cb292b80cdb6cf412ab0d9159d431671e987ad433c1f62e09
 # The kernel for SoCs of the sdm660 family: compiled once for every device whose target
 # names kernel=sdm660, with the firmware it needs. It names no device tree: those are
 # built by the dtb stage and paired with a kernel by a device's select record.
-FROM --platform=linux/amd64 ${KERNEL_BUILD} AS kernel-sdm660
-ARG KERNEL_BUILD KERNEL_BUILD_DIGEST LINUX LINUX_SDM660
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS kernel-sdm660
+ARG KERNEL_BUILD_IMAGE KERNEL_BUILD_DIGEST LINUX LINUX_SDM660
 ARG KCACHE=kernel-sdm660
 ARG JOBS
 RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux \
@@ -79,7 +79,7 @@ RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux 
     --mount=type=bind,from=firmware-sdm660,target=/run/firmware \
     --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
     --mount=type=cache,id=${KCACHE}-${KERNEL_BUILD_DIGEST},target=/cache,sharing=locked \
-    REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=$KERNEL_BUILD JOBS=$JOBS sh /run/kernel.sh build
+    REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=$KERNEL_BUILD_IMAGE@$KERNEL_BUILD_DIGEST JOBS=$JOBS sh /run/kernel.sh build
 
 FROM kernel-${KERNEL} AS kernel
 FROM scratch AS kernel-export
@@ -94,7 +94,7 @@ RUN if [ "$(git rev-parse HEAD)" != "$DTB_COMMIT" ]; then \
         && git -c advice.detachedHead=false checkout -q FETCH_HEAD; fi \
     && test "$(git rev-parse HEAD)" = "$DTB_COMMIT"
 
-FROM --platform=linux/amd64 ${KERNEL_BUILD} AS dtb
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS dtb
 ARG LINUX DTB_COMMIT DEVICE JOBS
 RUN --mount=type=bind,from=dtb-src,source=/src/linux,target=/src/linux \
     --mount=type=bind,source=targets/${DEVICE},target=/run/target \

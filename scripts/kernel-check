@@ -65,12 +65,15 @@ def record(path, keys):
     return rec
 
 
-def pins(dockerfile):
-    """ARG defaults and ADD --checksum lines from the Dockerfile."""
+def pins(dockerfile, over=None):
+    """ARG defaults (with --arg overrides, applied before ${X} in a default is
+    expanded, as docker does) and ADD --checksum lines from the Dockerfile."""
     text = read(dockerfile).decode().replace('\\\n', ' ')
     args = dict(re.findall(r'^ARG (\w+)=(\S+)', text, re.M))
+    args.update(over or {})
     for k, v in list(args.items()):     # one level of ${X} in a default
         args[k] = re.sub(r'\$\{(\w+)\}', lambda m: args.get(m.group(1), m.group(0)), v)
+    args['KERNEL_BUILD'] = f"{args.get('KERNEL_BUILD_IMAGE', '')}@{args.get('KERNEL_BUILD_DIGEST', '')}"
     fw = {}
     for csum, dest in re.findall(r'^ADD --checksum=sha256:([0-9a-f]{64})\s+\$\{LINUX_FIRMWARE\}\S*\s+(\S+)', text, re.M):
         fw[dest.lstrip('/')] = csum
@@ -292,10 +295,7 @@ def main(argv):
         compare(argv[1], argv[2])
     elif len(argv) == 1 and not argv[0].startswith('-'):
         out = argv[0]
-        args, fw = pins(os.path.join(HERE, '..', 'Dockerfile'))
-        if 'LINUX_SDM660' in over and 'DTB_COMMIT' not in over:
-            over['DTB_COMMIT'] = over['LINUX_SDM660']
-        args.update(over)
+        args, fw = pins(os.path.join(HERE, '..', 'Dockerfile'), over)
         has_k = os.path.isdir(os.path.join(out, 'modules'))
         has_d = os.path.isdir(os.path.join(out, 'boot'))
         if not os.path.isdir(out):
