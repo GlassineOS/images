@@ -1,3 +1,4 @@
 *.tar
 /specs/*/*
 !/specs/*/spec.md
+/.out/
