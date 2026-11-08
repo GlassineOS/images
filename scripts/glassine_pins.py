@@ -6,6 +6,7 @@ holds them):
     branches(dockerfile)               the git inputs: {commit ARG: the branch it follows}
     repos(dockerfile)                  the git inputs: {commit ARG: the ARG naming its repository}
     builders(dockerfile, over)         the builder images pinned by digest: {image: digest}
+    platforms(dockerfile)              the constant platforms of FROM --platform=...
     stages(dockerfile)                 every FROM ... AS stage: its parent and the stages it reads
     chain(dockerfile, target, over)    the stage chain of a target's base, in build order
     locked(names, stages_dir)          the stages of names that have stages/<stage>/lock
@@ -94,6 +95,13 @@ def builders(dockerfile, over=None):
     args, _ = pins(dockerfile, over)
     return {args[k]: args[k[:-6] + '_DIGEST'] for k in sorted(args)
             if k.endswith('_IMAGE') and args.get(k[:-6] + '_DIGEST')}
+
+
+def platforms(dockerfile):
+    """The platforms stages name with a constant FROM --platform= (no ${X}, no
+    $BUILDPLATFORM): a build needs them besides the target's own."""
+    return sorted(set(re.findall(r'^\s*FROM\s+(?:--\S+\s+)*?--platform=([^\s$]+)\s', _text(dockerfile),
+                                 re.M | re.I)))
 
 
 def _expand(word, args):

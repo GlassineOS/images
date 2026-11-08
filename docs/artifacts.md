@@ -142,7 +142,7 @@ taken. The manifest never enters a base.
 | `uuid`, `received_uuid` | the base subvolume's UUID and received UUID |
 | `built` | the build's start, `YYYY-MM-DDTHH:MM:SSZ` |
 | `images_commit` | this repository's commit |
-| `images_clean` | `yes` when the checkout had no uncommitted changes to tracked files, `no` otherwise, empty when unknown |
+| `images_clean` | `yes` when the checkout had no uncommitted changes to tracked files and no untracked files git doesn't ignore (a stage's `COPY` reads those), `no` otherwise, empty when unknown |
 | `trial` | `yes` or `no` |
 | `trial_reasons` | why it is a trial, space-separated: `local:<input>`, `arg:<NAME>` (differs from the Dockerfile's default), `dirty`, `clean-unknown` |
 | `unmerged` | the inputs whose commits are not on their branch, space-separated |

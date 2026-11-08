@@ -34,13 +34,17 @@ In order (each step's time is printed, and again at the end):
   4. scripts/materialize with the overrides (--arg), the build info (--build-info), the
      parent options and the build's start (--time)
 
-Preflight (FR-004), in seconds, all checks run and every failure is named:
-  - docker, git and python3 present; the target's file; the overrides are known ARGs
+Preflight (FR-004), in seconds, all checks run and every failure is named (an error
+inside a check is that check's failure):
+  - docker, git and python3 present; the target's file; the overrides are ARGs of the
+    Dockerfile; the target's kernel= is the effective KERNEL (the Dockerfile's KERNEL is
+    a pin: a target on another kernel needs its own, or a --build-arg trial)
   - every stage the exports build from that installs packages (stages/<stage>/packages)
     has its lock; the base chain starts from an image, not from a missing stage
   - the parent: the named base, or the base of the newest build record, is complete
     (record, content manifest, streams matching their sha256)
-  - emulation: the host is linux/<arch>, or docker buildx lists linux/<arch>
+  - emulation: every platform the build needs (linux/<arch> and each constant
+    FROM --platform= in the Dockerfile) that isn't the host's is listed by docker buildx
   - a privileged container can attach a loop device to a file on a tmpfs (what
     materialization does); it runs MATERIALIZE_IMAGE, so that image is pullable too
   - free space: 2 GiB in the artifacts folder (a build stages the tar export, ~0.5 GiB,
@@ -48,7 +52,9 @@ Preflight (FR-004), in seconds, all checks run and every failure is named:
     ~0.2 GiB, the modules stream ~25 MiB), 10 GiB for the docker root (the kernel's
     cache mount alone holds ~7.5 GiB, plus the stage layers); 12 GiB when both are on
     one file system (taken as one when both report the same size and free space
-    within 256 MiB).
+    within 256 MiB). The docker root's space is what the probe container sees (the
+    daemon's own view, also for a remote daemon); DockerRootDir on this host only when
+    the probe gives none.
     BUILD_MIN_ARTIFACTS_GIB and BUILD_MIN_DOCKER_GIB change the thresholds
   - every git input's commit (its "# branch:" ARG, with the overrides) can be fetched
     from its repository (the URL ARG declared beside it): a shallow, treeless fetch of
@@ -56,8 +62,10 @@ Preflight (FR-004), in seconds, all checks run and every failure is named:
   - every builder image pinned by digest (<X>_IMAGE + <X>_DIGEST) and the base image
     (ALPINE) can be pulled (docker buildx imagetools inspect)
 
-Build info for materialize: images_commit (git rev-parse HEAD), images_clean (no
-uncommitted change to tracked files), input.<ARG>.tree (the fetched commit's tree),
+Build info for materialize: images_commit (git rev-parse HEAD) and images_clean (the
+checkout's tracked files and the untracked files git doesn't ignore, which a stage's COPY
+reads, are HEAD's tree), both taken at preflight and taken again after the exports: a
+change in between fails the build, input.<ARG>.tree (the fetched commit's tree),
 input.<ARG>.local = no, builder.<image> = its pinned digest, and unmerged: the inputs
 whose commit isn't an ancestor of their branch's tip. For a github.com repository that
 is the compare API (one request: compare/<commit>...<branch> is "ahead" or "identical"
@@ -67,9 +75,10 @@ commit's date and git merge-base --is-ancestor decides; when that says no while 
 was cut, the branch is unshallowed (bounded by a timeout) and asked again; still
 undecided counts as unmerged.
 
-Work files (the tar export, the kernel exports, the throwaway repositories, the build
-log) live in <artifacts>/.work-<pid>/, a name never read as an artifact, removed at the
-end. The log of every run is kept as <artifacts>/.logs/<TARGET>/<start>.log.
+Work files (the tar export, the kernel exports, the throwaway repositories) live in <artifacts>/.work-<pid>/, a name never read as an artifact, removed at the
+end, also on SIGTERM, SIGHUP and Ctrl-C (the running build step is stopped first); a
+.work-<pid> whose process is gone is removed by the next run. The log of every run is
+kept as <artifacts>/.logs/<TARGET>/<start>.log.
 
 Environment: BUILD_TIMEOUT (seconds per export, default 14400), BUILD_MIN_ARTIFACTS_GIB,
 BUILD_MIN_DOCKER_GIB, MATERIALIZE_IMAGE (default alpine:3.24), and materialize's own.
@@ -77,8 +86,9 @@ BUILD_MIN_DOCKER_GIB, MATERIALIZE_IMAGE (default alpine:3.24), and materialize's
 Exit: 0 built, 1 failed (nothing new in the artifacts folder but the log), 2 usage,
 3 preflight failed, 4 another materialization holds the host lock.
 """
-import concurrent.futures, contextlib, datetime, io, importlib.machinery, importlib.util, json, os, platform
-import re, shutil, subprocess, sys, time, urllib.error, urllib.request
+import concurrent.futures, contextlib, datetime, http.client, io, importlib.machinery
+import importlib.util, json, os, platform, re, selectors, shutil, signal, subprocess, sys, time
+import urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -138,7 +148,8 @@ def parse(argv):
 def run(cmd, timeout, **kw):
     """subprocess.run with a timeout; (returncode, stdout, stderr), 124 on timeout."""
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+        p = subprocess.run(cmd, capture_output=True, text=True, errors='replace',
+                           timeout=timeout, **kw)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, '', f'timed out after {timeout} s'
@@ -161,9 +172,12 @@ def free_bytes(path):
     return st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
 
 
-def check_emulation(arch):
-    host = ARCHES.get(platform.machine(), platform.machine())
-    if host == arch:
+def check_emulation(arch, others=()):
+    """Every platform the build needs (the target's, linux/<arch>, and the constant
+    --platform of any stage) that isn't the host's must be listed by docker buildx."""
+    host = 'linux/' + ARCHES.get(platform.machine(), platform.machine())
+    need = sorted(({f'linux/{arch}'} | set(others)) - {host})
+    if not need:
         return []
     rc, out, err = run(['docker', 'buildx', 'inspect'], 30)
     if rc != 0:
@@ -172,11 +186,9 @@ def check_emulation(arch):
     for line in out.splitlines():
         if line.strip().startswith('Platforms:'):
             plats |= {p.strip().rstrip('*') for p in line.split(':', 1)[1].split(',')}
-    if f'linux/{arch}' not in plats:
-        return [f'no {arch} emulation: docker buildx lists {", ".join(sorted(plats)) or "no platforms"}, '
-                f'not linux/{arch} (install QEMU user emulation with binfmt_misc, e.g. the '
-                f'tonistiigi/binfmt image, or build on a {arch} host)']
-    return []
+    return [f'no emulation for {p} on this {host} host: docker buildx lists '
+            f'{", ".join(sorted(plats)) or "no platforms"} (install QEMU user emulation with '
+            f'binfmt_misc, e.g. the tonistiigi/binfmt image)' for p in need if p not in plats]
 
 
 PROBE = r'''
@@ -204,20 +216,34 @@ def check_privileged(image):
     return [], (int(m.group(2)) * 1024, int(m.group(1)) * 1024)
 
 
+def threshold(name, default):
+    v = os.environ.get(name, str(default))
+    try:
+        x = float(v)
+    except ValueError:
+        x = -1
+    if not x >= 0:
+        raise Fail(f'{name}={v!r}: not a number of GiB')
+    return x * GIB
+
+
 def check_space(adir, docker_df):
+    """The artifacts folder's file system, and the docker root's as the daemon sees it:
+    the probe's answer from inside a container (right for a remote daemon too); a local
+    walk to DockerRootDir only when the probe gave none."""
     fails = []
-    need_a = float(os.environ.get('BUILD_MIN_ARTIFACTS_GIB', 2)) * GIB
-    need_d = float(os.environ.get('BUILD_MIN_DOCKER_GIB', 10)) * GIB
+    need_a = threshold('BUILD_MIN_ARTIFACTS_GIB', 2)
+    need_d = threshold('BUILD_MIN_DOCKER_GIB', 10)
     a = free_bytes(adir)
-    d = None
-    rc, out, _ = run(['docker', 'info', '--format', '{{.DockerRootDir}}'], 30)
-    root = out.strip() if rc == 0 else ''
-    if root and root.startswith('/'):
-        try:
-            d = free_bytes(root)
-        except OSError:
-            d = None
-    d = d or docker_df
+    d = docker_df
+    if d is None:
+        rc, out, _ = run(['docker', 'info', '--format', '{{.DockerRootDir}}'], 30)
+        root = out.strip() if rc == 0 else ''
+        if root.startswith('/') and os.path.exists(root):
+            try:
+                d = free_bytes(root)
+            except OSError:
+                d = None
     if d is None:
         return ['free space of the docker root unknown (docker info and the probe gave none)']
     one = a[1] == d[1] and abs(a[0] - d[0]) < (256 << 20)
@@ -250,7 +276,9 @@ def gh_merged(url, commit, branch):
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             status = json.load(r).get('status')
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
+        return None
+    if not isinstance(status, str):
         return None
     return {'ahead': True, 'identical': True, 'behind': False, 'diverged': False}.get(status)
 
@@ -266,7 +294,7 @@ def git_merged(g, url, commit, branch, log):
     if rc != 0:     # nothing after that date: the tip alone
         rc, _, err = g('fetch', '-q', '--filter=tree:0', '--depth=1', url, f'+{ref}:{ref}', timeout=120)
         if rc != 0:
-            raise Fail(f'branch {branch} of {url} can\'t be fetched: {last(err)}')
+            raise Fail(f'branch {branch} can\'t be fetched from {url}: {last(err)}')
     if g('merge-base', '--is-ancestor', commit, ref)[0] == 0:
         return True
     rc, out, _ = g('rev-parse', '--is-shallow-repository')
@@ -282,7 +310,8 @@ def git_merged(g, url, commit, branch, log):
 
 def check_git(work, n, url, commit, branches, log):
     """Fetch commit (shallow, treeless) into a throwaway bare repository: its tree and,
-    per branch, whether it is on it. Returns (failures, tree, {branch: merged})."""
+    per branch, whether it is on it. Returns (failures, tree, {branch: merged}); a
+    failure is a message, or (branch, message) when only that branch's inputs fail."""
     d = os.path.join(work, 'git', str(n))
     os.makedirs(d)
 
@@ -298,11 +327,17 @@ def check_git(work, n, url, commit, branches, log):
     rc, tree, err = g('rev-parse', '--verify', '-q', f'{commit}^{{tree}}')
     if rc != 0:
         return [f'commit {commit} from {url}: no tree ({last(err)})'], '', {}
-    merged = {}
+    merged, fails = {}, []
     for b in branches:
         m = gh_merged(url, commit, b)
-        merged[b] = m if m is not None else git_merged(g, url, commit, b, log)
-    return [], tree.strip(), merged
+        if m is None:
+            try:
+                m = git_merged(g, url, commit, b, log)
+            except Fail as e:
+                fails.append((b, str(e)))
+                continue
+        merged[b] = m
+    return fails, tree.strip(), merged
 
 
 def check_image(ref):
@@ -312,12 +347,44 @@ def check_image(ref):
     return []
 
 
+def checkout_state(work):
+    """(HEAD, the tree of the checkout as it is, clean): the tree holds the tracked files
+    and the untracked ones git doesn't ignore (what a stage's COPY can read), written
+    with a throwaway index. clean = that tree is HEAD's. ('', '', '') outside git."""
+    rc, head, _ = run(['git', '-C', REPO, 'rev-parse', '--verify', '-q', 'HEAD'], 30)
+    rc2, idx, _ = run(['git', '-C', REPO, 'rev-parse', '--path-format=absolute', '--git-path', 'index'], 30)
+    if rc != 0 or rc2 != 0:
+        return '', '', ''
+    tmp = os.path.join(work, f'index.{time.monotonic_ns()}')
+    if os.path.isfile(idx.strip()):
+        shutil.copyfile(idx.strip(), tmp)
+    env = {**os.environ, 'GIT_INDEX_FILE': tmp}
+    rc, _, _ = run(['git', '-C', REPO, 'add', '-A', '--ignore-errors', '.'], 120, env=env)
+    rc3, tree, _ = run(['git', '-C', REPO, 'write-tree'], 60, env=env)
+    rc4, htree, _ = run(['git', '-C', REPO, 'rev-parse', 'HEAD^{tree}'], 30)
+    with contextlib.suppress(OSError):
+        os.remove(tmp)
+    if rc != 0 or rc3 != 0 or rc4 != 0:
+        return head.strip(), '', ''
+    return head.strip(), tree.strip(), 'yes' if tree.strip() == htree.strip() else 'no'
+
+
 def preflight(o, target, adir, work, log):
-    """FR-004. Returns (failures, facts): facts hold what the build needs."""
+    """FR-004. Returns (failures, facts): facts hold what the build needs. Every check
+    runs; an exception in one is that check's failure."""
     fails = []
-    facts = {'arch': '', 'info': {}}
+    facts = {'arch': '', 'info': {}, 'over': {}, 'state': ('', '', '')}
     dockerfile = os.path.join(REPO, 'Dockerfile')
     stages_dir = os.path.join(REPO, 'stages')
+
+    def guard(what, fn, *a):
+        try:
+            return fn(*a)
+        except Exception as e:      # noqa: BLE001 -- every failure is named, none ends preflight
+            fails.append(f'{what}: {e}' if isinstance(e, (Fail, materialize.Fail))
+                         else f'{what}: {type(e).__name__}: {e}')
+            return None
+
     for tool in ('docker', 'git', 'python3'):
         if not shutil.which(tool):
             fails.append(f'{tool} not found')
@@ -326,93 +393,107 @@ def preflight(o, target, adir, work, log):
     tfile = os.path.join(REPO, 'targets', target, 'target')
     if not materialize.NAME.fullmatch(target) or target.startswith('.') or not os.path.isfile(tfile):
         return [f'no target {target!r} (no {tfile})'], facts
-    try:
-        trec = materialize.record(tfile)
-    except materialize.Fail as e:
-        return [str(e)], facts
+    trec = guard(f'target {target}', materialize.record, tfile) or {}
     arch = trec.get('arch', '')
-    if not re.fullmatch(r'[a-z0-9]+', arch):
-        return [f'{tfile}: no arch'], facts
+    if trec and not re.fullmatch(r'[a-z0-9]+', arch):
+        fails.append(f'{tfile}: no arch')
     facts['arch'] = arch
 
+    # the checkout this build is made from (compared again after the exports)
+    facts['state'] = guard('the checkout', checkout_state, work) or ('', '', '')
+
     # the overrides, the pins and the locks
-    declared = {w.split('=', 1)[0] for line in re.findall(r'^\s*ARG\s+(.+)$', glassine_pins._text(dockerfile), re.M)
-                for w in line.split()}
-    for k in o['args']:
-        if k == 'DEVICE':
-            fails.append('--build-arg DEVICE: the target sets DEVICE')
-        elif k not in declared:
-            fails.append(f'--build-arg {k}: not an ARG of the Dockerfile')
     over = {k: v for k, v in o['args'].items() if k != 'DEVICE'}
     over['DEVICE'] = target
-    args, _ = glassine_pins.pins(dockerfile, over)
-    st = glassine_pins.stages(dockerfile, args)
-    try:
+    facts['over'] = {k: v for k, v in o['args'].items() if k != 'DEVICE'}
+
+    def pins_checks():
+        declared = {w.split('=', 1)[0] for line in re.findall(r'^\s*ARG\s+(.+)$', glassine_pins._text(dockerfile), re.M)
+                    for w in line.split()}
+        for k in o['args']:
+            if k == 'DEVICE':
+                fails.append('--build-arg DEVICE: the target sets DEVICE')
+            elif k not in declared:
+                fails.append(f'--build-arg {k}: not an ARG of the Dockerfile')
+        args, _ = glassine_pins.pins(dockerfile, over)
+        # the target names its kernel stage; the Dockerfile's KERNEL (a pin) must be it
+        if trec.get('kernel') and args.get('KERNEL') != trec['kernel']:
+            fails.append(f'{tfile} names kernel={trec["kernel"]}, the build would use KERNEL={args.get("KERNEL")} '
+                         f'(pin it in the Dockerfile, or --build-arg KERNEL={trec["kernel"]} for a trial)')
+        st = glassine_pins.stages(dockerfile, args)
         chain = glassine_pins.chain(dockerfile, target, over)
         first_parent = st[chain[0]][0]
         if first_parent != 'scratch' and not re.search(r'[:@/]', first_parent):
             fails.append(f'the base chain of {target} starts from {first_parent!r}: no such stage '
                          f'(expected one stage per device, device-{target})')
-    except ValueError as e:
-        fails.append(str(e))
-    for name in glassine_pins.reachable(dockerfile, [BASE_EXPORT] + KERNEL_EXPORTS, over):
-        sd = os.path.join(stages_dir, name)
-        if os.path.isfile(os.path.join(sd, 'packages')) and not os.path.isfile(os.path.join(sd, 'lock')):
-            fails.append(f'stage {name}: no lock (stages/{name}/lock; scripts/lock.sh writes it)')
+        for name in glassine_pins.reachable(dockerfile, [BASE_EXPORT] + KERNEL_EXPORTS, over):
+            sd = os.path.join(stages_dir, name)
+            if os.path.isfile(os.path.join(sd, 'packages')) and not os.path.isfile(os.path.join(sd, 'lock')):
+                fails.append(f'stage {name}: no lock (stages/{name}/lock; scripts/lock.sh writes it)')
+        return args
+    args = guard('the Dockerfile', pins_checks) or {}
 
     # the parent (materialize checks it again; here it fails before any stage builds)
     if not o['no_parent']:
-        try:
+        def parent():
             with contextlib.redirect_stdout(io.StringIO()):     # materialize says it again
                 p = materialize.pick_parent(adir, target, o['parent'], False)
             log(f'preflight: parent {p or "none (no earlier build of " + target + ")"}')
-        except (materialize.Fail, OSError, KeyError) as e:
-            fails.append(f'parent: {e}')
+        guard('parent', parent)
 
     # the git inputs: (url, commit) → the inputs and branches it serves
-    try:
-        repo_args = glassine_pins.repos(dockerfile)
-    except ValueError as e:
-        return fails + [str(e)], facts
-    branches = glassine_pins.branches(dockerfile)
+    branches = guard('the git inputs', glassine_pins.branches, dockerfile) or {}
+    repo_args = guard('the git inputs', glassine_pins.repos, dockerfile) or {}
     fetches = {}
     for i, b in branches.items():
-        key = (args.get(repo_args[i], ''), args.get(i, ''))
-        fetches.setdefault(key, []).append((i, b))
-    builders = glassine_pins.builders(dockerfile, over)
+        if i in repo_args:
+            fetches.setdefault((args.get(repo_args[i], ''), args.get(i, '')), []).append((i, b))
+    builders = guard('the builder images', glassine_pins.builders, dockerfile, over) or {}
+    others = guard('the platforms', glassine_pins.platforms, dockerfile) or []
     image = os.environ.get('MATERIALIZE_IMAGE', 'alpine:3.24')
+    bt = os.environ.get('BUILD_TIMEOUT', '14400')
+    if not bt.isdigit() or int(bt) == 0:
+        fails.append(f'BUILD_TIMEOUT={bt!r}: not a number of seconds')
 
     # the slow checks, side by side
     os.makedirs(work, exist_ok=True)
+    info = facts['info']
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        f_emu = ex.submit(check_emulation, arch)
+        f_emu = ex.submit(check_emulation, arch, others) if arch else None
         f_priv = ex.submit(check_privileged, image)
         f_git = {key: ex.submit(check_git, work, n, key[0], key[1], sorted({b for _, b in v}), log)
                  for n, (key, v) in enumerate(fetches.items())}
         imgs = [f'{im}@{dg}' for im, dg in builders.items()]
         if args.get('ALPINE'):
             imgs.append(args['ALPINE'])
-        f_img = [ex.submit(check_image, r) for r in imgs]
-        fails += f_emu.result()
-        pf, docker_df = f_priv.result()
+        f_img = {r: ex.submit(check_image, r) for r in imgs}
+        if f_emu:
+            fails += guard('emulation', f_emu.result) or []
+        pf, docker_df = guard('privileged container', f_priv.result) or ([], None)
         fails += pf
-        fails += check_space(adir, docker_df)
-        info = facts['info']
+        fails += guard('free space', check_space, adir, docker_df) or []
         unmerged = []
         for key, fut in f_git.items():
-            gf, tree, merged = fut.result()
-            fails += [f'{" ".join(i for i, _ in fetches[key])}: {x}' for x in gf]
+            names = ' '.join(i for i, _ in fetches[key])
+            gf, tree, merged = guard(names, fut.result) or (['no answer'], '', {})
+            bad = set()
+            for x in gf:
+                b, msg = x if isinstance(x, tuple) else (None, x)
+                who = [i for i, ib in fetches[key] if b is None or ib == b]
+                bad |= set(who)
+                fails.append(f'{" ".join(who)}: {msg}')
             for i, b in fetches[key]:
                 info[f'input.{i}.tree'] = tree
                 info[f'input.{i}.local'] = 'no'
-                if not gf and not merged.get(b):
+                if i not in bad and not merged.get(b):
                     unmerged.append(i)
         info['unmerged'] = ' '.join(i for i in branches if i in unmerged)
-        for f in f_img:
-            fails += f.result()
+        for r, f in f_img.items():
+            fails += guard(f'image {r}', f.result) or []
     for im, dg in builders.items():
         info[f'builder.{im}'] = dg
-    facts['over'] = {k: v for k, v in o['args'].items() if k != 'DEVICE'}
+    head, _, clean = facts['state']
+    info['images_commit'], info['images_clean'] = head, clean
     return fails, facts
 
 
@@ -428,38 +509,77 @@ class Log:
         self.f.write(msg + '\n')
 
     def stream(self, cmd, timeout, show=False):
-        """Run cmd, its output into the log (and to the screen when show); returns
-        (returncode, output). Killed after timeout seconds (124)."""
+        """Run cmd in its own process group, its output into the log (and to the screen
+        when show); returns (returncode, output). Killed after timeout seconds (124), and
+        stopped when this command ends any other way (a signal, an exception)."""
         self.f.write('$ ' + ' '.join(cmd) + '\n')
         out = []
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                             bufsize=1)
+                             errors='replace', bufsize=1, start_new_session=True)
         t_end = time.monotonic() + timeout
         timed_out = False
-        import selectors
-        sel = selectors.DefaultSelector()
-        sel.register(p.stdout, selectors.EVENT_READ)
-        while True:
-            left = t_end - time.monotonic()
-            if left <= 0:
-                timed_out = True
-                p.kill()
-                break
-            if not sel.select(timeout=min(left, 5)):
-                continue
-            line = p.stdout.readline()
-            if not line:
-                break
-            out.append(line)
-            self.f.write(line)
-            if show:
-                sys.stdout.write(line)
-                sys.stdout.flush()
+        try:
+            sel = selectors.DefaultSelector()
+            sel.register(p.stdout, selectors.EVENT_READ)
+            while True:
+                left = t_end - time.monotonic()
+                if left <= 0:
+                    timed_out = True
+                    break
+                if not sel.select(timeout=min(left, 5)):
+                    continue
+                line = p.stdout.readline()
+                if not line:
+                    break
+                out.append(line)
+                self.f.write(line)
+                if show:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+        except BaseException:
+            stop(p)
+            raise
+        if timed_out:
+            stop(p)
         p.wait()
         if timed_out:
             self.f.write(f'timed out after {timeout} s\n')
             return 124, ''.join(out)
         return p.returncode, ''.join(out)
+
+
+def stop(p, grace=15):
+    """Stop a child's process group: SIGINT (docker buildx cancels the build, materialize
+    cleans its staging), then SIGKILL after grace seconds."""
+    for sig, wait in ((signal.SIGINT, grace), (signal.SIGKILL, 5)):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(p.pid, sig)
+        try:
+            p.wait(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def clear_stale(adir):
+    """Remove .work-<pid> directories of runs that ended without cleaning up (killed):
+    only that name, and only when no process has that pid."""
+    for n in os.listdir(adir):
+        m = re.fullmatch(r'\.work-(\d+)', n)
+        if not m or int(m.group(1)) == os.getpid():
+            continue
+        try:
+            os.kill(int(m.group(1)), 0)
+            continue                    # alive (ours or not): leave it
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            continue
+        shutil.rmtree(os.path.join(adir, n), ignore_errors=True)
+
+
+def on_signal(signum, frame):
+    raise SystemExit(128 + signum)
 
 
 def tail(text, n=15):
@@ -473,6 +593,9 @@ def main(argv):
     start = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None, microsecond=0)
     adir = os.path.abspath(o['artifacts'])
     os.makedirs(adir, exist_ok=True)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+    clear_stale(adir)
     work = os.path.join(adir, f'.work-{os.getpid()}')
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
@@ -489,7 +612,10 @@ def main(argv):
     try:
         log(f'build: {target} into {adir}, log {logpath}')
         t = time.monotonic()
-        fails, facts = preflight(o, target, adir, work, log)
+        try:
+            fails, facts = preflight(o, target, adir, work, log)
+        except Exception as e:      # noqa: BLE001 -- preflight's own guard missed it
+            fails, facts = [f'preflight: {type(e).__name__}: {e}'], {}
         step('preflight', t)
         if fails:
             for f in fails:
@@ -553,11 +679,14 @@ def main(argv):
             log(f'build: {os.path.basename(cmd[1])}: {last(out)}')
         step('kernel-check, boot-check', t)
 
-        # the build info
-        rc, head, _ = run(['git', '-C', REPO, 'rev-parse', 'HEAD'], 30)
-        info['images_commit'] = head.strip() if rc == 0 else ''
-        rc, st, _ = run(['git', '-C', REPO, 'status', '--porcelain', '--untracked-files=no'], 60)
-        info['images_clean'] = '' if rc != 0 else ('yes' if not st.strip() else 'no')
+        # the build info: the checkout must still be the one preflight saw, since the
+        # exports read it one after another and the record names its commit
+        now = checkout_state(work)
+        if now != facts['state']:
+            log(f'build: the checkout changed during the build (commit {facts["state"][0][:12] or "?"} '
+                f'→ {now[0][:12] or "?"}, tree {facts["state"][1][:12] or "?"} → {now[1][:12] or "?"}); '
+                f'nothing recorded, build again')
+            return 1
         bi = os.path.join(work, 'build-info')
         with open(bi, 'w') as f:
             f.write(''.join(f'{k}={info[k]}\n' for k in sorted(info)))

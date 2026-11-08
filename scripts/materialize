@@ -32,7 +32,8 @@ Options:
   --build-info F  what only the build command knows, key=value, one per line (# and
                   blank lines ignored). Keys:
                     images_commit        this repository's commit
-                    images_clean         yes | no (uncommitted changes to tracked files)
+                    images_clean         yes | no (uncommitted changes to tracked files, or
+                                         untracked files git doesn't ignore)
                     input.<ARG>.tree     a git input's tree (<ARG>: its commit argument,
                                          e.g. LINUX_SDM660, DTB_COMMIT, BOOT_COMMIT)
                     input.<ARG>.local    yes = a local checkout, no = the pinned source
@@ -347,7 +348,7 @@ def main(argv):
         c = git(repo, 'rev-parse', 'HEAD')
         info['images_commit'] = c.strip() if c else ''
     if 'images_clean' not in info:
-        s = git(repo, 'status', '--porcelain', '--untracked-files=no')
+        s = git(repo, 'status', '--porcelain')
         info['images_clean'] = '' if s is None else ('yes' if not s.strip() else 'no')
     why = [f'local:{i}' for i in inputs if info.get(f'input.{i}.local') == 'yes']
     why += [f'arg:{a}' for a in args if args[a] != defaults.get(a)]
