@@ -17,7 +17,9 @@
 # two, or a remote daemon's), a threshold that isn't a number.
 # Local checkouts (--local): a clean clone passes as local with its commit's tree,
 # merged when pushed on its branch, unmerged when not pushed, by the input's or the
-# repository's ARG; refused: uncommitted changes (untracked or changed; an ignored file
+# repository's ARG, every input of a repository with several (one set apart by
+# --build-arg: its commit from the checkout, or refused when the checkout lacks it);
+# refused: uncommitted changes (untracked or changed; an ignored file
 # is fine), another repository, no directory, not the top of a checkout, --build-arg of
 # the same input, an unknown name. Past preflight, every export gets the commit and the
 # source stage's context, a fresh copy of that commit.
@@ -233,6 +235,32 @@ run localboth --local "$LAST=$L" --build-arg "$LAST=$B"
 check "local and --build-arg of one input: refused" '[ "$(rc localboth)" = 3 ] && has localboth "FAIL: --local $LAST: the checkout gives its commit"'
 run localname --local NO_SUCH_INPUT="$L"
 check "local, not an input: refused"             '[ "$(rc localname)" = 3 ] && has localname "FAIL: --local NO_SUCH_INPUT: not a git input"'
+# a repository with several inputs: all move with the checkout; one set apart by --build-arg
+MREPO=$(echo "$INPUTS" | awk '{print $2}' | sort | uniq -d | head -n 1)
+if [ -n "$MREPO" ]; then
+	MEMBERS=$(echo "$INPUTS" | awk -v r="$MREPO" '$2 == r {print $1}')
+	FIRST=$(echo "$MEMBERS" | head -n 1); FOLLOWER=$(echo "$MEMBERS" | sed -n 2p)
+	OVER_ONE=$OVER
+	for m in $MEMBERS; do OVER=$(echo "$OVER" | sed "s| --build-arg $m=$B||"); done
+	OVER="$OVER --build-arg $LAST=$B"
+	run multi --local "$FIRST=$L"
+	check "local kernel-like repository: every input local" '[ "$(rc multi)" = 0 ] && for m in $MEMBERS; do has multi "^input\\.$m\\.local=yes$" && has multi "^input\\.$m\\.tree=$DTREE$" || exit 1; done'
+	ATREE=$(gc rev-parse "$A^{tree}")
+	run multiapart --local "$FIRST=$L" --build-arg "$FOLLOWER=$A"
+	check "local, one input set apart: its commit's tree" '[ "$(rc multiapart)" = 0 ] && has multiapart "^input\\.$FOLLOWER\\.tree=$ATREE$" && has multiapart "^input\\.$FIRST\\.tree=$DTREE$"'
+	run multimissing --local "$FIRST=$L" --build-arg "$FOLLOWER=0000000000000000000000000000000000000001"
+	check "local, set apart to a commit the checkout lacks: refused" '[ "$(rc multimissing)" = 3 ] && has multimissing "FAIL: --build-arg $FOLLOWER=0*1: not a commit of the local checkout"'
+	flock "$O/rt/glassine-images-materialize.lock" sleep 60 & HOLD=$!
+	sleep 1; : > "$FAKE_BUILD_LOG"; rm -f "$FAKE_BUILD_LOG.ctx"
+	PF= run multibuild --local "$FIRST=$L"
+	kill $HOLD 2>/dev/null || true
+	MSTAGES=$(python3 -I -c "
+import sys; sys.path.insert(0, sys.argv[1]); import glassine_pins as g
+s = g.sources(sys.argv[1] + '/../Dockerfile'); print(' '.join(sorted({s[m][0] for m in sys.argv[2:]})))" "$R/scripts" $MEMBERS)
+	check "local build, several inputs: each source stage gets the context" '[ "$(rc multibuild)" = 4 ] && for st in $MSTAGES; do grep -q "^context $st $D 0$" "$FAKE_BUILD_LOG.ctx" || exit 1; done'
+	check "local build, several inputs at one commit: one copy" '[ "$(grep -o -- "--build-context [^ ]*" "$FAKE_BUILD_LOG" | head -n "$(echo $MSTAGES | wc -w)" | sed "s/.*=//" | sort -u | wc -l)" = 1 ]'
+	OVER=$OVER_ONE
+fi
 # past preflight (the host lock held): the commit and the context reach every export
 flock "$O/rt/glassine-images-materialize.lock" sleep 60 & HOLD=$!
 sleep 1; : > "$FAKE_BUILD_LOG"; rm -f "$FAKE_BUILD_LOG.ctx"
