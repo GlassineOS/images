@@ -8,6 +8,10 @@ the pins in the Dockerfile. Runs on the build computer, after an export:
     scripts/kernel-check out                 # the artifacts in out/
     scripts/kernel-check --compare out1 out2 # two exports: the same tree, byte for byte
     scripts/kernel-check --arg LINUX_SDM660=<commit> out   # built with that --build-arg
+    scripts/kernel-check --partial out       # only one of the two exports is in out/
+
+Without --partial both exports must be there (modules/ with one release, boot/dtb/ with at
+least one device tree); with it, one of them may be missing, never both.
 
 Checks the release name (format, flavor, commit, cfg6 recomputed from the configuration
 the kernel carries and the builder digest), that Image.gz is that release and was gzipped
@@ -92,6 +96,11 @@ def tree_entries(root):
 
 
 def compare(a, b):
+    for d in (a, b):
+        if not os.path.isdir(d):
+            err(f'{d}: not a directory')
+    if errors:
+        return
     ea, eb = tree_entries(a), tree_entries(b)
     if ea == eb:
         ok(f'{a} and {b}: the same {len(ea)} entries (paths, types, modes, contents)')
@@ -235,7 +244,7 @@ def check_dtbs(out, args, km):
     names = sorted(os.listdir(dd)) if os.path.isdir(dd) else []
     dtbs = [n for n in names if n.endswith('.dtb')]
     if not dtbs:
-        print(f'note: no device trees in {dd}')
+        err(f'{dd}: no device trees')
         return
     for n in dtbs:
         ident = n[:-4]
@@ -261,19 +270,41 @@ def check_dtbs(out, args, km):
 
 def main(argv):
     over = {}
-    while len(argv) >= 2 and argv[0] == '--arg':
+    partial = False
+    while argv and argv[0] in ('--arg', '--partial'):
+        if argv[0] == '--partial':
+            partial, argv = True, argv[1:]
+            continue
+        if len(argv) < 2:
+            break
         k, _, v = argv[1].partition('=')
         over[k] = v
         argv = argv[2:]
-    if len(argv) == 3 and argv[0] == '--compare':
+    if len(argv) == 3 and argv[0] == '--compare' and not partial:
         compare(argv[1], argv[2])
-    elif len(argv) == 1:
+    elif len(argv) == 1 and not argv[0].startswith('-'):
+        out = argv[0]
         args, fw = pins(os.path.join(HERE, '..', 'Dockerfile'))
         if 'LINUX_SDM660' in over and 'DTB_COMMIT' not in over:
             over['DTB_COMMIT'] = over['LINUX_SDM660']
         args.update(over)
-        km = check_kernel(argv[0], args, fw) if os.path.isdir(os.path.join(argv[0], 'modules')) else None
-        check_dtbs(argv[0], args, km)
+        has_k = os.path.isdir(os.path.join(out, 'modules'))
+        has_d = os.path.isdir(os.path.join(out, 'boot'))
+        km = None
+        if not os.path.isdir(out):
+            err(f'{out}: not a directory')
+        elif not (has_k or has_d):
+            err(f'{out}: neither modules/ nor boot/ (no export)')
+        elif has_k or not partial:
+            km = check_kernel(out, args, fw)
+        elif partial:
+            print(f'note: --partial: no modules/ in {out}, kernel not checked')
+        if not (has_k or has_d):
+            pass
+        elif has_d or not partial:
+            check_dtbs(out, args, km)
+        else:
+            print(f'note: --partial: no boot/ in {out}, device trees not checked')
     else:
         print(__doc__, file=sys.stderr)
         return 2

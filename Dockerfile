@@ -30,9 +30,13 @@ ARG DEVICE=onyx-noteair
 #
 # The compiler is the amd64 kernel-build image (GlassineOS/builders), pinned by its amd64
 # manifest digest; that digest goes into the release (cfg6). On an arm64 computer it runs
-# through QEMU (hence the constant --platform, and the lint check skipped above). The kernel compiles in a cache mount, so a small source change rebuilds
-# only what it touches; an empty cache gives the same result. KCACHE names the mount.
-ARG KERNEL_BUILD=ghcr.io/glassineos/kernel-build@sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebca86e553ae84f3b3
+# through QEMU (hence the constant --platform, and the lint check skipped above). The
+# kernel compiles in a cache mount, so a small source change rebuilds only what it touches;
+# an empty cache gives the same result. The mount's id is KCACHE, a dash and the builder's
+# digest, so a new builder starts from an empty mount.
+ARG KERNEL_BUILD_IMAGE=ghcr.io/glassineos/kernel-build
+ARG KERNEL_BUILD_DIGEST=sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebca86e553ae84f3b3
+ARG KERNEL_BUILD=${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST}
 ARG LINUX=https://github.com/GlassineOS/linux
 # glassine/sdm660-7.3
 ARG LINUX_SDM660=d476aaa52d6a070127b93599f4322d06e8f56159
@@ -67,13 +71,13 @@ ADD --checksum=sha256:be904cd28cb292b80cdb6cf412ab0d9159d431671e987ad433c1f62e09
 # names kernel=sdm660. The device trees for kernel.manifest's dtbs are built in the
 # second step, so adding a device doesn't rerun the compile.
 FROM --platform=linux/amd64 ${KERNEL_BUILD} AS kernel-sdm660
-ARG KERNEL_BUILD LINUX LINUX_SDM660
+ARG KERNEL_BUILD KERNEL_BUILD_DIGEST LINUX LINUX_SDM660
 ARG KCACHE=kernel-sdm660
 ARG JOBS
 RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux \
     --mount=type=bind,source=stages/kernel-sdm660,target=/run/stage \
     --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
-    --mount=type=cache,id=${KCACHE},target=/cache,sharing=locked \
+    --mount=type=cache,id=${KCACHE}-${KERNEL_BUILD_DIGEST},target=/cache,sharing=locked \
     REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=${KERNEL_BUILD#*@} JOBS=$JOBS sh /run/kernel.sh build
 RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux \
     --mount=type=bind,from=firmware-sdm660,target=/run/firmware \

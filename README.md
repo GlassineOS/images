@@ -108,13 +108,16 @@ QEMU elsewhere.
 | `targets/<device>/target` | the device's target description: architecture, SoC, kernel stage, device tree |
 
 Every option the fragments and `build.config` ask for must be in the final configuration,
-or the build fails. The kernel compiles in a cache mount that holds a copy of the source
-and the objects: a new commit rebuilds only what it changed, and an empty cache gives
-the same bytes.
+or the build fails; an option a fragment turns off must exist in the source's Kconfig
+files, so a misspelled or renamed one fails too. The kernel compiles in a cache mount
+that holds a copy of the source and the objects: a new commit rebuilds only what it
+changed, and an empty cache gives the same bytes. The mount is named after the builder's
+digest, so a new builder starts from an empty one.
 
     docker buildx build --platform linux/arm64 --target kernel-export -o type=local,dest=out .
     docker buildx build --platform linux/arm64 --target dtb-export -o type=local,dest=out .
     scripts/kernel-check out              # the release, the manifests, every checksum
+    scripts/kernel-check --partial out    # only one of the two exports in out/
     scripts/kernel-repro.sh repro         # two builds, the second from scratch: same bytes
 
 The `kernel` workflow builds and checks these on changes to the kernel side; started by

@@ -27,16 +27,25 @@ b() { # b DEST [extra args]: both exports into DEST
 	mkdir -p "$d"; cp -a "$d.kernel-export/." "$d.dtb-export/." "$d/"
 	rm -rf "$d.kernel-export" "$d.dtb-export"
 }
-drop() { # drop MOUNT-ID: remove the kernel cache mount with that id
-	ids=$(docker buildx du --verbose 2>/dev/null | awk -v a="with id \"$1\"" -v b="with id \"/$1\"" '
+drop() { # drop KCACHE: remove the kernel cache mount(s) KCACHE-<builder digest>; fails if
+	# none is found or one is still there afterwards (an ~8 GB mount left behind silently)
+	ids=$(docker buildx du --verbose 2>/dev/null | awk -v a="with id \"$1-sha256:" -v b="with id \"/$1-sha256:" '
 		/^ID:/ {id=$2} /^Description:/ && (index($0, a) || index($0, b)) {print id}')
-	for i in $ids; do docker buildx prune -f --filter "id=$i" >/dev/null || :; done
+	[ -n "$ids" ] || { echo "kernel-repro: no cache mount $1-sha256:… found in docker buildx du; remove it by hand" >&2; return 1; }
+	for i in $ids; do
+		docker buildx prune -f --filter "id=$i" >/dev/null \
+			|| { echo "kernel-repro: docker buildx prune failed for $i ($1)" >&2; return 1; }
+		! docker buildx du --verbose 2>/dev/null | grep -qx "ID:[[:space:]]*$i" \
+			|| { echo "kernel-repro: cache mount $i ($1) is still there" >&2; return 1; }
+	done
+	echo "kernel-repro: removed cache mount $1 ($ids)" >&2
 }
-trap 'drop "$salt"' EXIT
+salted=0
+trap 'st=$?; [ $salted = 0 ] || drop "$salt" || st=1; exit $st' EXIT
 mkdir -p "$out"
 s=$(date +%s); b "$out/a" "$@"; echo "kernel-repro: build a (cache mount kernel-sdm660): $(( $(date +%s) - s )) s"
-[ "${KERNEL_REPRO_DROP:-0}" != 1 ] || drop kernel-sdm660
-s=$(date +%s)
+[ "${KERNEL_REPRO_DROP:-0}" != 1 ] || drop kernel-sdm660 || exit 1
+s=$(date +%s); salted=1
 b "$out/b" --no-cache-filter kernel-sdm660,dtb --build-arg KCACHE="$salt" "$@"
 echo "kernel-repro: build b (from scratch, cache mount $salt): $(( $(date +%s) - s )) s"
 rc=0

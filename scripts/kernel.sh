@@ -32,14 +32,18 @@ check_source() {
 
 # every option a fragment asks for must be in the final configuration: CONFIG_X=v
 # exactly, "# CONFIG_X is not set" as no CONFIG_X= line (a symbol whose dependencies are
-# off is absent, which is the same). CONFIG_LOCALVERSION is the build's.
+# off is absent, which is the same), where X must be a symbol the source defines (a
+# misspelled or renamed one would pass as absent). CONFIG_LOCALVERSION is the build's.
 check_fragment() {
 	bad=0
 	grep -hE '^(CONFIG_[A-Z0-9_]+=|# CONFIG_[A-Z0-9_]+ is not set)' "$1" \
 		| grep -v '^CONFIG_LOCALVERSION=' > /tmp/want || :
 	while read -r l; do
 		case $l in
-		'# '*) s=${l#\# }; s=${s%% *}; ! grep -q "^$s=" "$2" ;;
+		'# '*) s=${l#\# }; s=${s%% *}
+			git -C $S grep -qE "^[[:space:]]*(menu)?config ${s#CONFIG_}[[:space:]]*\$" -- '*Kconfig*' \
+				|| { echo "kernel.sh: $(basename "$1"): no symbol ${s#CONFIG_} in the source's Kconfig files" >&2; false; } \
+				&& ! grep -q "^$s=" "$2" ;;
 		*) grep -qxF "$l" "$2" ;;
 		esac || { echo "kernel.sh: $(basename "$1"): option not applied: $l" >&2; bad=1; }
 	done < /tmp/want
