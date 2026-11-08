@@ -54,6 +54,7 @@ In order (each step's time is printed, and again at the end):
      <export>=docker-image://<ref>@<digest>), and reads the export's layer cache from the
      registry (--cache-from)
   4. scripts/kernel-check and scripts/boot-check on the merged directory, pulled or not
+     (boot-check with --cmdline-extra when CMDLINE_EXTRA is set)
   5. scripts/materialize with the overrides (--arg), the build info (--build-info), the
      parent options and the build's start (--time)
 
@@ -1021,8 +1022,11 @@ def main(argv):
         # the checks
         t = time.monotonic()
         kargs = [x for k, v in over.items() for x in ('--arg', f'{k}={v}')]
+        # the boot image of a build that sets CMDLINE_EXTRA is checked with those words;
+        # any other must carry no glassine.devmode
+        bargs = ['--cmdline-extra', over['CMDLINE_EXTRA']] if over.get('CMDLINE_EXTRA', '').strip() else []
         for cmd in ([sys.executable, os.path.join(HERE, 'kernel-check')] + kargs + [kdir],
-                    [sys.executable, os.path.join(HERE, 'boot-check'), kdir, target]):
+                    [sys.executable, os.path.join(HERE, 'boot-check'), kdir, target] + bargs):
             rc, out = log.stream(cmd, 600)
             if rc != 0:
                 log(f'build: {os.path.basename(cmd[1])} failed:\n{tail(out)}')

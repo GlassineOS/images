@@ -85,13 +85,14 @@ over('the kernel repository', {'LINUX': 'https://example.org/linux'}, [K, B])
 over('the base image', {'ALPINE': 'alpine:3.99'}, [I, B])
 over('the device', {'DEVICE': 'other-device'}, [D, B])
 over('the platform', {}, [I, B], arch='amd64')
+over('extra command-line words', {'CMDLINE_EXTRA': 'glassine.devmode=usb'}, [B])
 for a, v in (('JOBS', '3'), ('KCACHE', 'other'), ('LOCK', 'refresh'), ('LINUX_FIRMWARE', 'https://example.org/fw'),
              ('BOOT', 'https://example.org/boot')):
     over(f'{a} (no byte depends on it)', {a: v}, [])
 first = sorted(fw.values())[0]
 edit('a firmware checksum', 'Dockerfile', sub(first, '3' * 64), [K, B])
 edit('a firmware file\'s name', 'Dockerfile', sub('/qcom/a530_pfp.fw /qcom/a530_pfp.fw', '/qcom/a530_pfp.fw /qcom/a530_pfp.bin'), [K, B])
-edit('the boot stage\'s instructions', 'Dockerfile', sub('DEVICE=$DEVICE sh /run/bootimg.sh', 'DEVICE=$DEVICE X=1 sh /run/bootimg.sh'), [B])
+edit('the boot stage\'s instructions', 'Dockerfile', sub('DEVICE=$DEVICE CMDLINE_EXTRA=', 'DEVICE=$DEVICE X=1 CMDLINE_EXTRA='), [B])
 edit('the base\'s last stages', 'Dockerfile', sub('FROM validation AS base-export', 'FROM validation AS base-export\nRUN true'), [])
 edit('a comment in a kernel stage', 'Dockerfile', sub('# One device\'s tree, from DTB_COMMIT', '# Another comment\n# One device\'s tree, from DTB_COMMIT'), [])
 edit('the kernel stage files', 'stages/kernel-sdm660/build.config', append('CONFIG_X=y\n'), [K, B])
