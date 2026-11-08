@@ -130,6 +130,12 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
     --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
+# A base boots as a deployment (GlassineOS/boot's docs/boot.md, "Deployments layout"):
+# its `/` is a read-only bind of the deployment's overlay, and OpenRC remounts `/`
+# read-write unless fstab says otherwise. `bind,ro` keeps that bind read-only and leaves
+# the read-write binds below it (/etc, /var) alone. alpine-baselayout owns the file (a
+# protected configuration file, so apk never replaces it), hence a RUN, not rootfs/.
+RUN echo 'overlay / overlay bind,ro 0 0' > /etc/fstab
 COPY stages/glassine-common/rootfs/ /
 
 # Any e-ink device: the panel daemons and the e-ink session, started at boot.
@@ -213,10 +219,17 @@ FROM scratch AS boot-export
 COPY --from=boot /out/ /
 # ---------------------------------------------------------------------------------------
 
-# Build leftovers out: the machine ID (dbus writes one at install time; each
-# installation makes its own, GlassineOS/hub#19) and apk's log of this build.
+# Build leftovers out, so two builds of the same inputs give the same tree: the machine
+# ID (dbus writes one at install time; each installation makes its own,
+# GlassineOS/hub#19), apk's log of this build, fontconfig's cache (it records file times;
+# the system builds its own at boot, glassine-font-cache) and the build day that adding
+# a system account writes into its shadow row (its password is locked, so the date of
+# its last change means nothing).
 FROM device-${DEVICE} AS finish
-RUN : > /etc/machine-id && rm -f /var/log/apk.log
+RUN : > /etc/machine-id && rm -f /var/log/apk.log \
+    && rm -rf /var/cache/fontconfig/* /var/cache/fontconfig/.[!.]* \
+    && for f in /etc/shadow /etc/shadow-; do \
+        [ ! -e "$f" ] || sed -i 's/^\([^:]*:[!*][^:]*\):[0-9][0-9]*:/\1::/' "$f"; done
 
 # What a base must not carry. Reads only, adds nothing. /etc/resolv.conf and /etc/hosts
 # are mounted into every RUN, so their absence is checked on the exported tree.
