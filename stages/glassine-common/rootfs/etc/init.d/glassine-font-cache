@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: GPL-2.0-or-later
+# A base ships no font cache: fontconfig's cache records the build's file times, so it
+# would differ on every build. This builds it on the system, once, when it is missing:
+# on the first boot of a base, and again only if the cache is deleted. In a deployment
+# /var is a writable bind of the deployment's own directory, so the cache stays there.
+#
+# fc-cache runs in the background: on first boot it reads every installed font, which
+# takes long on a slow processor, and nothing has to wait for it. An application that
+# starts before it is done scans the fonts itself (slower, same result); fontconfig
+# replaces cache files atomically, so a reader never sees a partial one.
+
+description="Build the font cache when there is none"
+
+depend() {
+	need localmount
+	after bootmisc
+}
+
+start() {
+	if [ -n "$(find /var/cache/fontconfig -name '*.cache-*' -print 2>/dev/null | head -n 1)" ]; then
+		return 0
+	fi
+	ebegin "Building the font cache in the background"
+	nice -n 10 /usr/bin/fc-cache -s </dev/null >/dev/null 2>&1 &
+	eend 0
+}

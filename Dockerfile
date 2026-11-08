@@ -209,10 +209,17 @@ FROM scratch AS boot-export
 COPY --from=boot /out/ /
 # ---------------------------------------------------------------------------------------
 
-# Build leftovers out: the machine ID (dbus writes one at install time; each
-# installation makes its own, GlassineOS/hub#19) and apk's log of this build.
+# Build leftovers out, so two builds of the same inputs give the same tree: the machine
+# ID (dbus writes one at install time; each installation makes its own,
+# GlassineOS/hub#19), apk's log of this build, fontconfig's cache (it records file times;
+# the system builds its own at boot, glassine-font-cache) and the build day that adding
+# a system account writes into its shadow row (its password is locked, so the date of
+# its last change means nothing).
 FROM device-${DEVICE} AS finish
-RUN : > /etc/machine-id && rm -f /var/log/apk.log
+RUN : > /etc/machine-id && rm -f /var/log/apk.log \
+    && rm -rf /var/cache/fontconfig/* /var/cache/fontconfig/.[!.]* \
+    && for f in /etc/shadow /etc/shadow-; do \
+        [ ! -e "$f" ] || sed -i 's/^\([^:]*:[!*][^:]*\):[0-9][0-9]*:/\1::/' "$f"; done
 
 # What a base must not carry. Reads only, adds nothing. /etc/resolv.conf and /etc/hosts
 # are mounted into every RUN, so their absence is checked on the exported tree.
