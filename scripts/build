@@ -19,6 +19,15 @@ Options:
                        Dockerfile; a value other than its default (or any value of one
                        without a default, such as JOBS) makes the build a trial. DEVICE
                        is the target and can't be set
+  --local NAME=DIR     build a git input from a local checkout instead of its pinned
+                       source (repeat, one per repository): NAME is the input's commit
+                       ARG (LINUX_SDM660, DTB_COMMIT, BOOT_COMMIT) or its repository's
+                       ARG (LINUX, BOOT); either way every input of that repository
+                       comes from DIR. The input NAME names is DIR's HEAD (its
+                       --build-arg can't be set too); every other input of the
+                       repository is DIR's HEAD as well (DTB_COMMIT moves with a kernel
+                       checkout), unless a --build-arg sets it apart, which then names
+                       a commit DIR has. The build is a trial (local:<input>)
   --no-cache           build every stage without BuildKit's layer cache, once per run
                        (an export reuses what an earlier export of this run built);
                        cache mounts, such as the kernel's, are kept: an empty one gives
@@ -32,15 +41,20 @@ Options:
 In order (each step's time is printed, and again at the end):
   1. preflight (below); any failure ends the command before a stage builds, naming each
      cause
-  2. the exports, docker buildx for linux/<arch>: base-export as a tar, kernel-export,
+  2. local checkouts (--local): each input's commit fetched from DIR into a fresh
+     checkout in the work directory, shallow like the pinned source, given to every
+     export as the source stage's build context (docker buildx --build-context
+     <stage>=<dir>), so the Dockerfile is the same for every build
+  3. the exports, docker buildx for linux/<arch>: base-export as a tar, kernel-export,
      dtb-export, initramfs-export and boot-export as local directories merged into one.
      Each of the last four is pulled from the registry when it is published under its
-     key (docs/registry.md): pinned by the digest the registry gave for the key, so
-     every byte is checked against it. An export built here takes in the pulled ones
-     it reads (--build-context <export>=docker-image://<ref>@<digest>), and reads the
-     export's layer cache from the registry (--cache-from)
-  3. scripts/kernel-check and scripts/boot-check on the merged directory, pulled or not
-  4. scripts/materialize with the overrides (--arg), the build info (--build-info), the
+     key (docs/registry.md) and no local checkout reaches it: pinned by the digest the
+     registry gave for the key, so every byte is checked against it. An export built
+     here takes in the pulled ones it reads (--build-context
+     <export>=docker-image://<ref>@<digest>), and reads the export's layer cache from the
+     registry (--cache-from)
+  4. scripts/kernel-check and scripts/boot-check on the merged directory, pulled or not
+  5. scripts/materialize with the overrides (--arg), the build info (--build-info), the
      parent options and the build's start (--time)
 
 Preflight (FR-004), in seconds, all checks run and every failure is named (an error
@@ -68,7 +82,9 @@ inside a check is that check's failure):
   - the registry (unless --no-registry): each export's key, and whether it is
     published under it (docker buildx imagetools inspect, anonymous for a public
     package). Not published, refused (a package that isn't public reads the same) or no
-    answer: the export is built here, and the preflight says why
+    answer: the export is built here, and the preflight says why. An export that reads
+    an input from a local checkout (--local), or takes in an export that does, is built
+    here without asking the registry (specs/003, Scenario 4)
   - every git input's commit (its "# branch:" ARG, with the overrides) that an export
     built here fetches can be fetched from its repository (the URL ARG declared beside
     it): a shallow, treeless fetch of the commit into a throwaway bare repository, which
@@ -78,6 +94,14 @@ inside a check is that check's failure):
     compare API alone (no answer counts as unmerged). Each fetch has a time limit
     (GIT_TIMEOUT seconds, default 30) and is tried again when it timed out or failed for
     a network reason (GIT_TRIES tries, default 3)
+  - each --local DIR: a directory at the top of a git checkout, with no uncommitted
+    changes (tracked files, and untracked files git doesn't ignore: the same rule as
+    this checkout's); a checkout of the input's repository: it has one of the
+    repository's pinned commits, or a remote with the repository's URL; each commit set
+    apart by a --build-arg is a commit of DIR. Its commit's tree is the input's tree; the
+    commit is fetched from the repository as above to decide unmerged, and one the
+    repository doesn't have (not pushed) is unmerged. The free space needed in the
+    artifacts folder grows by one and a half times the size of each checkout's files
   - every builder image pinned by digest (<X>_IMAGE + <X>_DIGEST) that a stage built
     here starts from, and the base image (ALPINE), can be pulled (docker buildx
     imagetools inspect); emulation is needed only for the platforms of those stages
@@ -86,8 +110,9 @@ Build info for materialize: images_commit (git rev-parse HEAD) and images_clean 
 checkout's tracked files and the untracked files git doesn't ignore, which a stage's COPY
 reads, are HEAD's tree), both taken at preflight and taken again after the exports: a
 change in between fails the build, input.<ARG>.tree (the fetched commit's tree),
-input.<ARG>.local = no, builder.<image> = its pinned digest, export.<export>.key and
-export.<export>.from (<ref>@<digest> when pulled, built when built here), and unmerged: the inputs
+input.<ARG>.local (yes for an input from --local DIR), builder.<image> = its pinned
+digest, export.<export>.key and export.<export>.from (<ref>@<digest> when pulled, built
+when built here), and unmerged: the inputs
 whose commit isn't an ancestor of their branch's tip. For a github.com repository that
 is the compare API (one request: compare/<commit>...<branch> is "ahead" or "identical"
 when the commit is on the branch; GITHUB_TOKEN or GH_TOKEN is used when set). Elsewhere,
@@ -96,7 +121,8 @@ commit's date and git merge-base --is-ancestor decides; when that says no while 
 was cut, the branch is unshallowed (bounded by a timeout) and asked again; still
 undecided counts as unmerged.
 
-Work files (the tar export, the kernel exports, the throwaway repositories) live in <artifacts>/.work-<pid>/, a name never read as an artifact, removed at the
+Work files (the tar export, the kernel exports, the throwaway repositories, the local
+checkouts' copies) live in <artifacts>/.work-<pid>/, a name never read as an artifact, removed at the
 end, also on SIGTERM, SIGHUP and Ctrl-C (the running build step is stopped first); a
 .work-<pid> whose process is gone is removed by the next run. The log of every run is
 kept as <artifacts>/.logs/<TARGET>/<start>.log.
@@ -143,19 +169,20 @@ def usage():
 
 def parse(argv):
     o = {'artifacts': os.path.join(REPO, 'artifacts'), 'parent': None, 'no_parent': False,
-         'args': {}, 'no_cache': False, 'preflight_only': False, 'no_registry': False}
+         'args': {}, 'local': {}, 'no_cache': False, 'preflight_only': False,
+         'no_registry': False}
     pos = []
     it = iter(argv)
     for a in it:
-        if a in ('--artifacts', '--parent', '--build-arg'):
+        if a in ('--artifacts', '--parent', '--build-arg', '--local'):
             v = next(it, None)
             if v is None:
                 usage()
-            if a == '--build-arg':
+            if a in ('--build-arg', '--local'):
                 k, sep, val = v.partition('=')
-                if not sep or not re.fullmatch(r'\w+', k):
+                if not sep or not re.fullmatch(r'\w+', k) or (a == '--local' and (not val or k in o['local'])):
                     usage()
-                o['args'][k] = val
+                o['args' if a == '--build-arg' else 'local'][k] = val
             else:
                 o[a[2:]] = v
         elif a in ('--no-parent', '--no-cache', '--preflight-only', '--no-registry'):
@@ -252,12 +279,13 @@ def threshold(name, default):
     return x * GIB
 
 
-def check_space(adir, docker_df):
+def check_space(adir, docker_df, extra=0):
     """The artifacts folder's file system, and the docker root's as the daemon sees it:
     the probe's answer from inside a container (right for a remote daemon too); a local
-    walk to DockerRootDir only when the probe gave none."""
+    walk to DockerRootDir only when the probe gave none. extra: bytes the artifacts
+    folder needs besides its threshold (the local checkouts' copies)."""
     fails = []
-    need_a = threshold('BUILD_MIN_ARTIFACTS_GIB', 2)
+    need_a = threshold('BUILD_MIN_ARTIFACTS_GIB', 2) + extra
     need_d = threshold('BUILD_MIN_DOCKER_GIB', 10)
     a = free_bytes(adir)
     d = docker_df
@@ -332,10 +360,12 @@ def git_merged(g, gf, url, commit, branch, log):
     return False
 
 
-def check_git(work, n, url, commit, branches, log):
+def check_git(work, n, url, commit, branches, log, missing_ok=False):
     """Fetch commit (shallow, treeless) into a throwaway bare repository: its tree and,
     per branch, whether it is on it. Returns (failures, tree, {branch: merged}); a
-    failure is a message, or (branch, message) when only that branch's inputs fail."""
+    failure is a message, or (branch, message) when only that branch's inputs fail.
+    missing_ok (a local checkout's commit): a commit the repository doesn't give is no
+    failure but ([], None, {}), on no branch (not pushed)."""
     d = os.path.join(work, 'git', str(n))
     os.makedirs(d)
 
@@ -350,6 +380,9 @@ def check_git(work, n, url, commit, branches, log):
     if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', commit):
         return [f'{commit!r} from {url} is not a full commit id'], '', {}
     rc, err = gf('--depth=1', '--filter=tree:0', url, commit)
+    if rc != 0 and missing_ok:
+        log(f'preflight: commit {commit} not in {url} ({err}): not pushed, unmerged')
+        return [], None, {}
     if rc != 0:
         return [f'commit {commit} not reachable in {url}: {err}'], '', {}
     rc, tree, err = g('rev-parse', '--verify', '-q', f'{commit}^{{tree}}')
@@ -373,6 +406,112 @@ def check_image(ref):
     if rc != 0:
         return [f'image {ref} not pullable: {last(err) or last(out)}']
     return []
+
+
+def same_url(a, b):
+    """Two repository URLs naming the same repository: host and path compared without a
+    trailing / or .git, scp-like git@host:path read as host/path, file:// and plain
+    paths by their real path."""
+    def norm(u):
+        u = u.strip()
+        m = re.fullmatch(r'[\w.-]+@([\w.-]+):(?!//)(.+)', u)
+        if m:
+            u = f'ssh://{m.group(1)}/{m.group(2)}'
+        if u.startswith('file://') or u.startswith('/'):
+            return 'file:' + os.path.realpath(u[7:] if u.startswith('file://') else u).rstrip('/')
+        m = re.fullmatch(r'[a-z+]+://(?:[^@/]+@)?([^/:]+)(?::\d+)?/(.+?)(?:\.git)?/*', u)
+        return f'{m.group(1).lower()}/{m.group(2)}' if m else u
+    return norm(a) == norm(b)
+
+
+def local_inputs(dockerfile, local, over):
+    """--local NAME=DIR: (failures, {input: facts}, covered) for every input of each
+    named repository: dir, commit, tree, url, stage and path (its source stage), size
+    (bytes of the commit's files); covered: every input of a named repository, also
+    when its checkout failed a check. over: the overrides without the local commits."""
+    fails, out, covered = [], {}, set()
+    branches = glassine_pins.branches(dockerfile)
+    rep = glassine_pins.repos(dockerfile)
+    src = glassine_pins.sources(dockerfile)
+    args, _ = glassine_pins.pins(dockerfile, over)
+    claimed = {}
+    for name, d0 in local.items():
+        if name in branches:
+            repo_arg, named = rep[name], name
+        elif name in rep.values():
+            repo_arg, named = name, None
+        else:
+            fails.append(f'--local {name}: not a git input or the ARG of its repository '
+                         f'(one of {", ".join(sorted(set(branches) | set(rep.values())))})')
+            continue
+        if repo_arg in claimed:
+            fails.append(f'--local {name}: its repository ({repo_arg}) is already --local {claimed[repo_arg]}')
+            continue
+        claimed[repo_arg] = name
+        members = [i for i in branches if rep[i] == repo_arg]
+        covered |= set(members)
+        if named and named in over:
+            fails.append(f'--local {named}: the checkout gives its commit; --build-arg {named} can\'t be set too')
+            continue
+        what = f'--local {name}={d0}'
+        d = os.path.realpath(d0)
+        if not os.path.isdir(d):
+            fails.append(f'{what}: no such directory')
+            continue
+
+        def g(*a, timeout=60):
+            return run(['git', '-C', d, *a], timeout, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        rc, top, err = g('rev-parse', '--show-toplevel')
+        if rc != 0:
+            fails.append(f'{what}: not a git checkout ({last(err)})')
+            continue
+        if os.path.realpath(top.strip()) != d:
+            fails.append(f'{what}: not the top of its git checkout ({top.strip()})')
+            continue
+        rc, head, _ = g('rev-parse', '--verify', '-q', 'HEAD^{commit}')
+        if rc != 0:
+            fails.append(f'{what}: no commit checked out')
+            continue
+        head = head.strip()
+        rc, st, err = g('status', '--porcelain', '--untracked-files=normal', timeout=300)
+        if rc != 0:
+            fails.append(f'{what}: git status failed ({last(err)})')
+            continue
+        if st.strip():
+            changed = [x for x in st.splitlines() if x.strip()]
+            fails.append(f'{what}: uncommitted changes, {len(changed)} path(s) '
+                         f'({", ".join(x[3:] for x in changed[:3])}{", ..." if len(changed) > 3 else ""}); '
+                         'commit or stash them (a local checkout must be clean)')
+            continue
+        url = args.get(repo_arg, '')
+        pinned = sorted({args.get(i, '') for i in members} - {''})
+        has_pin = any(g('cat-file', '-e', f'{c}^{{commit}}')[0] == 0 for c in pinned)
+        rc, remotes, _ = g('remote', '-v')
+        has_remote = any(same_url(line.split()[1], url) for line in remotes.splitlines()
+                         if len(line.split()) >= 2)
+        if not (has_pin or has_remote):
+            fails.append(f'{what}: not a checkout of {url} ({repo_arg}): it has none of its pinned '
+                         f'commits ({", ".join(c[:12] for c in pinned)}) and no remote with that URL')
+            continue
+        for i in members:
+            commit = head
+            if i in over and i != named:
+                rc, c, _ = g('rev-parse', '--verify', '-q', f'{over[i]}^{{commit}}')
+                if rc != 0:
+                    fails.append(f'--build-arg {i}={over[i]}: not a commit of the local checkout '
+                                 f'of {repo_arg} (fetch it into {d0})')
+                    continue
+                commit = c.strip()
+            rc, tree, _ = g('rev-parse', '--verify', '-q', f'{commit}^{{tree}}')
+            rc2, ls, _ = g('ls-tree', '-r', '-l', '--full-tree', commit, timeout=300)
+            if rc != 0 or rc2 != 0:
+                fails.append(f'{what}: {i}: commit {commit} has no readable tree')
+                continue
+            size = sum(int(f[3]) for f in (x.split(None, 4) for x in ls.splitlines())
+                       if len(f) == 5 and f[3].isdigit())
+            out[i] = {'dir': d, 'commit': commit, 'tree': tree.strip(), 'url': url,
+                      'stage': src[i][0], 'path': src[i][1], 'size': size, 'name': name}
+    return fails, out, covered
 
 
 def inside_checkout(path):
@@ -414,7 +553,8 @@ def preflight(o, target, adir, work, log):
     """FR-004. Returns (failures, facts): facts hold what the build needs. Every check
     runs; an exception in one is that check's failure."""
     fails = []
-    facts = {'arch': '', 'info': {}, 'over': {}, 'state': ('', '', ''), 'keys': {}, 'pulled': {}}
+    facts = {'arch': '', 'info': {}, 'over': {}, 'state': ('', '', ''), 'local': {},
+             'keys': {}, 'pulled': {}}
     dockerfile = os.path.join(REPO, 'Dockerfile')
     stages_dir = os.path.join(REPO, 'stages')
 
@@ -456,6 +596,19 @@ def preflight(o, target, adir, work, log):
     over['DEVICE'] = target
     facts['over'] = {k: v for k, v in o['args'].items() if k != 'DEVICE'}
 
+    # local checkouts: their commits are the inputs' commits from here on
+    covered = set()
+    if o['local']:
+        def local():
+            lf, li, cov = local_inputs(dockerfile, o['local'], dict(facts['over']))
+            fails.extend(lf)
+            covered.update(cov)
+            return li
+        facts['local'] = guard('--local', local) or {}
+        for i, f in facts['local'].items():
+            over[i] = facts['over'][i] = f['commit']
+            log(f'preflight: {i} from the local checkout of {f["name"]}: {f["commit"]} (tree {f["tree"][:12]})')
+
     def pins_checks():
         declared = {w.split('=', 1)[0] for line in re.findall(r'^\s*ARG\s+(.+)$', glassine_pins._text(dockerfile), re.M)
                     for w in line.split()}
@@ -493,7 +646,20 @@ def preflight(o, target, adir, work, log):
     # the registry exports: each one's key, and whether it is published under it
     def registry_plan():
         keys = glassine_pins.export_keys(dockerfile, REPO, over, arch or 'arm64')
-        return keys, glassine_registry.plan(keys, use_registry=not o['no_registry'])
+        # an export reading a local checkout, or taking in one that does, is built here
+        # (a trial changes it; specs/003, Scenario 4): the registry isn't asked for it
+        local = {}
+        for e in KERNEL_EXPORTS:
+            names = [facts['local'].get(i, {}).get('name', i) for i in keys[e]['fetches'] if i in covered]
+            names += [n for t in keys[e]['takes'] for n in local.get(t, [])]
+            if names:
+                local[e] = sorted(set(names))
+        rp = glassine_registry.plan({e: v for e, v in keys.items() if e not in local},
+                                    use_registry=not o['no_registry'])
+        for e, names in local.items():
+            rp[e] = {'key': keys[e]['key'], 'pull': None, 'trees': {}, 'state': 'local',
+                     'why': f'the local checkout of {" ".join(names)}'}
+        return keys, rp
     keys, rplan = guard('the registry', registry_plan) or ({}, {})
     pulled = {e: rplan[e]['pull'] for e in rplan if rplan[e]['pull']}
     built = [e for e in KERNEL_EXPORTS if e not in pulled]
@@ -512,8 +678,11 @@ def preflight(o, target, adir, work, log):
     branches = guard('the git inputs', glassine_pins.branches, dockerfile) or {}
     repo_args = guard('the git inputs', glassine_pins.repos, dockerfile) or {}
     fetches = {}
+    lfetches = {}
     for i, b in branches.items():
-        if i in repo_args:
+        if i in facts['local']:
+            lfetches.setdefault((facts['local'][i]['url'], facts['local'][i]['commit']), []).append((i, b))
+        elif i in repo_args and i not in covered:
             fetches.setdefault((args.get(repo_args[i], ''), args.get(i, '')), []).append((i, b))
     builders = guard('the builder images', glassine_pins.builders, dockerfile, over) or {}
     # the stages this build runs: the base's, and those of the exports built here
@@ -544,6 +713,9 @@ def preflight(o, target, adir, work, log):
                  for n, (key, v) in enumerate(fetched.items())}
         f_gh = {(key, b): ex.submit(gh_merged, key[0], key[1], b)
                 for key, v in fetches.items() if key not in fetched for b in sorted({b for _, b in v})}
+        f_loc = {key: ex.submit(check_git, work, len(fetches) + n, key[0], key[1],
+                                sorted({b for _, b in v}), log, True)
+                 for n, (key, v) in enumerate(lfetches.items())}
         imgs = [f'{im}@{dg}' for im, dg in builders.items() if f'{im}@{dg}' in froms]
         if args.get('ALPINE'):
             imgs.append(args['ALPINE'])
@@ -552,7 +724,8 @@ def preflight(o, target, adir, work, log):
             fails += guard('emulation', f_emu.result) or []
         pf, docker_df = guard('privileged container', f_priv.result) or ([], None)
         fails += pf
-        fails += guard('free space', check_space, adir, docker_df) or []
+        copies = {(f['dir'], f['commit'], f['path']): f['size'] for f in facts['local'].values()}
+        fails += guard('free space', check_space, adir, docker_df, int(1.5 * sum(copies.values()))) or []
         unmerged = []
         for key, fut in f_git.items():
             gf, tree, merged = guard(' '.join(i for i, _ in fetches[key]), fut.result) or (['no answer'], '', {})
@@ -584,6 +757,21 @@ def preflight(o, target, adir, work, log):
                     if m is None:
                         log(f'preflight: {i}: whether {key[1][:12]} is on {b} is undecided (not fetched, '
                             f'no answer from the compare API), counted as unmerged')
+                    unmerged.append(i)
+        # inputs from a local checkout: the checkout's tree; fetched only to decide unmerged
+        for key, fut in f_loc.items():
+            names = ' '.join(i for i, _ in lfetches[key])
+            gf, _, merged = guard(names, fut.result) or (['no answer'], None, {})
+            bad = set()
+            for x in gf:
+                b, msg = x if isinstance(x, tuple) else (None, x)
+                who = [i for i, ib in lfetches[key] if b is None or ib == b]
+                bad |= set(who)
+                fails.append(f'{" ".join(who)}: {msg}')
+            for i, b in lfetches[key]:
+                info[f'input.{i}.tree'] = facts['local'][i]['tree']
+                info[f'input.{i}.local'] = 'yes'
+                if i not in bad and not merged.get(b):
                     unmerged.append(i)
         info['unmerged'] = ' '.join(i for i in branches if i in unmerged)
         for r, f in f_img.items():
@@ -663,6 +851,30 @@ def stop(p, grace=15):
             pass
 
 
+def prepare_local(root, src, commit, path, log):
+    """commit of the checkout src in root/<path>, the way a source stage fetches its
+    pinned commit: a fresh repository with that one commit (shallow), checked out. None
+    when done, else why not."""
+    d = root + path
+    os.makedirs(d)
+
+    def g(*a, timeout=60):
+        return run(['git', '-C', d, '-c', 'advice.detachedHead=false', *a], timeout,
+                   env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+    for a, tmo in ((('init', '-q'), 60),
+                   (('fetch', '-q', '--depth=1', 'file://' + src, commit), 1800),
+                   (('checkout', '-q', 'FETCH_HEAD'), 1800)):
+        rc, out, err = g(*a, timeout=tmo)
+        if rc != 0:
+            return f'git {a[0]} failed: {last(err) or last(out)}'
+    rc, head, _ = g('rev-parse', 'HEAD')
+    rc2, st, _ = g('status', '--porcelain', timeout=600)
+    if rc != 0 or head.strip() != commit or rc2 != 0 or st.strip():
+        return f'the copy is not {commit} unchanged'
+    log(f'build: local checkout {commit[:12]} ready')
+    return None
+
+
 def clear_stale(adir):
     """Remove .work-<pid> directories of runs that ended without cleaning up (killed):
     only that name, and only when no process has that pid."""
@@ -739,6 +951,26 @@ def main(argv):
         for k, v in over.items():
             common += ['--build-arg', f'{k}={v}']
 
+        # the local checkouts: each commit in a fresh shallow checkout, the source stage's
+        # build context (an input following another at the same commit shares its copy)
+        contexts = {}
+        if facts['local']:
+            t = time.monotonic()
+            copies = {}
+            for i, f in facts['local'].items():
+                key = (f['dir'], f['commit'], f['path'])
+                if key not in copies:
+                    root = os.path.join(work, 'local', str(len(copies)))
+                    why = prepare_local(root, *key, log)
+                    if why:
+                        log(f'build: the local checkout for {i}: {why}')
+                        return 1
+                    copies[key] = root
+                contexts[f['stage']] = copies[key]
+            for stage, root in sorted(contexts.items()):
+                common += ['--build-context', f'{stage}={root}']
+            step('local checkouts', t)
+
         # the exports. Without cache, each stage is built once in this run: an export
         # rebuilds only the stages no earlier export of this run built
         tar = os.path.join(work, 'base.tar')
@@ -766,7 +998,7 @@ def main(argv):
                     extra += ['--cache-from', f'type=registry,ref={glassine_registry.cache_ref(name)}']
             if o['no_cache']:
                 need = glassine_pins.reachable(dockerfile, [name], {**over, 'DEVICE': target}, stop=set(pulled))
-                fresh = [n for n in need if n not in built]
+                fresh = [n for n in need if n not in built and n not in contexts]
                 built.update(need)
                 if fresh:
                     extra += ['--no-cache-filter', ','.join(fresh)]

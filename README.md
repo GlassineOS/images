@@ -80,6 +80,17 @@ folder), laid out as `docs/artifacts.md` defines; each run's log is kept under
 `scripts/test-build.sh` tests the checks without a build, `scripts/test-registry.sh` the
 keys, the fetches and a registry round trip.
 
+    scripts/build <target> --local BOOT_COMMIT=../boot
+
+builds the kernel or `boot` from a clean local checkout instead of the pinned commit: a
+trial, which can go to a device but is never promoted.
+
+    scripts/promote <build-id> [--at <commit>]
+
+checks a build that is not a trial against a commit of this repository (default
+`origin/main`) and the inputs' branches, and stages its record under `promoted/`
+for a commit (`docs/artifacts.md`, "Promoted builds").
+
 One stage on its own:
 
     docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
@@ -103,7 +114,7 @@ dtb-src → dtb → dtb-export                                         boot/dtb/
 | Stage | Makes |
 |---|---|
 | `linux-sdm660-src` | the kernel source, `GlassineOS/linux` at the commit pinned in the Dockerfile (`LINUX_SDM660`), with a one-commit `.git`; fetched by `scripts/git-fetch.sh` (time limits, tries again on network failures) through a repository kept in a cache mount, so a new commit transfers only what it adds |
-| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode. Never vendor files |
+| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode and the WCN3990's ath10k `firmware-5.bin`, each with its license. Never vendor files |
 | `kernel-sdm660` | one compile for every device whose target names `kernel=sdm660`: `Image.gz`, the stripped modules with depmod's files, `firmware/` and `kernel.manifest` |
 | `kernel-export` | `modules/<release>/`, the tree a device receives as its modules subvolume |
 | `dtb-src`, `dtb` | one device's tree (`DEVICE`), from `DTB_COMMIT` (the kernel's commit unless set), so a fixed tree ships without a new kernel |

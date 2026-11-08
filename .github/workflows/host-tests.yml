@@ -1,14 +1,15 @@
 # Host tests of the build command, the registry side and materialization, without a
-# stage build: scripts/test-build.sh (a stand-in docker, local git fixtures),
-# scripts/test-registry.sh (the keys, scripts/git-fetch.sh, and a registry:2 container
-# with a docker-container builder) and scripts/test-materialize.sh (privileged
-# containers with loop devices and btrfs on a tmpfs, and one BuildKit tar export of a
-# fixture tree).
+# stage build: scripts/test-build.sh (a stand-in docker, local git fixtures; also local
+# checkouts and scripts/promote), scripts/test-registry.sh (the keys,
+# scripts/git-fetch.sh, and a registry:2 container with a docker-container builder) and
+# scripts/test-materialize.sh (privileged containers with loop devices and btrfs on a
+# tmpfs, and one BuildKit tar export of a fixture tree).
 name: host-tests
 on:
   pull_request:
     paths:
       - scripts/build
+      - scripts/promote
       - scripts/materialize
       - scripts/materialize-container.sh
       - scripts/glassine_pins.py
@@ -28,6 +29,7 @@ on:
     branches: [main]
     paths:
       - scripts/build
+      - scripts/promote
       - scripts/materialize
       - scripts/materialize-container.sh
       - scripts/glassine_pins.py
