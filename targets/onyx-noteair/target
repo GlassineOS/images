@@ -1,0 +1,10 @@
+format=1
+# Onyx Boox Note Air: the hardware a build for this device is for.
+#   arch    the target's CPU architecture (the build host's may differ)
+#   soc     the system on chip
+#   kernel  the kernel stage it boots: kernel-<kernel>
+#   dts     its device tree in the kernel source, under arch/<arch>/boot/dts/
+arch=arm64
+soc=sdm636
+kernel=sdm660
+dts=qcom/sdm636-onyx-noteair

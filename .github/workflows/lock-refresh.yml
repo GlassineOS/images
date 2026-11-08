@@ -28,9 +28,10 @@ jobs:
       - name: Refresh the locks
         run: |
           mkdir -p /tmp/locks/old /tmp/locks/new
-          for d in stages/*/; do cp "$d/lock" "/tmp/locks/old/$(basename "$d")"; done
+          # stages without a package lock (the kernel's) are skipped
+          for d in stages/*/; do if [ -f "$d/lock" ]; then cp "$d/lock" "/tmp/locks/old/$(basename "$d")"; fi; done
           scripts/lock.sh
-          for d in stages/*/; do cp "$d/lock" "/tmp/locks/new/$(basename "$d")"; done
+          for d in stages/*/; do if [ -f "$d/lock" ]; then cp "$d/lock" "/tmp/locks/new/$(basename "$d")"; fi; done
       - name: What changed
         run: |
           docker run --rm -v /tmp/locks:/l -v "$PWD/scripts:/s:ro" alpine:3.24 \

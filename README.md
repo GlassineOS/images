@@ -4,8 +4,9 @@ System images of GlassineOS: the root file systems and boot images a device inst
 The design is [GlassineOS/hub#8](https://github.com/GlassineOS/hub/issues/8), and the
 decision is record 0013 in [GlassineOS/docs](https://github.com/GlassineOS/docs).
 
-**Status:** the root file system's stage chain builds. It doesn't make a base yet (a
-Btrfs subvolume and its send stream), nor a kernel or a boot image. Most of
+**Status:** the root file system's stage chain builds, and so do the kernel and device
+tree artifacts. It doesn't make a base yet (a Btrfs subvolume and its send stream), nor
+an initramfs or a boot image. Most of
 GlassineOS's own software isn't packaged yet either, so the tree isn't a usable system.
 
 ## Stages
@@ -73,6 +74,56 @@ builds the default device's tree (`--build-arg DEVICE=<name>` for another). On a
 amd64 computer, arm64 runs through QEMU (`docker run --privileged --rm
 tonistiigi/binfmt --install arm64` once). Keep to the tar export: image exports drop
 `user.*` extended attributes.
+
+## Kernel and device trees
+
+Built apart from the root file system, to the contract in GlassineOS/boot's
+`docs/kernel-artifacts.md`. A kernel change doesn't rebuild a base, and a base change
+doesn't rebuild the kernel.
+
+```
+linux-<soc>-src + firmware-<soc> → kernel-<soc> → kernel-export   modules/<release>/
+dtb-src → dtb → dtb-export                                         boot/dtb/<device>@<id>.*
+```
+
+| Stage | Makes |
+|---|---|
+| `linux-sdm660-src` | the kernel source, `GlassineOS/linux` at the commit pinned in the Dockerfile (`LINUX_SDM660`), with a one-commit `.git` |
+| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode. Never vendor files |
+| `kernel-sdm660` | one compile for every device whose target names `kernel=sdm660`: `Image.gz`, the stripped modules with depmod's files, `firmware/` and `kernel.manifest` |
+| `kernel-export` | `modules/<release>/`, the tree a device receives as its modules subvolume |
+| `dtb-src`, `dtb` | one device's tree (`DEVICE`), from `DTB_COMMIT` (the kernel's commit unless set), so a fixed tree ships without a new kernel |
+| `dtb-export` | `boot/dtb/<device>@<sha256-16>.dtb` and its `.manifest` |
+
+The release is `<KERNELVERSION>-<flavor>.<cfg6>-g<commit12>`, with `cfg6` the first six
+hex digits of sha256 over the final `.config` followed by the lines `builder=<image>@sha256:…`,
+`firmware=` (`kernel.manifest`'s value) and `layout=` (the tree layout version in
+`scripts/kernel.sh`), each ended by a newline. The builder is GlassineOS/builders'
+`kernel-build`, pinned by its amd64 manifest digest, so the kernel stages run natively on
+amd64 and through QEMU elsewhere. A kernel names no device tree; the two are paired by a
+device's `select` record.
+
+| File | What |
+|---|---|
+| `stages/kernel-<soc>/kernel` | the flavor, the source's defconfig and its config fragments (from `kernel/configs/` or `arch/arm64/configs/`, where kbuild finds them) |
+| `stages/kernel-<soc>/build.config` | options this build sets over the source's configuration |
+| `targets/<device>/target` | the device's target description: architecture, SoC, kernel stage, device tree |
+
+Every option the fragments and `build.config` ask for must be in the final configuration,
+or the build fails; an option a fragment turns off must exist in the source's Kconfig
+files, so a misspelled or renamed one fails too. The kernel compiles in a cache mount
+that holds a copy of the source and the objects: a new commit rebuilds only what it
+changed, and an empty cache gives the same bytes. The mount is named after the builder's
+digest, so a new builder starts from an empty one.
+
+    docker buildx build --platform linux/arm64 --target kernel-export -o type=local,dest=out .
+    docker buildx build --platform linux/arm64 --target dtb-export -o type=local,dest=out .
+    scripts/kernel-check out              # the release, the manifests, every checksum
+    scripts/kernel-check --partial out    # only one of the two exports in out/
+    scripts/kernel-repro.sh repro         # two builds, the second from scratch: same bytes
+
+The `kernel` workflow builds and checks these on changes to the kernel side; started by
+hand it can also run the reproducibility check.
 
 ## License
 
