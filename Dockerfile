@@ -38,8 +38,8 @@ ARG KERNEL_BUILD_IMAGE=ghcr.io/glassineos/kernel-build
 ARG KERNEL_BUILD_DIGEST=sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebca86e553ae84f3b3
 ARG KERNEL_BUILD=${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST}
 ARG LINUX=https://github.com/GlassineOS/linux
-# glassine/sdm660-7.3
-ARG LINUX_SDM660=d476aaa52d6a070127b93599f4322d06e8f56159
+# glassine/sdm660-7.3-config-split (the config split); moves to glassine/sdm660-7.3 once merged there
+ARG LINUX_SDM660=deb74f03e647c3d0a21377168758e1a138042152
 # the commit device trees build from: a fixed tree ships without a new kernel
 ARG DTB_COMMIT=${LINUX_SDM660}
 ARG KERNEL=sdm660

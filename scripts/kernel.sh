@@ -32,22 +32,41 @@ check_source() {
 	[ -z "$(git -C $S --no-optional-locks status --porcelain)" ] || die "the source tree has changes"
 }
 
-# every option a fragment asks for must be in the final configuration: CONFIG_X=v
-# exactly, "# CONFIG_X is not set" as no CONFIG_X= line (a symbol whose dependencies are
-# off is absent, which is the same), where X must be a symbol the source defines (a
-# misspelled or renamed one would pass as absent). CONFIG_LOCALVERSION is the build's.
-check_fragment() {
+# a fragment by name, where kbuild looks for it: kernel/configs/ (the source's
+# architecture-independent ones) or arch/arm64/configs/; a name in both is refused,
+# since kbuild would merge both
+fragment_path() {
+	set -- "$S/kernel/configs/$1" "$S/arch/arm64/configs/$1"
+	if [ -f "$1" ] && [ -f "$2" ]; then die "fragment $(basename "$1") is in kernel/configs and arch/arm64/configs"
+	elif [ -f "$1" ]; then echo "$1"
+	elif [ -f "$2" ]; then echo "$2"
+	else die "no fragment $(basename "$1") in kernel/configs or arch/arm64/configs"; fi
+}
+
+# every option the fragments ask for (FILES..., merged in that order: a later one
+# overrides an earlier one, so the last line for a symbol counts) must be in the final
+# configuration CONFIG: CONFIG_X=v exactly, "# CONFIG_X is not set" as no CONFIG_X= line
+# (a symbol whose dependencies are off is absent, which is the same), where X must be a
+# symbol the source defines (a misspelled or renamed one would pass as absent).
+# CONFIG_LOCALVERSION is the build's.
+check_fragments() {
+	cfg=$1; shift
 	bad=0
-	grep -hE '^(CONFIG_[A-Z0-9_]+=|# CONFIG_[A-Z0-9_]+ is not set)' "$1" \
-		| grep -v '^CONFIG_LOCALVERSION=' > /tmp/want || :
-	while read -r l; do
+	for f in "$@"; do
+		grep -E '^(CONFIG_[A-Z0-9_]+=|# CONFIG_[A-Z0-9_]+ is not set)' "$f" | sed "s|^|$(basename "$f") |"
+	done | grep -v ' CONFIG_LOCALVERSION=' \
+		| awk '{ f = $1; l = substr($0, length(f) + 2)
+		         s = l ~ /^# / ? $3 : substr(l, 1, index(l, "=") - 1)
+		         if (!(s in w)) o[++n] = s; w[s] = l; src[s] = f }
+		       END { for (i = 1; i <= n; i++) print src[o[i]], w[o[i]] }' > /tmp/want
+	while read -r f l; do
 		case $l in
 		'# '*) s=${l#\# }; s=${s%% *}
 			git -C $S grep -qE "^[[:space:]]*(menu)?config ${s#CONFIG_}[[:space:]]*\$" -- '*Kconfig*' \
-				|| { echo "kernel.sh: $(basename "$1"): no symbol ${s#CONFIG_} in the source's Kconfig files" >&2; false; } \
-				&& ! grep -q "^$s=" "$2" ;;
-		*) grep -qxF "$l" "$2" ;;
-		esac || { echo "kernel.sh: $(basename "$1"): option not applied: $l" >&2; bad=1; }
+				|| { echo "kernel.sh: $f: no symbol ${s#CONFIG_} in the source's Kconfig files" >&2; false; } \
+				&& ! grep -q "^$s=" "$cfg" ;;
+		*) grep -qxF "$l" "$cfg" ;;
+		esac || { echo "kernel.sh: $f: option not applied: $l" >&2; bad=1; }
 	done < /tmp/want
 	return $bad
 }
@@ -89,8 +108,10 @@ build() {
 	  echo '# CONFIG_LOCALVERSION_AUTO is not set'; } >> /cache/obj/.config
 	$M -s olddefconfig >/dev/null
 	ok=0
-	for f in $fragments; do check_fragment "$S/arch/arm64/configs/$f" /cache/obj/.config || ok=1; done
-	check_fragment /run/stage/build.config /cache/obj/.config || ok=1
+	paths=
+	for f in $fragments; do paths="$paths $(fragment_path "$f")"; done
+	# shellcheck disable=SC2086
+	check_fragments /cache/obj/.config $paths /run/stage/build.config || ok=1
 	grep -qx 'CONFIG_LOCALVERSION=""' /cache/obj/.config || ok=1
 	! grep -q '^CONFIG_LOCALVERSION_AUTO=' /cache/obj/.config || ok=1
 	[ $ok = 0 ] || die "the configuration isn't what the fragments ask for"

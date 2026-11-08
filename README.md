@@ -105,7 +105,7 @@ device's `select` record.
 
 | File | What |
 |---|---|
-| `stages/kernel-<soc>/kernel` | the flavor, the source's defconfig and its config fragments |
+| `stages/kernel-<soc>/kernel` | the flavor, the source's defconfig and its config fragments (from `kernel/configs/` or `arch/arm64/configs/`, where kbuild finds them) |
 | `stages/kernel-<soc>/build.config` | options this build sets over the source's configuration |
 | `targets/<device>/target` | the device's target description: architecture, SoC, kernel stage, device tree |
 

@@ -3,8 +3,10 @@
 # Dockerfile (LINUX_SDM660).
 #   flavor     the release's flavor (GlassineOS/boot docs/kernel-artifacts.md)
 #   defconfig  the base configuration, from the source's arch/arm64/configs
-#   fragments  merged over it in this order, from the same directory; every option
-#              in them must survive olddefconfig, or the build fails
+#   fragments  merged over it in this order, from the source's kernel/configs or
+#              arch/arm64/configs (where kbuild finds them): GlassineOS policy, then
+#              the board's drivers; every option in them must survive olddefconfig,
+#              or the build fails
 flavor=sdm660
 defconfig=sdm660_defconfig
-fragments=onyx-noteair.config
+fragments=glassine.config onyx-noteair.config
