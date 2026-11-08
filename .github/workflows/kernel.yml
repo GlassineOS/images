@@ -1,10 +1,18 @@
-# Builds the kernel, device-tree, initramfs and boot image stages on an amd64 runner (the
-# kernel-build image is amd64 only), checks the exports with scripts/kernel-check and
-# scripts/boot-check, and on request checks that
-# a second build from scratch gives the same bytes. Runs when a change touches the kernel
-# side, and by hand. Nothing is published (GHCR comes later, GlassineOS/hub#8 step 8).
-# The layer cache is GitHub's, which keeps no cache mounts: a changed kernel input is a
-# full compile here.
+# The kernel, device-tree, initramfs and boot-image exports of every target
+# (specs/003-kernel-outputs-registry, docs/registry.md), on an amd64 runner (the
+# kernel-build image is amd64 only):
+#
+#   kernel   each export published under its key is pulled, the others are built (with
+#            the registry's and GitHub's layer cache); all are checked with
+#            scripts/kernel-check, scripts/boot-check and the device-file check. On main
+#            (and on request) every export built here is built a second time from scratch
+#            and compared byte for byte. Read-only: no job here can publish.
+#   publish  main only, after kernel passed: pushes each export built here whose second
+#            build gave the same bytes, under its key, unless that key is published, and
+#            the layer cache. The only job with write access to the packages.
+#
+# Pull requests never reach publish and have no publishing credentials. GitHub's layer
+# cache keeps no cache mounts: a changed kernel input is a full compile here.
 name: kernel
 on:
   pull_request:
@@ -20,6 +28,11 @@ on:
       - scripts/initramfs.sh
       - scripts/bootimg.sh
       - scripts/boot-check
+      - scripts/git-fetch.sh
+      - scripts/device-files.c
+      - scripts/glassine_pins.py
+      - scripts/glassine_registry.py
+      - scripts/registry
       - .github/workflows/kernel.yml
   push:
     branches: [main]
@@ -35,11 +48,16 @@ on:
       - scripts/initramfs.sh
       - scripts/bootimg.sh
       - scripts/boot-check
+      - scripts/git-fetch.sh
+      - scripts/device-files.c
+      - scripts/glassine_pins.py
+      - scripts/glassine_registry.py
+      - scripts/registry
       - .github/workflows/kernel.yml
   workflow_dispatch:
     inputs:
       reproduce:
-        description: Build twice from scratch and compare
+        description: Build every export again from scratch and compare, pulled ones too
         type: boolean
         default: false
 
@@ -49,24 +67,77 @@ permissions:
 jobs:
   kernel:
     runs-on: ubuntu-24.04
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
       # the initramfs stage runs arm64 Alpine
       - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
-      - name: Build and check
+      - name: Keys, and what is published under them
+        run: for t in $(ls targets); do scripts/registry status "$t"; done
+      - name: Pull or build
         run: |
-          for t in kernel-export dtb-export initramfs-export boot-export; do
+          for t in $(ls targets); do
             echo "::group::$t"
-            docker buildx build --progress=plain --platform linux/arm64 --target $t \
-              --cache-from type=gha,scope=kernel --cache-to type=gha,mode=max,scope=kernel \
-              -o type=local,dest=/tmp/out.$t .
+            scripts/registry exports "$t" "/tmp/out/$t" \
+              --cache-from type=gha,scope=kernel --cache-to type=gha,mode=max,scope=kernel
             echo "::endgroup::"
           done
-          mkdir -p /tmp/out
-          for t in kernel-export dtb-export initramfs-export boot-export; do cp -a /tmp/out.$t/. /tmp/out/; done
-          scripts/kernel-check /tmp/out
-          scripts/boot-check /tmp/out
-      - name: Reproduce from scratch
-        if: inputs.reproduce
-        run: scripts/kernel-repro.sh /tmp/repro
+      - name: Check
+        run: |
+          # the device-file check, built for the runner
+          docker buildx build --progress=plain --platform linux/amd64 --target device-files \
+            -o type=local,dest=/tmp/device-files .
+          for t in $(ls targets); do
+            m=/tmp/merged/$t; mkdir -p "$m"
+            for e in kernel-export dtb-export initramfs-export boot-export; do cp -a "/tmp/out/$t/$e/." "$m/"; done
+            scripts/kernel-check "$m"
+            scripts/boot-check "$m" "$t"
+            /tmp/device-files/device-files "$m"
+          done
+      - name: Build again from scratch and compare
+        if: github.ref == 'refs/heads/main' || inputs.reproduce
+        run: |
+          for t in $(ls targets); do
+            scripts/registry reproduce "$t" "/tmp/out/$t" ${{ inputs.reproduce && '--all' || '' }}
+          done
+      - name: Keep the exports for the publish job
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        # a tar keeps the modes, which the artifact store would drop
+        run: tar -C /tmp -cf /tmp/exports.tar out
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: exports
+          path: /tmp/exports.tar
+          retention-days: 1
+
+  publish:
+    needs: kernel
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: kernel-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: actions/download-artifact@v8
+        with:
+          name: exports
+          path: /tmp
+      - run: tar -C /tmp -xf /tmp/exports.tar
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the exports a second build confirmed
+        run: for t in $(ls targets); do scripts/registry publish "$t" "/tmp/out/$t"; done
+      - name: Publish the layer cache
+        run: for t in $(ls targets); do scripts/registry cache "$t" "/tmp/out/$t" --cache-from type=gha,scope=kernel; done
