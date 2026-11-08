@@ -2,3 +2,4 @@
 /specs/*/*
 !/specs/*/spec.md
 /.out/
+__pycache__/

@@ -119,3 +119,11 @@ def locks_digest(names, stages_dir):
     for n in names:
         h.update(n.encode() + b'\n' + read(os.path.join(stages_dir, n, 'lock')))
     return h.hexdigest()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()

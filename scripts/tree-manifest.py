@@ -48,7 +48,7 @@ def entry(root, rel):
         what = 'dev %d,%d' % (os.major(st.st_rdev), os.minor(st.st_rdev))
     else:
         what = '-'
-    xa = ''.join(' %s=%s' % (esc(n), os.getxattr(p, n, follow_symlinks=False).hex())
+    xa = ''.join(' %s=%s' % (esc(os.fsencode(n)), os.getxattr(p, n, follow_symlinks=False).hex())
                  for n in sorted(os.listxattr(p, follow_symlinks=False), key=os.fsencode))
     key = (st.st_dev, st.st_ino) if not stat.S_ISDIR(m) and st.st_nlink > 1 else None
     head = '%s %s %d:%d %04o %d %s' % (esc(rel), stat.filemode(m)[0], st.st_uid, st.st_gid,

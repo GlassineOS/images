@@ -1,0 +1,425 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Turn a base's tar export and the kernel-side exports into what a device receives:
+a read-only base subvolume named by its id and its send streams, the modules subvolume's
+stream, and the records of the build (specs/001-base-build, FR-002/003/005-015/019/020).
+
+    scripts/materialize [OPTIONS] BASE_TAR KERNEL_DIR TARGET ARTIFACTS
+
+  BASE_TAR    the tar export of the base's last stage:
+                docker buildx build --platform linux/arm64 -o type=tar,dest=BASE_TAR .
+  KERNEL_DIR  the kernel, device-tree, initramfs and boot exports of TARGET in one
+              directory (each with -o type=local,dest=KERNEL_DIR): modules/<release>/,
+              boot/dtb/, boot/initramfs/, bootimg/<id>.{img,manifest}, select/<TARGET>
+  TARGET      a directory under targets/; its base chain ends in device-<TARGET>
+  ARTIFACTS   the artifacts folder (docs/artifacts.md); created if missing:
+                <TARGET>/<id>/manifest         the build manifest (FR-013)
+                <TARGET>/<id>/packages, tree.manifest, kernel.manifest, boot.manifest,
+                              select           FR-014's records
+                <TARGET>/<id>/base.btrfs.zst   the full stream
+                <TARGET>/<id>/base.from-<parent>.btrfs.zst   the delta, with a parent
+                modules/<release>.btrfs.zst, modules/<release>.manifest
+                bootimg/<id>.img, bootimg/<id>.manifest
+                boot/dtb/<device>@<id>.*, boot/initramfs/<commit12>@<id>.*
+
+Options:
+  --parent ID     make the base a snapshot of ID (its full stream must be in ARTIFACTS)
+                  and write a delta against it. Default: the last base built for TARGET
+                  in ARTIFACTS (the newest built= among those with a full stream)
+  --no-parent     no parent: only the full stream
+  --arg NAME=VAL  a build argument in effect besides the Dockerfile's defaults (repeat);
+                  goes into the manifest's arg.* (the pins view, FR-015)
+  --build-info F  what only the build command knows, key=value, one per line (# and
+                  blank lines ignored), each key one of:
+                    images_commit        this repository's commit
+                    images_clean         yes | no
+                    input.<name>.commit  a git input's commit (<name>: linux, boot, ...)
+                    input.<name>.tree    its tree
+                    input.<name>.local   yes = a local checkout, no = the pinned source
+                    builder.<image>      a builder image's digest (sha256:...)
+                    trial                yes | no
+                    unmerged             the inputs whose commits are not on their main
+                  Missing: images_commit and images_clean from git when this is a git
+                  checkout, the others empty.
+  --date YYYYMMDD the build's date in the id (default: today, UTC)
+  --repo DIR      the checkout with Dockerfile, stages/ and targets/ (default: this one)
+
+What it does, in order: checks that the kernel exports fit together (FR-019: the select
+record's kernel = the one release under modules/ = the boot record's; the initramfs's
+and the base's needs covered by the kernel's provides), takes the host lock, then in one
+privileged container (alpine, loop devices on a tmpfs, scripts/materialize-container.sh)
+extracts the tar, checks it for build leftovers, computes the content manifest
+(scripts/tree-manifest.py) and the id <yyyymmdd>-<tree16>, refuses a tree that has a base
+already, writes the base manifest into the tree, makes the subvolume (fresh, or the
+parent's snapshot synced by content), makes it read-only, writes the full stream and the
+delta, makes the modules subvolume and stream unless ARTIFACTS has that release, receives
+every stream back on fresh btrfs file systems and compares each tree's content manifest
+with the reference and the received UUIDs. Then it writes the build manifest and moves
+everything into place; nothing lands in ARTIFACTS before every check has passed. Each
+step's time is printed (time <step> <seconds>).
+
+The base manifest's needs and features are empty: GlassineOS/boot has no feature table
+yet (conf/kernel-features), so there is nothing to derive them from.
+
+Host lock (FR-003): flock on $XDG_RUNTIME_DIR/glassine-images-materialize.lock, or on
+ARTIFACTS/.lock when XDG_RUNTIME_DIR is unset. It serializes the materializations of one
+user session; a second one fails at once (exit 4).
+
+Environment: MATERIALIZE_TMPFS (tmpfs size, default 8g), MATERIALIZE_IMG (bytes per
+btrfs file, sparse, default 4 GiB), MATERIALIZE_IMAGE (default alpine:3.24).
+
+Needs docker, python3 and sh on the host. Exit: 0 made, 1 failed, 2 usage, 3 a base with
+this tree exists (named on stderr), 4 another materialization holds the lock.
+"""
+import datetime, fcntl, os, re, shutil, subprocess, sys, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import glassine_pins  # noqa: E402
+
+NAME = re.compile(r'[A-Za-z0-9._-]+')     # glassine-deploy's base names
+INFO_KEYS = re.compile(r'images_commit|images_clean|trial|unmerged|builder\.[^=\s]+'
+                       r'|input\.[A-Za-z0-9_-]+\.(commit|tree|local)')
+
+
+class Fail(Exception):
+    pass
+
+
+def read(p):
+    with open(p, 'rb') as f:
+        return f.read()
+
+
+def record(path):
+    """A key=value record (first line format=1); first match wins."""
+    lines = read(path).decode().splitlines()
+    if not lines or lines[0] != 'format=1':
+        raise Fail(f'{path}: first line is not format=1')
+    rec = {}
+    for line in lines:
+        k, _, v = line.partition('=')
+        rec.setdefault(k, v)
+    return rec
+
+
+def only(d, suffix=''):
+    names = sorted(n for n in os.listdir(d) if n.endswith(suffix)) if os.path.isdir(d) else []
+    if len(names) != 1:
+        raise Fail(f'{d}: expected one {suffix or "entry"}, found {names}')
+    return names[0]
+
+
+def words(v):
+    return set(v.split())
+
+
+def kernel_fit(kdir, target, base_needs):
+    """FR-019's base and kernel fit, on the kernel-side exports. Returns the facts the
+    records need."""
+    rel = only(os.path.join(kdir, 'modules'))
+    km_path = os.path.join(kdir, 'modules', rel, 'kernel.manifest')
+    km = record(km_path)
+    if km.get('release') != rel:
+        raise Fail(f'{km_path}: release={km.get("release")} is not its directory {rel}')
+    sel_path = os.path.join(kdir, 'select', target)
+    if not os.path.isfile(sel_path):
+        raise Fail(f'{sel_path}: no select record for {target}')
+    sel = record(sel_path)
+    img = only(os.path.join(kdir, 'bootimg'), '.manifest')[:-len('.manifest')]
+    br_path = os.path.join(kdir, 'bootimg', img + '.manifest')
+    br = record(br_path)
+    if not os.path.isfile(os.path.join(kdir, 'bootimg', img + '.img')):
+        raise Fail(f'{kdir}/bootimg: no {img}.img beside its record')
+    checks = [
+        (sel.get('kernel') == rel, f'select record kernel={sel.get("kernel")} is not the release under modules/ {rel}'),
+        (br.get('kernel') == rel, f'boot record kernel={br.get("kernel")} is not the release under modules/ {rel}'),
+        (br.get('id') == img, f'boot record id={br.get("id")} is not its name {img}'),
+        (sel.get('device') == target and br.get('device') == target,
+         f'select device={sel.get("device")}, boot record device={br.get("device")}: not {target}'),
+        (sel.get('dtb') == br.get('dtb') and sel.get('initramfs') == br.get('initramfs'),
+         'select record and boot record name other device trees or initramfs'),
+    ]
+    for good, msg in checks:
+        if not good:
+            raise Fail(msg)
+    ird_path = os.path.join(kdir, 'boot', 'initramfs', sel['initramfs'] + '.manifest')
+    dtb_path = os.path.join(kdir, 'boot', 'dtb', sel['dtb'] + '.manifest')
+    for p in (ird_path, dtb_path):
+        if not os.path.isfile(p):
+            raise Fail(f'{p}: missing (the select record names it)')
+    ird = record(ird_path)
+    provides = words(km.get('provides', ''))
+    for who, needs in (('initramfs', words(ird.get('needs', ''))), ('base', base_needs)):
+        if needs - provides:
+            raise Fail(f'the kernel {rel} does not provide what the {who} needs: {sorted(needs - provides)}')
+    print(f'materialize: kernel fit: {rel}, boot image {img}, initramfs {sel["initramfs"]}, '
+          f'dtb {sel["dtb"]}')
+    return {'release': rel, 'bootimg': img, 'boot_commit': ird.get('commit', ''),
+            'km_path': km_path, 'br_path': br_path, 'sel_path': sel_path}
+
+
+def build_info(path):
+    info = {}
+    if not path:
+        return info
+    for n, line in enumerate(read(path).decode().splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith('#') or line == 'format=1':
+            continue
+        k, sep, v = line.partition('=')
+        if not sep or not INFO_KEYS.fullmatch(k):
+            raise Fail(f'{path}:{n}: not a build-info key: {line!r}')
+        if k in info:
+            raise Fail(f'{path}:{n}: {k} twice')
+        info[k] = v
+    return info
+
+
+def git(repo, *args):
+    try:
+        return subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True,
+                              check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def bases(adir, target):
+    """{id: build manifest} of the bases of target in the artifacts folder."""
+    out = {}
+    tdir = os.path.join(adir, target)
+    for n in sorted(os.listdir(tdir)) if os.path.isdir(tdir) else []:
+        p = os.path.join(tdir, n, 'manifest')
+        if not n.startswith('.') and os.path.isfile(p):
+            out[n] = record(p)
+    return out
+
+
+def pick_parent(adir, target, named, none):
+    if none:
+        return ''
+    have = bases(adir, target)
+    if named:
+        if not NAME.fullmatch(named) or named.startswith('.'):
+            raise Fail(f'parent {named!r}: not a base name')
+        if named not in have:
+            raise Fail(f'parent {named}: no {adir}/{target}/{named}/manifest')
+    else:
+        full = [(m.get('built', ''), i) for i, m in have.items()
+                if os.path.isfile(os.path.join(adir, target, i, 'base.btrfs.zst'))]
+        if not full:
+            return ''
+        named = max(full)[1]
+        print(f'materialize: parent: {named} (the last base built for {target})')
+    if not os.path.isfile(os.path.join(adir, target, named, 'base.btrfs.zst')):
+        raise Fail(f'parent {named}: no full stream {adir}/{target}/{named}/base.btrfs.zst')
+    return named
+
+
+def take_lock(adir):
+    rt = os.environ.get('XDG_RUNTIME_DIR')
+    path = os.path.join(rt, 'glassine-images-materialize.lock') if rt else os.path.join(adir, '.lock')
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f'materialize: another materialization holds {path}', file=sys.stderr)
+        sys.exit(4)
+    return fd
+
+
+def put(src, dst):
+    """Copy src to dst unless dst holds the same bytes; other bytes under a name that is
+    a content id are an error."""
+    if os.path.exists(dst):
+        if read(dst) != read(src):
+            raise Fail(f'{dst} exists with other contents')
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copyfile(src, dst + '.tmp')
+    os.replace(dst + '.tmp', dst)
+
+
+def usage():
+    print(__doc__, file=sys.stderr)
+    sys.exit(2)
+
+
+def parse(argv):
+    o = {'parent': None, 'no_parent': False, 'arg': {}, 'info': None, 'date': None,
+         'repo': os.path.dirname(HERE)}
+    pos = []
+    it = iter(argv)
+    for a in it:
+        if a in ('--parent', '--arg', '--build-info', '--date', '--repo'):
+            v = next(it, None)
+            if v is None:
+                usage()
+            if a == '--arg':
+                k, sep, val = v.partition('=')
+                if not sep or not re.fullmatch(r'\w+', k):
+                    usage()
+                o['arg'][k] = val
+            else:
+                o[{'--build-info': 'info'}.get(a, a[2:])] = v
+        elif a == '--no-parent':
+            o['no_parent'] = True
+        elif a.startswith('-'):
+            usage()
+        else:
+            pos.append(a)
+    if len(pos) != 4 or (o['parent'] and o['no_parent']):
+        usage()
+    if o['date'] and not re.fullmatch(r'\d{8}', o['date']):
+        usage()
+    return o, pos
+
+
+def main(argv):
+    sys.stdout.reconfigure(line_buffering=True)
+    o, (tar, kdir, target, adir) = parse(argv)
+    t_start = time.monotonic()
+    repo = os.path.abspath(o['repo'])
+    dockerfile = os.path.join(repo, 'Dockerfile')
+    if not NAME.fullmatch(target) or target.startswith('.'):
+        raise Fail(f'target {target!r}: not a name')
+    if not os.path.isfile(os.path.join(repo, 'targets', target, 'target')):
+        raise Fail(f'{repo}/targets/{target}/target: no such target')
+    if not os.path.isfile(tar):
+        raise Fail(f'{tar}: no tar export')
+    tar, kdir = os.path.abspath(tar), os.path.abspath(kdir)
+    os.makedirs(adir, exist_ok=True)
+    adir = os.path.abspath(adir)
+
+    # the records' inputs: pins, locks, build info
+    over = dict(o['arg'])
+    over['DEVICE'] = target
+    chain = glassine_pins.locked(glassine_pins.chain(dockerfile, target, over), os.path.join(repo, 'stages'))
+    if not chain:
+        raise Fail(f'{dockerfile}: the chain of {target} has no stage with a lock')
+    stages_dir = os.path.join(repo, 'stages')
+    locks = glassine_pins.locks_digest(chain, stages_dir)
+    all_locked = glassine_pins.locked(
+        glassine_pins.reachable(dockerfile, [glassine_pins.BASE_STAGE, 'boot-export'], over), stages_dir)
+    args = glassine_pins.build_args(dockerfile, over)
+    info = build_info(o['info'])
+    if 'images_commit' not in info:
+        c = git(repo, 'rev-parse', 'HEAD')
+        info['images_commit'] = c.strip() if c else ''
+    if 'images_clean' not in info:
+        s = git(repo, 'status', '--porcelain', '--untracked-files=no')
+        info['images_clean'] = '' if s is None else ('yes' if not s.strip() else 'no')
+    # no feature table exists yet (GlassineOS/boot conf/kernel-features): needs and
+    # features stay empty until it does
+    needs, features = '', ''
+    print(f'materialize: chain {" → ".join(chain)}, locks {locks}')
+
+    k = kernel_fit(kdir, target, words(needs))
+    if args.get('BOOT_COMMIT') and k['boot_commit'] != args['BOOT_COMMIT']:
+        raise Fail(f'the initramfs is from boot {k["boot_commit"]}, the build arguments say '
+                   f'BOOT_COMMIT={args["BOOT_COMMIT"]}')
+
+    lock = take_lock(adir)
+    parent = pick_parent(adir, target, o['parent'], o['no_parent'])
+    rel = k['release']
+    mstream = os.path.join(adir, 'modules', rel + '.btrfs.zst')
+    modules = 'have' if os.path.isfile(mstream) else 'new'
+    if modules == 'have' and not os.path.isfile(os.path.join(adir, 'modules', rel + '.manifest')):
+        raise Fail(f'{mstream} has no {rel}.manifest beside it')
+    date = o['date'] or datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d')
+
+    stage_rel = os.path.join(target, f'.incoming-{os.getpid()}')
+    stage = os.path.join(adir, stage_rel)
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage)
+    try:
+        with open(os.path.join(stage, 'base.manifest.in'), 'w') as f:
+            f.write(f'format=1\nlocks={locks}\nneeds={needs}\nfeatures={features}\n')
+        cmd = ['docker', 'run', '--rm', '--privileged',
+               '-e', f'DATE={date}', '-e', f'TARGET={target}', '-e', f'PARENT={parent}',
+               '-e', f'RELEASE={rel}', '-e', f'STAGE={stage_rel}', '-e', f'MODULES={modules}',
+               '-e', f'TMPFS={os.environ.get("MATERIALIZE_TMPFS", "8g")}',
+               '-e', f'IMG={os.environ.get("MATERIALIZE_IMG", str(4 << 30))}',
+               '-e', f'HOST_UID={os.getuid()}', '-e', f'HOST_GID={os.getgid()}',
+               '-v', f'{tar}:/in/base.tar:ro', '-v', f'{kdir}:/k:ro', '-v', f'{adir}:/a',
+               '-v', f'{HERE}:/s:ro',
+               os.environ.get('MATERIALIZE_IMAGE', 'alpine:3.24'), 'sh', '/s/materialize-container.sh']
+        rc = subprocess.run(cmd).returncode
+        res = {}
+        rp = os.path.join(stage, 'result')
+        if os.path.isfile(rp):
+            for line in read(rp).decode().splitlines():
+                key, _, v = line.partition('=')
+                res[key] = v
+        if rc == 3 and res.get('exists'):
+            print(f'materialize: exists: {target}/{res["exists"]} (tree {res.get("tree", "")[:16]})',
+                  file=sys.stderr)
+            return 3
+        if rc != 0:
+            raise Fail(f'the container failed (exit {rc}); nothing was added to {adir}')
+        ident = res['id']
+        dest = os.path.join(adir, target, ident)
+        if os.path.exists(dest):
+            raise Fail(f'{dest} exists')
+
+        # the build manifest (FR-013), then FR-014's files beside it
+        built = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        delta = f'base.from-{parent}.btrfs.zst' if parent else ''
+        m = [('format', '1'), ('base', ident), ('target', target), ('tree', res['tree']),
+             ('parent', parent), ('uuid', res['uuid']), ('received_uuid', res['received_uuid']),
+             ('built', built), ('images_commit', info.pop('images_commit')),
+             ('images_clean', info.pop('images_clean')), ('locks', locks)]
+        m += [(f'lock.{s}', glassine_pins.sha256_file(os.path.join(stages_dir, s, 'lock')))
+              for s in all_locked]
+        m += [(f'arg.{a}', v) for a, v in args.items()]
+        m += sorted((key, v) for key, v in info.items() if key.startswith('input.'))
+        m += sorted((key, v) for key, v in info.items() if key.startswith('builder.'))
+        m += [('kernel_release', rel), ('bootimg', k['bootimg']), ('boot_commit', k['boot_commit']),
+              ('trial', info.get('trial', '')), ('unmerged', info.get('unmerged', '')),
+              ('stream', 'base.btrfs.zst'), ('stream_sha256', res['stream_sha256']),
+              ('delta', delta), ('delta_sha256', res.get('delta_sha256', '')),
+              ('modules_stream', f'modules/{rel}.btrfs.zst'),
+              ('modules_stream_sha256', res.get('modules_sha256') or
+               glassine_pins.sha256_file(mstream))]
+        for key, v in m:
+            if '\n' in v:
+                raise Fail(f'manifest {key}: value with a newline')
+        with open(os.path.join(stage, 'manifest'), 'w') as f:
+            f.write(''.join(f'{key}={v}\n' for key, v in m))
+        shutil.copyfile(k['km_path'], os.path.join(stage, 'kernel.manifest'))
+        shutil.copyfile(k['br_path'], os.path.join(stage, 'boot.manifest'))
+        shutil.copyfile(k['sel_path'], os.path.join(stage, 'select'))
+
+        # into place: kernel-side artifacts first, the base directory last (one rename)
+        if modules == 'new':
+            os.makedirs(os.path.join(adir, 'modules'), exist_ok=True)
+            os.replace(os.path.join(stage, 'modules.manifest'),
+                       os.path.join(adir, 'modules', rel + '.manifest'))
+            os.replace(os.path.join(stage, 'modules.btrfs.zst'), mstream)
+        for sub in ('bootimg', os.path.join('boot', 'dtb'), os.path.join('boot', 'initramfs')):
+            for n in sorted(os.listdir(os.path.join(kdir, sub))):
+                put(os.path.join(kdir, sub, n), os.path.join(adir, sub, n))
+        for n in ('base.manifest.in', 'result', 'times'):
+            os.remove(os.path.join(stage, n))
+        os.replace(stage, dest)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+        os.close(lock)
+
+    def size(p):
+        return f'{os.path.getsize(p) / 1048576:.1f} MiB' if os.path.isfile(p) else '-'
+    print(f'materialize: base {target}/{ident}')
+    print(f'  full stream    {size(os.path.join(dest, "base.btrfs.zst"))}')
+    if parent:
+        print(f'  delta from {parent}  {os.path.getsize(os.path.join(dest, delta)) / 1024:.1f} KiB'
+              f' ({int(res.get("delta_raw", 0)) / 1024:.1f} KiB raw)')
+    print(f'  modules {rel}  {size(mstream)}' + (' (existing)' if modules == 'have' else ''))
+    print(f'time {"materialize (total)":<26} {time.monotonic() - t_start:6.2f} s')
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (Fail, ValueError, OSError) as e:
+        print(f'materialize: FAIL: {e}', file=sys.stderr)
+        sys.exit(1)
