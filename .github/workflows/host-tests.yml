@@ -1,0 +1,50 @@
+# Host tests of the build command and materialization, without a stage build:
+# scripts/test-build.sh (a stand-in docker, local git fixtures) and
+# scripts/test-materialize.sh (privileged containers with loop devices and btrfs on a
+# tmpfs, and one BuildKit tar export of a fixture tree).
+name: host-tests
+on:
+  pull_request:
+    paths:
+      - scripts/build
+      - scripts/materialize
+      - scripts/materialize-container.sh
+      - scripts/glassine_pins.py
+      - scripts/tree-manifest.py
+      - scripts/test-build.sh
+      - scripts/test-materialize.sh
+      - Dockerfile
+      - targets/**
+      - .github/workflows/host-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/build
+      - scripts/materialize
+      - scripts/materialize-container.sh
+      - scripts/glassine_pins.py
+      - scripts/tree-manifest.py
+      - scripts/test-build.sh
+      - scripts/test-materialize.sh
+      - Dockerfile
+      - targets/**
+      - .github/workflows/host-tests.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-command:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh scripts/test-build.sh
+  materialize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - run: sh scripts/test-materialize.sh
