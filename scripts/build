@@ -348,10 +348,18 @@ def check_image(ref):
     return []
 
 
-def checkout_state(work):
+def inside_checkout(path):
+    """PATH relative to the checkout when it lies inside it, else None."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(REPO))
+    return None if rel == os.pardir or rel.startswith(os.pardir + os.sep) else rel
+
+
+def checkout_state(work, adir=None):
     """(HEAD, the tree of the checkout as it is, clean): the tree holds the tracked files
     and the untracked ones git doesn't ignore (what a stage's COPY can read), written
-    with a throwaway index. clean = that tree is HEAD's. ('', '', '') outside git."""
+    with a throwaway index. clean = that tree is HEAD's. ('', '', '') outside git. The
+    artifacts folder ADIR is left out when it lies in the checkout (preflight requires
+    git to ignore it; this keeps the exports out of .git even so)."""
     rc, head, _ = run(['git', '-C', REPO, 'rev-parse', '--verify', '-q', 'HEAD'], 30)
     rc2, idx, _ = run(['git', '-C', REPO, 'rev-parse', '--path-format=absolute', '--git-path', 'index'], 30)
     if rc != 0 or rc2 != 0:
@@ -360,7 +368,12 @@ def checkout_state(work):
     if os.path.isfile(idx.strip()):
         shutil.copyfile(idx.strip(), tmp)
     env = {**os.environ, 'GIT_INDEX_FILE': tmp}
-    rc, _, _ = run(['git', '-C', REPO, 'add', '-A', '--ignore-errors', '.'], 120, env=env)
+    spec = ['.']
+    rel = inside_checkout(adir) if adir else None
+    # an ignored folder is skipped by add -A already (and naming it errors)
+    if rel not in (None, '.') and run(['git', '-C', REPO, 'check-ignore', '-q', rel], 30)[0] != 0:
+        spec.append(f':(exclude){rel}')
+    rc, _, _ = run(['git', '-C', REPO, 'add', '-A', '--ignore-errors', '--'] + spec, 120, env=env)
     rc3, tree, _ = run(['git', '-C', REPO, 'write-tree'], 60, env=env)
     rc4, htree, _ = run(['git', '-C', REPO, 'rev-parse', 'HEAD^{tree}'], 30)
     with contextlib.suppress(OSError):
@@ -401,7 +414,15 @@ def preflight(o, target, adir, work, log):
     facts['arch'] = arch
 
     # the checkout this build is made from (compared again after the exports)
-    facts['state'] = guard('the checkout', checkout_state, work) or ('', '', '')
+    rel = inside_checkout(adir)
+    if rel is not None:
+        if rel == '.':
+            fails.append(f'--artifacts {adir}: the checkout itself; use a folder git ignores')
+        elif run(['git', '-C', REPO, 'check-ignore', '-q', rel], 30)[0] != 0:
+            fails.append(f'--artifacts {adir}: inside the checkout and not ignored by git '
+                         '(the build would read it as an uncommitted change); add it to '
+                         '.gitignore or use a folder outside the checkout')
+    facts['state'] = guard('the checkout', checkout_state, work, adir) or ('', '', '')
 
     # the overrides, the pins and the locks
     over = {k: v for k, v in o['args'].items() if k != 'DEVICE'}
@@ -682,7 +703,7 @@ def main(argv):
 
         # the build info: the checkout must still be the one preflight saw, since the
         # exports read it one after another and the record names its commit
-        now = checkout_state(work)
+        now = checkout_state(work, adir)
         if now != facts['state']:
             log(f'build: the checkout changed during the build (commit {facts["state"][0][:12] or "?"} '
                 f'→ {now[0][:12] or "?"}, tree {facts["state"][1][:12] or "?"} → {now[1][:12] or "?"}); '

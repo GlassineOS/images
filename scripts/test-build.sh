@@ -151,6 +151,15 @@ echo x > "$R/stages/$STAGE1/untracked-file"
 run untracked
 rm "$R/stages/$STAGE1/untracked-file"
 check "an untracked file makes the checkout dirty" 'has untracked "^images_clean=no$"'
+# an artifacts folder inside the checkout: refused unless git ignores it
+mkdir -p "$R/myart"; echo x > "$R/myart/old-export"
+run artin --artifacts "$R/myart"
+check "artifacts inside the checkout, not ignored: exit 3" '[ "$(rc artin)" = 3 ]'
+check "artifacts inside the checkout, not ignored: named" 'has artin "not ignored by git"'
+rm -r "$R/myart"
+mkdir -p "$R/artifacts/inner"; echo x > "$R/artifacts/inner/old-export"
+run artign --artifacts "$R/artifacts/inner"
+check "artifacts inside the checkout, ignored: preflight passes, clean" '[ "$(rc artign)" = 0 ] && has artign "^images_clean=yes$"'
 
 # --- a commit that is not on its branch (fetched, then unshallowed to decide)
 run unmerged --build-arg "$LAST=$C"
