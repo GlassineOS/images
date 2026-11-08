@@ -70,10 +70,17 @@ done
 # what a deployment needs to come up and go down: the machine ID before dbus (the base's
 # is empty, and dbus refuses to start on an empty one), dbus, the accept step after a
 # healthy boot, and a shutdown that stops everything, runs the switch, then leaves the
-# file systems read-only
+# file systems read-only (glassine-mount-ro: userdata and the system partition, which
+# the root's overlay keeps alive past mount-ro); developer mode, which does nothing
+# without glassine.devmode=usb on the command line
 for s in boot/bootmisc boot/machine-id default/dbus default/glassine-deploy-accept \
-	shutdown/killprocs shutdown/glassine-switch shutdown/mount-ro; do
+	default/glassine-devmode shutdown/killprocs shutdown/glassine-switch shutdown/mount-ro \
+	shutdown/glassine-mount-ro; do
 	[ -e /etc/runlevels/$s ] || no "a service a deployment needs isn't enabled: ${s#*/} in ${s%/*}"
+done
+# no SSH server of its own: developer mode starts one, only with glassine.devmode=usb
+for l in /etc/runlevels/*/sshd; do
+	[ ! -e "$l" ] || no "the distribution's SSH server is enabled: $l"
 done
 # a clock provider at boot: syslog needs one
 c=0
