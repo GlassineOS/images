@@ -101,7 +101,7 @@ dtb-src → dtb → dtb-export                                         boot/dtb/
 | Stage | Makes |
 |---|---|
 | `linux-sdm660-src` | the kernel source, `GlassineOS/linux` at the commit pinned in the Dockerfile (`LINUX_SDM660`), with a one-commit `.git` |
-| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode. Never vendor files |
+| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode and the WCN3990's ath10k `firmware-5.bin`, each with its license. Never vendor files |
 | `kernel-sdm660` | one compile for every device whose target names `kernel=sdm660`: `Image.gz`, the stripped modules with depmod's files, `firmware/` and `kernel.manifest` |
 | `kernel-export` | `modules/<release>/`, the tree a device receives as its modules subvolume |
 | `dtb-src`, `dtb` | one device's tree (`DEVICE`), from `DTB_COMMIT` (the kernel's commit unless set), so a fixed tree ships without a new kernel |
