@@ -74,7 +74,7 @@ BUILD_MIN_DOCKER_GIB, MATERIALIZE_IMAGE (default alpine:3.24), and materialize's
 Exit: 0 built, 1 failed (nothing new in the artifacts folder but the log), 2 usage,
 3 preflight failed, 4 another materialization holds the host lock.
 """
-import concurrent.futures, datetime, importlib.machinery, importlib.util, json, os, platform
+import concurrent.futures, contextlib, datetime, io, importlib.machinery, importlib.util, json, os, platform
 import re, shutil, subprocess, sys, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -359,7 +359,8 @@ def preflight(o, target, adir, work, log):
     # the parent (materialize checks it again; here it fails before any stage builds)
     if not o['no_parent']:
         try:
-            p = materialize.pick_parent(adir, target, o['parent'], False)
+            with contextlib.redirect_stdout(io.StringIO()):     # materialize says it again
+                p = materialize.pick_parent(adir, target, o['parent'], False)
             log(f'preflight: parent {p or "none (no earlier build of " + target + ")"}')
         except (materialize.Fail, OSError, KeyError) as e:
             fails.append(f'parent: {e}')
