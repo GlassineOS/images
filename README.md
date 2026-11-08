@@ -96,10 +96,12 @@ dtb-src → dtb → dtb-export                                         boot/dtb/
 | `dtb-export` | `boot/dtb/<device>@<sha256-16>.dtb` and its `.manifest` |
 
 The release is `<KERNELVERSION>-<flavor>.<cfg6>-g<commit12>`, with `cfg6` the first six
-hex digits of sha256 over the final `.config` followed by the builder image's digest
-(`sha256:…`) and a newline. The builder is GlassineOS/builders' `kernel-build`, pinned
-by its amd64 manifest digest, so the kernel stages run natively on amd64 and through
-QEMU elsewhere.
+hex digits of sha256 over the final `.config` followed by the lines `builder=<image>@sha256:…`,
+`firmware=` (`kernel.manifest`'s value) and `layout=` (the tree layout version in
+`scripts/kernel.sh`), each ended by a newline. The builder is GlassineOS/builders'
+`kernel-build`, pinned by its amd64 manifest digest, so the kernel stages run natively on
+amd64 and through QEMU elsewhere. A kernel names no device tree; the two are paired by a
+device's `select` record.
 
 | File | What |
 |---|---|

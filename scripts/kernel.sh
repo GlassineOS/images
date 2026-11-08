@@ -3,18 +3,20 @@
 # Builds kernel artifacts to GlassineOS/boot's docs/kernel-artifacts.md. Runs inside the
 # kernel-build image, from the Dockerfile's kernel and device-tree stages:
 #
-#   kernel.sh build      compile the kernel; write /out/modules/<release>/ (Image.gz,
-#                        the modules, depmod's files) and the release to /meta
-#   kernel.sh manifest   add firmware/ and kernel.manifest to /out/modules/<release>/
-#   kernel.sh dtb        one device's tree: /out/boot/dtb/<device>@<id>.dtb + .manifest
+#   kernel.sh build   compile the kernel; write /out/modules/<release>/ (Image.gz, the
+#                     modules, depmod's files, firmware/, kernel.manifest)
+#   kernel.sh dtb     one device's tree: /out/boot/dtb/<device>@<id>.dtb + .manifest
 #
 # Mounts: /src/linux the source at the pinned commit, with its shallow .git (read-only),
-# /run/stage the kernel stage's directory, /run/targets the target descriptions (dtb:
-# /run/target, the device's own), /run/firmware the firmware stage, /cache the build
-# cache (build only). Environment: REPO and COMMIT (the pinned source), BUILDER (the
-# kernel-build image's digest), FLAVOR (manifest), DEVICE (dtb), JOBS.
+# /run/stage the kernel stage's directory, /run/firmware the firmware stage and /cache the
+# build cache (build), /run/target the device's target description (dtb). Environment:
+# REPO and COMMIT (the pinned source), BUILDER (the kernel-build image as
+# <image>@sha256:<digest>, build), DEVICE (dtb), JOBS.
 set -eu
 S=/src/linux
+# The tree layout version (kernel.manifest's layout, part of cfg6): bump it with any change
+# in how modules/<release>/ is made from the compile (strip flags, depmod, the files kept).
+LAYOUT=1
 die() { echo "kernel.sh: $*" >&2; exit 1; }
 # a key's value in a key=value file
 val() { sed -n "s/^$1=//p" "$2" | tail -n 1; }
@@ -63,6 +65,13 @@ build() {
 	defconfig=$(val defconfig /run/stage/kernel)
 	fragments=$(val fragments /run/stage/kernel)
 	[ -n "$flavor" ] && [ -n "$defconfig" ] || die "/run/stage/kernel: flavor and defconfig are required"
+	echo "$BUILDER" | grep -qE '^[^@[:space:]]+@sha256:[0-9a-f]{64}$' \
+		|| die "BUILDER is not <image>@sha256:<digest>: $BUILDER"
+	# firmware this kernel needs, by the names the drivers request: name@sha256-16, names
+	# relative to firmware/, sorted by bytes (kernel.manifest's firmware, part of cfg6)
+	fw=$(cd /run/firmware && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
+		printf '%s@%.16s ' "$f" "$(sha "$f")"; done)
+	fw=${fw% }
 	# The source goes into the cache by content: a file that didn't change keeps its
 	# mtime, so make rebuilds only what the new commit changed. An empty cache is a full
 	# build with the same result.
@@ -86,70 +95,52 @@ build() {
 	! grep -q '^CONFIG_LOCALVERSION_AUTO=' /cache/obj/.config || ok=1
 	[ $ok = 0 ] || die "the configuration isn't what the fragments ask for"
 	# the release: <KERNELVERSION>-<flavor>.<cfg6>-g<commit12>, cfg6 over the final
-	# .config followed by the builder's digest and a newline
-	cfg6=$({ cat /cache/obj/.config; printf '%s\n' "$BUILDER"; } | sha256sum | cut -c1-6)
+	# .config followed by the lines builder=, firmware= and layout=
+	cfg6=$({ cat /cache/obj/.config; printf 'builder=%s\nfirmware=%s\nlayout=%s\n' "$BUILDER" "$fw" "$LAYOUT"; } \
+		| sha256sum | cut -c1-6)
 	lv="-$flavor.$cfg6-g$(c12 "$COMMIT")"
 	rel="$($M -s kernelversion)$lv"
 	$M -s -j"${JOBS:-$(nproc)}" LOCALVERSION="$lv" Image.gz modules
 	got=$($M -s LOCALVERSION="$lv" kernelrelease)
 	[ "$got" = "$rel" ] || die "the kernel calls itself $got, expected $rel"
 	o=/out/modules/$rel
-	rm -rf /tmp/mod /out /meta
-	mkdir -p "$o" /meta
+	rm -rf /tmp/mod /out
+	mkdir -p "$o"
 	# stripped modules, depmod run against the tree (-b)
 	$M -s LOCALVERSION="$lv" INSTALL_MOD_PATH=/tmp/mod INSTALL_MOD_STRIP=1 modules_install >/dev/null
 	rm -f "/tmp/mod/lib/modules/$rel/build" "/tmp/mod/lib/modules/$rel/source"
 	cp -a "/tmp/mod/lib/modules/$rel/." "$o/"
 	# kbuild gzips with -n, so the checksum doesn't depend on the build time
 	cp /cache/obj/arch/arm64/boot/Image.gz "$o/Image.gz"
-	cp /cache/obj/.config /meta/config
-	echo "$rel" > /meta/release
-	rm -rf /tmp/mod /tmp/want
-	settle /out
-	echo "kernel.sh: $rel: $(find "$o" -name '*.ko' | wc -l) modules, Image.gz $(stat -c %s "$o/Image.gz") bytes"
-}
-
-manifest() {
-	check_source
-	rel=$(cat /meta/release)
-	o=/out/modules/$rel
-	# firmware this kernel needs, by the names the drivers request
 	mkdir -p "$o/firmware"
 	cp -R /run/firmware/. "$o/firmware/"
-	fw=$(cd "$o/firmware" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
-		printf '%s@%.16s ' "$f" "$(sha "$f")"; done)
-	# the device trees built at this commit: every target that boots this kernel
-	dtbs=
-	for t in /run/targets/*/target; do
-		[ "$(val kernel "$t")" = "$FLAVOR" ] || continue
-		d=$(basename "$(dirname "$t")")
-		build_dtb "$(val dts "$t")" /tmp/dtb
-		dtbs="$dtbs $d@$(sha /tmp/dtb | cut -c1-16)"
-	done
-	# modules_sha256: sha256 over "path sha256" lines, one per regular file under
-	# modules/<release>/ except Image.gz, kernel.manifest and firmware/, paths relative,
-	# sorted bytewise
-	ms=$(cd "$o" && find . -path ./firmware -prune -o -type f ! -name Image.gz ! -name kernel.manifest -print \
+	# no symlinks or other special files anywhere in the tree
+	[ -z "$(find "$o" ! -type f ! -type d)" ] \
+		|| die "modules/$rel has entries that are neither files nor directories: $(find "$o" ! -type f ! -type d | head -n 3)"
+	# modules_sha256: sha256 over "<path> <sha256>" lines, one per regular file under
+	# modules/<release>/ except the top-level Image.gz and kernel.manifest and everything
+	# under firmware/, paths relative without ./, sorted by bytes
+	ms=$(cd "$o" && find . -path ./firmware -prune -o -type f ! -path ./Image.gz -print \
 		| sed 's|^\./||' | LC_ALL=C sort | while read -r f; do printf '%s %s\n' "$f" "$(sha "$f")"; done \
 		| sha256sum | cut -c1-64)
-	[ -z "$(cd "$o" && find . -path ./firmware -prune -o ! -type f ! -type d -print)" ] \
-		|| die "the modules tree has entries that are neither files nor directories"
 	# provides and features come from GlassineOS/boot's conf/kernel-features, which
 	# doesn't exist yet: both stay empty until it does
 	cat > "$o/kernel.manifest" <<-EOF
 	format=1
 	release=$rel
 	source=$REPO@$COMMIT
-	config_sha256=$(sha /meta/config)
+	builder=$BUILDER
+	layout=$LAYOUT
+	config_sha256=$(sha /cache/obj/.config)
 	image_sha256=$(sha "$o/Image.gz")
 	modules_sha256=$ms
-	firmware=${fw% }
+	firmware=$fw
 	provides=
 	features=
-	dtbs=${dtbs# }
 	EOF
-	rm -rf /tmp/dtb-obj /tmp/dtb
+	rm -rf /tmp/mod /tmp/want
 	settle /out
+	echo "kernel.sh: $rel: $(find "$o" -name '*.ko' | wc -l) modules, Image.gz $(stat -c %s "$o/Image.gz") bytes"
 	cat "$o/kernel.manifest"
 }
 
@@ -157,18 +148,19 @@ dtb() {
 	check_source
 	dts=$(val dts /run/target/target)
 	[ -n "$dts" ] || die "/run/target/target has no dts"
+	rm -rf /out
 	mkdir -p /out/boot/dtb
 	build_dtb "$dts" /tmp/dtb
 	id=$DEVICE@$(sha /tmp/dtb | cut -c1-16)
 	cp /tmp/dtb "/out/boot/dtb/$id.dtb"
-	printf 'format=1\ndevice=%s\nsha256=%s\nsource=%s@%s\n' "$DEVICE" "$(sha /tmp/dtb)" "$REPO" "$COMMIT" \
-		> "/out/boot/dtb/$id.manifest"
+	# only facts about the bytes: the same tree gives the same manifest from any build
+	printf 'format=1\ndevice=%s\nsha256=%s\n' "$DEVICE" "$(sha /tmp/dtb)" > "/out/boot/dtb/$id.manifest"
 	rm -rf /tmp/dtb-obj /tmp/dtb
 	settle /out
 	echo "kernel.sh: $id.dtb from $(c12 "$COMMIT")"
 }
 
 case ${1:-} in
-build|manifest|dtb) "$1" ;;
-*) die "usage: kernel.sh build|manifest|dtb" ;;
+build|dtb) "$1" ;;
+*) die "usage: kernel.sh build|dtb" ;;
 esac

@@ -14,17 +14,17 @@ Without --partial both exports must be there (modules/ with one release, boot/dt
 least one device tree); with it, one of them may be missing, never both.
 
 Checks the release name (format, flavor, commit, cfg6 recomputed from the configuration
-the kernel carries and the builder digest), that Image.gz is that release and was gzipped
+the kernel carries and the builder, firmware and layout lines), that Image.gz is that release and was gzipped
 without a name or time, kernel.manifest (every key, every checksum recomputed), the
-modules (vermagic, no signatures, no build or source links), firmware/ against the
+modules (vermagic, no signatures, no symlinks or special files), firmware/ against the
 pinned checksums, and each device tree and its manifest.
 """
 import gzip, hashlib, os, re, stat, sys, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KM_KEYS = ['format', 'release', 'source', 'config_sha256', 'image_sha256', 'modules_sha256',
-           'firmware', 'provides', 'features', 'dtbs']
-DTB_KEYS = ['format', 'device', 'sha256', 'source']
+KM_KEYS = ['format', 'release', 'source', 'builder', 'layout', 'config_sha256', 'image_sha256',
+           'modules_sha256', 'firmware', 'provides', 'features']
+DTB_KEYS = ['format', 'device', 'sha256']
 errors = []
 
 
@@ -154,6 +154,14 @@ def check_kernel(out, args, fw_pins):
     (ok if km.get('release') == rel else err)(f'kernel.manifest release={km.get("release")}')
     want_src = f'{args["LINUX"]}@{commit}'
     (ok if km.get('source') == want_src else err)(f'kernel.manifest source={km.get("source")}')
+    builder = args['KERNEL_BUILD']
+    if not re.fullmatch(r'[^@\s]+@sha256:[0-9a-f]{64}', builder):
+        err(f'Dockerfile KERNEL_BUILD {builder}: not <image>@sha256:<digest>')
+    (ok if km.get('builder') == builder else err)(f'kernel.manifest builder={km.get("builder")}')
+    layout = km.get('layout', '')
+    (ok if re.fullmatch(r'[1-9][0-9]*', layout) else err)(f'kernel.manifest layout={layout}')
+    if 'dtbs' in km:
+        err('kernel.manifest has dtbs (a kernel record names no device tree)')
 
     gz = read(os.path.join(d, 'Image.gz'))
     gzip_is_stable(gz, 'Image.gz')
@@ -169,9 +177,14 @@ def check_kernel(out, args, fw_pins):
     else:
         (ok if km.get('config_sha256') == sha(cfg) else err)(
             'kernel.manifest config_sha256 matches the configuration in the kernel')
-        builder = args['KERNEL_BUILD'].split('@', 1)[1]
-        want6 = sha(cfg + builder.encode() + b'\n')[:6]
-        (ok if want6 == cfg6 else err)(f'cfg6 {cfg6} = sha256(.config + builder digest)[:6] {want6}')
+        # the firmware= line from the tree itself (checked against the manifest below)
+        fwd = os.path.join(d, 'firmware')
+        fwv = ' '.join(f'{n}@{sha(read(os.path.join(fwd, n)))[:16]}'
+                       for n in sorted((os.path.relpath(os.path.join(p, f), fwd)
+                                        for p, _, fs in os.walk(fwd) for f in fs), key=str.encode))
+        tail = f'builder={builder}\nfirmware={fwv}\nlayout={layout}\n'
+        want6 = sha(cfg + tail.encode())[:6]
+        (ok if want6 == cfg6 else err)(f'cfg6 {cfg6} = sha256(.config, builder=, firmware=, layout=)[:6] {want6}')
         lines = set(cfg.decode().splitlines())
         for need in ['CONFIG_LOCALVERSION=""', '# CONFIG_LOCALVERSION_AUTO is not set']:
             (ok if need in lines else err)(f'configuration has {need}')
@@ -183,6 +196,9 @@ def check_kernel(out, args, fw_pins):
     for link in ('build', 'source'):
         if os.path.lexists(os.path.join(d, link)):
             err(f'modules/{rel}/{link} exists')
+    for rel_p, typ, _, _ in tree_entries(d):
+        if typ not in ('file', 'dir'):
+            err(f'modules/{rel}/{rel_p}: {typ}, not a regular file or directory')
     for need in ('modules.dep', 'modules.alias', 'modules.order', 'modules.builtin'):
         if not os.path.isfile(os.path.join(d, need)):
             err(f'modules/{rel}/{need} missing (depmod at build)')
@@ -196,7 +212,7 @@ def check_kernel(out, args, fw_pins):
                 err(f'modules/{rel}/{r}: not a regular file')
                 continue
             data = read(p)
-            if r not in ('Image.gz', 'kernel.manifest'):
+            if r not in ('Image.gz', 'kernel.manifest'):     # top level only
                 lines.append(f'{r} {sha(data)}\n')
             if f.endswith('.ko'):
                 kos += 1
@@ -226,11 +242,6 @@ def check_kernel(out, args, fw_pins):
     for k in ('provides', 'features'):
         if not km.get(k):
             print(f'note: kernel.manifest {k} is empty (GlassineOS/boot has no conf/kernel-features yet)')
-    dtbs = km.get('dtbs', '').split()
-    for e in dtbs:
-        if not re.fullmatch(r'[a-z0-9-]+@[0-9a-f]{16}', e):
-            err(f'kernel.manifest dtbs: {e!r} is not <device>@<sha256-16>')
-    (ok if dtbs else err)(f'kernel.manifest dtbs={" ".join(dtbs)}')
 
     # every file 0644, every directory 0755
     for rel_p, typ, mode, _ in tree_entries(d):
@@ -239,7 +250,7 @@ def check_kernel(out, args, fw_pins):
     return km
 
 
-def check_dtbs(out, args, km):
+def check_dtbs(out):
     dd = os.path.join(out, 'boot', 'dtb')
     names = sorted(os.listdir(dd)) if os.path.isdir(dd) else []
     dtbs = [n for n in names if n.endswith('.dtb')]
@@ -258,11 +269,8 @@ def check_dtbs(out, args, km):
         rec = record(os.path.join(dd, ident + '.manifest'), DTB_KEYS)
         (ok if rec.get('device') == m.group(1) else err)(f'{ident}.manifest device={rec.get("device")}')
         (ok if rec.get('sha256') == sha(data) else err)(f'{ident}.manifest sha256 matches')
-        want_src = f'{args["LINUX"]}@{args["DTB_COMMIT"]}'
-        (ok if rec.get('source') == want_src else err)(f'{ident}.manifest source={rec.get("source")}')
-        if km is not None and args['DTB_COMMIT'] == args['LINUX_SDM660']:
-            (ok if ident in km.get('dtbs', '').split() else err)(
-                f'{ident} is in kernel.manifest dtbs (built at the same commit)')
+        extra = sorted(set(rec) - set(DTB_KEYS))
+        (err if extra else ok)(f'{ident}.manifest holds only {DTB_KEYS}' + (f' (also {extra})' if extra else ''))
     for n in names:
         if not n.endswith(('.dtb', '.manifest')):
             err(f'{dd}/{n}: unexpected file')
@@ -290,19 +298,18 @@ def main(argv):
         args.update(over)
         has_k = os.path.isdir(os.path.join(out, 'modules'))
         has_d = os.path.isdir(os.path.join(out, 'boot'))
-        km = None
         if not os.path.isdir(out):
             err(f'{out}: not a directory')
         elif not (has_k or has_d):
             err(f'{out}: neither modules/ nor boot/ (no export)')
         elif has_k or not partial:
-            km = check_kernel(out, args, fw)
-        elif partial:
+            check_kernel(out, args, fw)
+        else:
             print(f'note: --partial: no modules/ in {out}, kernel not checked')
         if not (has_k or has_d):
             pass
         elif has_d or not partial:
-            check_dtbs(out, args, km)
+            check_dtbs(out)
         else:
             print(f'note: --partial: no boot/ in {out}, device trees not checked')
     else:

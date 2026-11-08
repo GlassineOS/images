@@ -29,7 +29,7 @@ ARG DEVICE=onyx-noteair
 #   docker buildx build --platform linux/arm64 --target dtb-export -o type=local,dest=out .
 #
 # The compiler is the amd64 kernel-build image (GlassineOS/builders), pinned by its amd64
-# manifest digest; that digest goes into the release (cfg6). On an arm64 computer it runs
+# manifest digest; that reference goes into the release (cfg6). On an arm64 computer it runs
 # through QEMU (hence the constant --platform, and the lint check skipped above). The
 # kernel compiles in a cache mount, so a small source change rebuilds only what it touches;
 # an empty cache gives the same result. The mount's id is KCACHE, a dash and the builder's
@@ -68,22 +68,18 @@ ADD --checksum=sha256:be904cd28cb292b80cdb6cf412ab0d9159d431671e987ad433c1f62e09
     ${LINUX_FIRMWARE}/LICENSE.qcom /LICENSE.qcom
 
 # The kernel for SoCs of the sdm660 family: compiled once for every device whose target
-# names kernel=sdm660. The device trees for kernel.manifest's dtbs are built in the
-# second step, so adding a device doesn't rerun the compile.
+# names kernel=sdm660, with the firmware it needs. It names no device tree: those are
+# built by the dtb stage and paired with a kernel by a device's select record.
 FROM --platform=linux/amd64 ${KERNEL_BUILD} AS kernel-sdm660
 ARG KERNEL_BUILD KERNEL_BUILD_DIGEST LINUX LINUX_SDM660
 ARG KCACHE=kernel-sdm660
 ARG JOBS
 RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux \
     --mount=type=bind,source=stages/kernel-sdm660,target=/run/stage \
+    --mount=type=bind,from=firmware-sdm660,target=/run/firmware \
     --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
     --mount=type=cache,id=${KCACHE}-${KERNEL_BUILD_DIGEST},target=/cache,sharing=locked \
-    REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=${KERNEL_BUILD#*@} JOBS=$JOBS sh /run/kernel.sh build
-RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux \
-    --mount=type=bind,from=firmware-sdm660,target=/run/firmware \
-    --mount=type=bind,source=targets,target=/run/targets \
-    --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
-    REPO=$LINUX COMMIT=$LINUX_SDM660 FLAVOR=sdm660 JOBS=$JOBS sh /run/kernel.sh manifest
+    REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=$KERNEL_BUILD JOBS=$JOBS sh /run/kernel.sh build
 
 FROM kernel-${KERNEL} AS kernel
 FROM scratch AS kernel-export
