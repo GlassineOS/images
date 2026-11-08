@@ -172,7 +172,8 @@ unable to reach a pinned commit,
 
 - **FR-017**: A build is a trial when any of these holds: a source input came from a
   local checkout; a build argument differs from its `Dockerfile` default; the checkout
-  of this repository has uncommitted changes to tracked files. The git inputs are the
+  of this repository has uncommitted changes (to tracked files, or files git doesn't
+  ignore, which the build reads too). The git inputs are the
   kernel source, the device-tree commit (same repository; it follows the kernel commit
   unless overridden) and `boot`. A local checkout must be clean; it replaces the fetched
   source of every stage that uses that repository, and its commit becomes the input's

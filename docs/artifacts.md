@@ -14,6 +14,10 @@ has its own record.
 
 ## Layout
 
+`scripts/build` writes `artifacts/` in the checkout unless given another folder. Its
+work files (`.work-<pid>/`) and run logs (`.logs/<target>/<start>.log`) start with `.`
+and are never artifacts.
+
 ```
 <artifacts>/
 ├── <target>/
@@ -66,6 +70,13 @@ has its own record.
   lines other than its `base=` line, in their order in the base manifest, each ended by
   a newline. With `format=1` that is `format=1\nlocks=<locks>\nneeds=<needs>\nfeatures=<features>\n`.
   So a change of `locks`, `needs` or `features` is another base.
+
+**Readers treat a base id as an opaque name.** They never parse, sort or compare its
+parts: a time comes from a record's `built`, a tree from its `tree`. A delta finds its
+parent by the received UUID, not by name. One reader doesn't follow this yet:
+GlassineOS/boot's last-resort bare boot (no current deployment's base on the device)
+takes the last base name in sort order (GlassineOS/boot#21). Until that changes, a new
+id form must sort after the old ones.
 
 A build whose `tree16` equals that of a complete base of the same target reuses it: no
 new subvolume or stream. The base manifest
@@ -131,7 +142,7 @@ taken. The manifest never enters a base.
 | `uuid`, `received_uuid` | the base subvolume's UUID and received UUID |
 | `built` | the build's start, `YYYY-MM-DDTHH:MM:SSZ` |
 | `images_commit` | this repository's commit |
-| `images_clean` | `yes` when the checkout had no uncommitted changes to tracked files, `no` otherwise, empty when unknown |
+| `images_clean` | `yes` when the checkout had no uncommitted changes to tracked files and no untracked files git doesn't ignore (a stage's `COPY` reads those), `no` otherwise, empty when unknown |
 | `trial` | `yes` or `no` |
 | `trial_reasons` | why it is a trial, space-separated: `local:<input>`, `arg:<NAME>` (differs from the Dockerfile's default), `dirty`, `clean-unknown` |
 | `unmerged` | the inputs whose commits are not on their branch, space-separated |

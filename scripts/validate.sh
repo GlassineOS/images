@@ -38,6 +38,9 @@ awk '!/^[ \t]*#/ && $2 == "/" { n = split($4, o, ","); b = r = 0
 	for (i = 1; i <= n; i++) { if (o[i] == "bind") b = 1; if (o[i] == "ro") r = 1 }
 	if (b && r) f = 1 } END { exit !f }' /etc/fstab 2>/dev/null \
 	|| no "/etc/fstab doesn't list / with bind,ro"
+# a writable /tmp in a read-only root: a tmpfs
+awk '!/^[ \t]*#/ && $2 == "/tmp" && $3 == "tmpfs" { f = 1 } END { exit !f }' /etc/fstab 2>/dev/null \
+	|| no "/etc/fstab doesn't mount a tmpfs on /tmp"
 # what glassine-deploy receive needs to take in a base
 for c in btrfs zstd; do
 	command -v $c >/dev/null || no "$c isn't installed"
