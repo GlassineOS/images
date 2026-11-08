@@ -15,6 +15,9 @@ grep -q '[<>=~]' /etc/apk/world && no "pinned versions in /etc/apk/world: $(grep
 # font cache at boot (glassine-font-cache)
 [ -z "$(find /var/cache/fontconfig /root/.cache/fontconfig -mindepth 1 -print 2>/dev/null | head -n 1)" ] \
 	|| no "a font cache in the tree"
+# no build day in account rows: a locked password (! or *) has an empty date of last change
+d=$(awk -F: '$2 ~ /^[!*]/ && $3 != "" { print $1 }' /etc/shadow 2>/dev/null | tr '\n' ' ')
+[ -z "$d" ] || no "locked accounts with a date of last change in /etc/shadow (the build day): $d"
 # the package database matches the tree: every file a package installed is there,
 # unchanged. apk-tools' own /sbin/apk: the apk on PATH is glassine-deploy's wrapper.
 # --system leaves out protected paths (/etc), whose configuration a stage may change.
