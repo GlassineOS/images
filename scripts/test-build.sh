@@ -15,8 +15,21 @@
 # parent whose record or stream is missing or isn't UTF-8, a builder digest that can't
 # be pulled, no emulation, no loop devices, too little free space (one file system,
 # two, or a remote daemon's), a threshold that isn't a number.
+# Local checkouts (--local): a clean clone passes as local with its commit's tree,
+# merged when pushed on its branch, unmerged when not pushed, by the input's or the
+# repository's ARG, every input of a repository with several (one set apart by
+# --build-arg: its commit from the checkout, or refused when the checkout lacks it);
+# refused: uncommitted changes (untracked or changed; an ignored file
+# is fine), another repository, no directory, not the top of a checkout, --build-arg of
+# the same input, an unknown name. Past preflight, every export gets the commit and the
+# source stage's context, a fresh copy of that commit.
 # Unit checks: the emulation check on a stubbed arm64 and amd64 machine, the GitHub
-# compare answers mapped to merged / not / unknown.
+# compare answers mapped to merged / not / unknown, the trial reasons of local inputs.
+# Promotion (scripts/promote, run in the copy, records written by the test): a clean
+# pinned build is staged under promoted/ byte for byte, also again and at another commit
+# with the same tree, and with an input commit whose tree is on its branch; refused: a
+# trial, another images tree, a missing --at commit, an input tree on no commit of its
+# branch, a dirty checkout, a promoted record with other bytes, an unknown build.
 # Past preflight: a failed export (exit 1, work directory removed), a held host lock
 # (exit 4), --no-cache's per-export filter lists, non-UTF-8 build output, a checkout
 # changed during the build (exit 1), SIGTERM (exit 143, the build step and the work
@@ -48,6 +61,14 @@ case "$1 $2" in
 		case "$1" in
 		--target) t=$2; shift ;; -o) o=$2; shift ;;
 		--build-arg) case "$2" in BOOT_COMMIT=*) bc=${2#BOOT_COMMIT=} ;; esac; shift ;;
+		--build-context) # a source stage's context: the checkout's commit, unchanged
+			cd=${2#*=}
+			for g in "$cd"/*/*/.git "$cd"/*/.git; do
+				[ -e "$g" ] || continue
+				echo "context ${2%%=*} $(git -C "${g%/.git}" rev-parse HEAD) $(git -C "${g%/.git}" status --porcelain | wc -l)" >> "$FAKE_BUILD_LOG.ctx"
+				break
+			done
+			shift ;;
 		esac; shift
 	done
 	printf 'step 1 \377 not UTF-8\n'
@@ -169,6 +190,92 @@ check "unmerged: its tree"                       'has unmerged "^input\.$LAST\.t
 
 run noarg --build-arg JOBS=2
 check "an ARG without a default can be set"     '[ "$(rc noarg)" = 0 ]'
+
+# --- local checkouts (--local): of LAST's repository, cloned from the fixture
+LASTREPO=$(echo "$INPUTS" | tail -n 1 | awk '{print $2}')
+OVER_PINNED=$OVER
+OVER=$(echo "$OVER" | sed "s| --build-arg $LAST=$B||")
+lc() { d=$1; shift; git -C "$d" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+L=$O/local; git clone -q --no-checkout "$G" "$L"; git -C "$L" checkout -q "$B"
+run local --local "$LAST=$L"
+check "local: preflight passes"                  '[ "$(rc local)" = 0 ]'
+check "local: the input is local"                'has local "^input\.$LAST\.local=yes$"'
+check "local: its tree is the checkout's"        'has local "^input\.$LAST\.tree=$BTREE$"'
+check "local: a pushed commit on its branch is merged" 'has local "^unmerged=$"'
+check "local: the other inputs are not local"    '[ "$(grep -c "^input\..*\.local=yes$" "$O/local.out")" = "$(echo "$INPUTS" | awk -v r="$LASTREPO" "\$2 == r" | wc -l)" ]'
+[ "$(rc local)" = 0 ] || show local
+run localrepo --local "$LASTREPO=$L"
+check "local by its repository's ARG: the input is local" '[ "$(rc localrepo)" = 0 ] && has localrepo "^input\.$LAST\.local=yes$"'
+echo "ignored-by-git" >> "$L/.git/info/exclude"; echo x > "$L/ignored-by-git"
+run localign --local "$LAST=$L"
+check "local: an ignored file leaves it clean"   '[ "$(rc localign)" = 0 ]'
+echo d > "$L/new-file"; lc "$L" add new-file; GIT_COMMITTER_DATE='2020-01-04T00:00:00Z' lc "$L" commit -q -m D
+D=$(lc "$L" rev-parse HEAD); DTREE=$(lc "$L" rev-parse "$D^{tree}")
+run unpushed --local "$LAST=$L"
+check "local, not pushed: preflight passes"      '[ "$(rc unpushed)" = 0 ]'
+check "local, not pushed: unmerged"              'has unpushed "^unmerged=$LAST$"'
+check "local, not pushed: its tree"              'has unpushed "^input\.$LAST\.tree=$DTREE$"'
+[ "$(rc unpushed)" = 0 ] || show unpushed
+echo x > "$L/untracked-file"
+run localdirty --local "$LAST=$L"
+rm "$L/untracked-file"
+check "local, an untracked file: refused (exit 3)" '[ "$(rc localdirty)" = 3 ] && has localdirty "FAIL: --local $LAST=.*: uncommitted changes"'
+echo e > "$L/f"
+run localmod --local "$LAST=$L"
+lc "$L" checkout -q f
+check "local, a changed file: refused (exit 3)"  '[ "$(rc localmod)" = 3 ] && has localmod "FAIL: --local $LAST=.*: uncommitted changes, 1 path(s) (f)"'
+X=$O/other; git init -q "$X"; echo o > "$X/o"; lc "$X" add o; lc "$X" commit -q -m other
+run localwrong --local "$LAST=$X"
+check "local, another repository: refused (exit 3)" '[ "$(rc localwrong)" = 3 ] && has localwrong "FAIL: --local $LAST=.*: not a checkout of file://$G"'
+run localnodir --local "$LAST=$O/no-such-dir"
+check "local, no directory: refused (exit 3)"    '[ "$(rc localnodir)" = 3 ] && has localnodir "FAIL: --local $LAST=.*: no such directory"'
+run localsub --local "$LAST=$L/.git"
+check "local, not the top of a checkout: refused" '[ "$(rc localsub)" = 3 ]'
+run localboth --local "$LAST=$L" --build-arg "$LAST=$B"
+check "local and --build-arg of one input: refused" '[ "$(rc localboth)" = 3 ] && has localboth "FAIL: --local $LAST: the checkout gives its commit"'
+run localname --local NO_SUCH_INPUT="$L"
+check "local, not an input: refused"             '[ "$(rc localname)" = 3 ] && has localname "FAIL: --local NO_SUCH_INPUT: not a git input"'
+# a repository with several inputs: all move with the checkout; one set apart by --build-arg
+MREPO=$(echo "$INPUTS" | awk '{print $2}' | sort | uniq -d | head -n 1)
+if [ -n "$MREPO" ]; then
+	MEMBERS=$(echo "$INPUTS" | awk -v r="$MREPO" '$2 == r {print $1}')
+	FIRST=$(echo "$MEMBERS" | head -n 1); FOLLOWER=$(echo "$MEMBERS" | sed -n 2p)
+	OVER_ONE=$OVER
+	for m in $MEMBERS; do OVER=$(echo "$OVER" | sed "s| --build-arg $m=$B||"); done
+	OVER="$OVER --build-arg $LAST=$B"
+	run multi --local "$FIRST=$L"
+	check "local kernel-like repository: every input local" '[ "$(rc multi)" = 0 ] && for m in $MEMBERS; do has multi "^input\\.$m\\.local=yes$" && has multi "^input\\.$m\\.tree=$DTREE$" || exit 1; done'
+	ATREE=$(gc rev-parse "$A^{tree}")
+	run multiapart --local "$FIRST=$L" --build-arg "$FOLLOWER=$A"
+	check "local, one input set apart: its commit's tree" '[ "$(rc multiapart)" = 0 ] && has multiapart "^input\\.$FOLLOWER\\.tree=$ATREE$" && has multiapart "^input\\.$FIRST\\.tree=$DTREE$"'
+	run multimissing --local "$FIRST=$L" --build-arg "$FOLLOWER=0000000000000000000000000000000000000001"
+	check "local, set apart to a commit the checkout lacks: refused" '[ "$(rc multimissing)" = 3 ] && has multimissing "FAIL: --build-arg $FOLLOWER=0*1: not a commit of the local checkout"'
+	flock "$O/rt/glassine-images-materialize.lock" sleep 60 & HOLD=$!
+	sleep 1; : > "$FAKE_BUILD_LOG"; rm -f "$FAKE_BUILD_LOG.ctx"
+	PF= run multibuild --local "$FIRST=$L"
+	kill $HOLD 2>/dev/null || true
+	MSTAGES=$(python3 -I -c "
+import sys; sys.path.insert(0, sys.argv[1]); import glassine_pins as g
+s = g.sources(sys.argv[1] + '/../Dockerfile'); print(' '.join(sorted({s[m][0] for m in sys.argv[2:]})))" "$R/scripts" $MEMBERS)
+	check "local build, several inputs: each source stage gets the context" '[ "$(rc multibuild)" = 4 ] && for st in $MSTAGES; do grep -q "^context $st $D 0$" "$FAKE_BUILD_LOG.ctx" || exit 1; done'
+	check "local build, several inputs at one commit: one copy" '[ "$(grep -o -- "--build-context [^ ]*" "$FAKE_BUILD_LOG" | head -n "$(echo $MSTAGES | wc -w)" | sed "s/.*=//" | sort -u | wc -l)" = 1 ]'
+	OVER=$OVER_ONE
+fi
+# past preflight (the host lock held): the commit and the context reach every export
+flock "$O/rt/glassine-images-materialize.lock" sleep 60 & HOLD=$!
+sleep 1; : > "$FAKE_BUILD_LOG"; rm -f "$FAKE_BUILD_LOG.ctx"
+PF= run localbuild --local "$LAST=$L"
+kill $HOLD 2>/dev/null || true
+LSTAGE=$(python3 -I -c "
+import sys; sys.path.insert(0, sys.argv[1]); import glassine_pins as g
+print(g.sources(sys.argv[1] + '/../Dockerfile')[sys.argv[2]][0])" "$R/scripts" "$LAST")
+check "local build: past preflight (exit 4 at the lock)" '[ "$(rc localbuild)" = 4 ]'
+check "local build: every export gets the commit" '[ "$(grep -c -- "--build-arg $LAST=$D" "$FAKE_BUILD_LOG")" = "$(wc -l < "$FAKE_BUILD_LOG")" ]'
+check "local build: every export gets the context" '[ "$(grep -c -- "--build-context $LSTAGE=" "$FAKE_BUILD_LOG")" = "$(wc -l < "$FAKE_BUILD_LOG")" ]'
+check "local build: the context is the commit, unchanged" 'grep -q "^context $LSTAGE $D 0$" "$FAKE_BUILD_LOG.ctx" && ! grep -v "^context $LSTAGE $D 0$" "$FAKE_BUILD_LOG.ctx" | grep -q .'
+check "local build: the step is timed"           'has localbuild "time local checkouts"'
+[ "$(rc localbuild)" = 4 ] || show localbuild
+OVER=$OVER_PINNED
 
 # --- failures: exit 3, within seconds, the cause named
 fail() {	# fail NAME PATTERN DESCRIPTION
@@ -349,6 +456,86 @@ check "SIGTERM: its work directory removed"        '! ls -d "$O/a.term"/.work-* 
 check "a dead run's work directory removed"        '[ ! -d "$O/a.term/.work-4194999" ]'
 check "a live process's work directory kept"       '[ -d "$O/a.term/.work-$$" ]'
 [ "$(rc term)" = 143 ] || show term
+
+# --- trial reasons (materialize): a local input's commit is local:, not arg: too
+python3 -I - "$P/scripts/materialize" > "$O/reasons.out" 2>&1 <<'EOF' || true
+import importlib.machinery, importlib.util, sys
+l = importlib.machinery.SourceFileLoader('materialize', sys.argv[1])
+s = importlib.util.spec_from_loader('materialize', l); m = importlib.util.module_from_spec(s); l.exec_module(m)
+inputs = {'K': 'main', 'T': 'main', 'B': 'main'}
+d = {'K': 'k0', 'T': 'k0', 'B': 'b0', 'JOBS': None}
+print('pinned', m.trial_reasons({'images_clean': 'yes'}, inputs, dict(d), d))
+print('local', m.trial_reasons({'images_clean': 'yes', 'input.K.local': 'yes', 'input.T.local': 'yes'},
+                               inputs, dict(d, K='k1', T='k1'), d))
+print('arg', m.trial_reasons({'images_clean': 'no'}, inputs, dict(d, B='b1', JOBS='2'), d))
+EOF
+check "trial reasons: pinned and clean, none"      'grep -q "^pinned \[\]$" "$O/reasons.out"'
+check "trial reasons: local inputs, local: only"   'grep -q "^local \[.local:K., .local:T.\]$" "$O/reasons.out"'
+check "trial reasons: arguments and a dirty checkout" 'grep -q "^arg \[.arg:B., .arg:JOBS., .dirty.\]$" "$O/reasons.out"'
+if grep -q Traceback "$O/reasons.out"; then sed 's/^/     | /' "$O/reasons.out"; fi
+
+# --- promotion (scripts/promote): records written here, the copy's checkout promotes
+PA=$O/p; HEADC=$(rg rev-parse HEAD)
+# E: a commit with B's tree, on no branch (a squash or rebase of B)
+E=$(gc commit-tree "$BTREE" -p "$A" -m E); git -C "$W" push -q "$G" "$E:refs/side/e"
+record() {	# record ID KEY=VALUE...: a build record of TARGET, the inputs at B, KEY=VALUE replacing
+	id=$1; shift; d=$PA/$TARGET/builds/$id; mkdir -p "$d"
+	{ echo format=1; echo "build=$id"; echo "target=$TARGET"; echo built=2020-01-05T00:00:00Z
+	  echo "images_commit=$HEADC"; echo images_clean=yes; echo trial=no; echo trial_reasons=
+	  echo "$INPUTS" | while read -r c u b; do
+		echo "arg.$u=file://$G"; echo "input.$c.commit=$B"; echo "input.$c.tree=$BTREE"
+		echo "input.$c.branch=$b"; echo "input.$c.local=no"; done
+	} | awk '!seen[$0]++' > "$d/manifest"
+	for l; do
+		k=${l%%=*}; grep -v "^$k=" "$d/manifest" > "$d/x"; echo "$l" >> "$d/x"; mv "$d/x" "$d/manifest"
+	done
+}
+promote() {	# promote NAME ARGS...: the copy's scripts/promote; output in $O/NAME.out, exit in .rc
+	n=$1; shift; set +e
+	timeout 120 "$R/scripts/promote" "$@" > "$O/$n.out" 2>&1; echo $? > "$O/$n.rc"; set -e
+}
+staged() { git -C "$R" diff --cached --name-only; }
+record 20200105-000000
+promote pgood 20200105-000000 --artifacts "$PA" --at HEAD
+check "promote: a pinned, clean build passes"      '[ "$(rc pgood)" = 0 ]'
+check "promote: the record staged under promoted/" '[ "$(staged)" = "promoted/$TARGET/20200105-000000/manifest" ]'
+check "promote: the same bytes"                    'cmp -s "$R/promoted/$TARGET/20200105-000000/manifest" "$PA/$TARGET/builds/20200105-000000/manifest"'
+check "promote: says what to commit"               'has pgood "git commit"'
+check "promote: no work directory left"            '! ls -d "$PA"/.work-* >/dev/null 2>&1'
+[ "$(rc pgood)" = 0 ] || show pgood
+promote pagain "$PA/$TARGET/builds/20200105-000000" --at HEAD
+check "promote: again, by its directory: passes"   '[ "$(rc pagain)" = 0 ]'
+rg reset -q; rm -rf "$R/promoted"
+SAMETREE=$(rg commit-tree "HEAD^{tree}" -p HEAD -m same)
+promote psame 20200105-000000 --artifacts "$PA" --at "$SAMETREE"
+check "promote: another commit with the same tree passes" '[ "$(rc psame)" = 0 ]'
+rg reset -q; rm -rf "$R/promoted"
+OTHERTREE=$(rg commit-tree "$(rg mktree < /dev/null)" -p HEAD -m other)
+promote ptree 20200105-000000 --artifacts "$PA" --at "$OTHERTREE"
+check "promote: images tree differs: refused"      '[ "$(rc ptree)" = 1 ] && has ptree "FAIL: images_commit .* has tree .*, $OTHERTREE has tree"'
+check "promote: refused, nothing staged or written" '[ -z "$(staged)" ] && [ ! -e "$R/promoted" ]'
+promote pnoat 20200105-000000 --artifacts "$PA"
+check "promote: default origin/main missing: refused" '[ "$(rc pnoat)" = 1 ] && has pnoat "FAIL: --at origin/main: not a commit of this checkout"'
+record 20200105-000001 trial=yes "trial_reasons=local:$LAST" "input.$LAST.local=yes"
+promote ptrial 20200105-000001 --artifacts "$PA" --at HEAD
+check "promote: a trial: refused"                  '[ "$(rc ptrial)" = 1 ] && has ptrial "FAIL: a trial (local:$LAST)"'
+record 20200105-000002 "input.$LAST.commit=$C" "input.$LAST.tree=$CTREE"
+promote poff 20200105-000002 --artifacts "$PA" --at HEAD
+check "promote: an input tree on no commit of its branch: refused" '[ "$(rc poff)" = 1 ] && has poff "FAIL: input $LAST: tree $CTREE is the tree of no commit on $LASTBR"'
+record 20200105-000003 "input.$LAST.commit=$E"
+promote psquash 20200105-000003 --artifacts "$PA" --at HEAD
+check "promote: another commit with a tree on the branch passes" '[ "$(rc psquash)" = 0 ]'
+[ "$(rc psquash)" = 0 ] || show psquash
+rg reset -q; rm -rf "$R/promoted"
+record 20200105-000004 images_clean=no
+promote pdirty 20200105-000004 --artifacts "$PA" --at HEAD
+check "promote: a dirty checkout without trial=yes: refused" '[ "$(rc pdirty)" = 1 ] && has pdirty "FAIL: images_clean=no"'
+mkdir -p "$R/promoted/$TARGET/20200105-000000"; echo other > "$R/promoted/$TARGET/20200105-000000/manifest"
+promote pexists 20200105-000000 --artifacts "$PA" --at HEAD
+rm -rf "$R/promoted"
+check "promote: promoted already with other bytes: refused" '[ "$(rc pexists)" = 1 ] && has pexists "exists with other content"'
+promote pnone 20200105-999999 --artifacts "$PA" --at HEAD
+check "promote: no such build: refused"            '[ "$(rc pnone)" = 1 ] && has pnone "FAIL: build 20200105-999999: not in"'
 
 [ -n "${KEEP-}" ] || rm -rf "$O"
 echo "test-build: $fails failure(s)"
