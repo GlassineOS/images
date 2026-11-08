@@ -127,7 +127,8 @@ check "its tree16: sha256 of the manifest + the base manifest's lines other than
 	"[ \"\$( { cat '$O/known.expect'; printf 'format=1\nlocks=%064d\nneeds=\nfeatures=\n' 0; } | sha256sum | cut -c1-16)\" = 55ba5152d7965324 ]"
 
 A=$O/art; T=$A/fixture
-clean_info() { printf 'images_commit=%040d\nimages_clean=yes\ninput.BOOT_COMMIT.tree=t1\nbuilder.kernel-build=sha256:00\nunmerged=\n' 7 > "$O/info"; }
+EKEY=$(printf %064d 1); EREF=registry.example/images-kernel@sha256:$(printf %064d 2)
+clean_info() { printf 'images_commit=%040d\nimages_clean=yes\ninput.BOOT_COMMIT.tree=t1\nbuilder.kernel-build=sha256:00\nunmerged=\nexport.kernel-export.key=%s\nexport.kernel-export.from=%s\nexport.boot-export.key=%s\nexport.boot-export.from=built\n' 7 "$EKEY" "$EREF" "$EKEY" > "$O/info"; }
 clean_info
 
 # --- 1. a new base (no build records yet: no parent)
@@ -146,6 +147,7 @@ check "packages: name=version, sorted" "[ \"\$(cat '$B/packages')\" = \"\$(print
 check "base manifest: format, base, locks of the fixture chain, empty needs/features" "[ \"\$(cat '$B/base.manifest')\" = \"\$(printf 'format=1\nbase=%s\nlocks=%s\nneeds=\nfeatures=' '$ID1' $LOCKS)\" ]"
 check "build manifest: format=1 first, every key" "[ \"\$(head -n 1 '$R1/manifest')\" = format=1 ] && for k in build base target tree parent reused uuid received_uuid built images_commit images_clean trial trial_reasons unmerged locks lock.base0 lock.device-fixture arg.DEVICE arg.LOCK arg.BOOT_COMMIT input.BOOT_COMMIT.commit input.BOOT_COMMIT.tree input.BOOT_COMMIT.branch input.BOOT_COMMIT.local builder.kernel-build kernel_release bootimg boot_commit stream stream_sha256 delta delta_sha256 modules_stream modules_stream_sha256; do grep -q \"^\$k=\" '$R1/manifest' || { echo \"    missing \$k\"; exit 1; }; done"
 check "build manifest values" "[ \"\$(v base '$R1/manifest')\" = '$ID1' ] && [ \"\$(v reused '$R1/manifest')\" = no ] && [ -z \"\$(v parent '$R1/manifest')\" ] && [ \"\$(v locks '$R1/manifest')\" = $LOCKS ] && [ \"\$(v lock.base0 '$R1/manifest')\" = \"\$(sha256sum < '$R/stages/base0/lock' | cut -c1-64)\" ] && [ \"\$(v kernel_release '$R1/manifest')\" = $REL ] && [ \"\$(v bootimg '$R1/manifest')\" = $IMG ] && [ \"\$(v boot_commit '$R1/manifest')\" = $BOOT_COMMIT ] && [ \"\$(v input.BOOT_COMMIT.branch '$R1/manifest')\" = main ] && [ \"\$(v input.BOOT_COMMIT.commit '$R1/manifest')\" = $BOOT_COMMIT ] && [ \"\$(v input.BOOT_COMMIT.tree '$R1/manifest')\" = t1 ] && [ \"\$(v stream '$R1/manifest')\" = 'fixture/bases/$ID1/base.btrfs.zst' ] && [ \"\$(v stream_sha256 '$R1/manifest')\" = \"\$(sha256sum < '$B/base.btrfs.zst' | cut -c1-64)\" ]"
+check "build manifest: each export's key and where it came from (specs/003 FR-009)" "[ \"\$(v export.kernel-export.key '$R1/manifest')\" = $EKEY ] && [ \"\$(v export.kernel-export.from '$R1/manifest')\" = $EREF ] && [ \"\$(v export.boot-export.from '$R1/manifest')\" = built ]"
 check "pinned clean build: not a trial" "[ \"\$(v trial '$R1/manifest')\" = no ] && [ -z \"\$(v trial_reasons '$R1/manifest')\" ]"
 check "uuid = received_uuid, both set, in the build and the base record" "[ -n \"\$(v uuid '$R1/manifest')\" ] && [ \"\$(v uuid '$R1/manifest')\" = \"\$(v received_uuid '$R1/manifest')\" ] && [ \"\$(v uuid '$B/record')\" = \"\$(v uuid '$R1/manifest')\" ] && [ \"\$(v build '$B/record')\" = 20260101-100000 ]"
 check "locked stages only (middle has no lock)" "! grep -q '^lock.middle=' '$R1/manifest'"
