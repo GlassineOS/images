@@ -18,8 +18,10 @@ Options:
   --build-arg N=V      a build argument for every stage (repeat); must be an ARG with a
                        default in the Dockerfile; a value other than the default makes
                        the build a trial. DEVICE is the target and can't be set
-  --no-cache           build every stage without BuildKit's layer cache (cache mounts,
-                       such as the kernel's, are kept: an empty one gives the same bytes)
+  --no-cache           build every stage without BuildKit's layer cache, once per run
+                       (an export reuses what an earlier export of this run built);
+                       cache mounts, such as the kernel's, are kept: an empty one gives
+                       the same bytes
   --preflight-only     run the preflight, print the build info it found, stop
 
 In order (each step's time is printed, and again at the end):
@@ -504,18 +506,26 @@ def main(argv):
                   '--build-arg', f'DEVICE={target}']
         for k, v in over.items():
             common += ['--build-arg', f'{k}={v}']
-        if o['no_cache']:
-            common.append('--no-cache')
 
-        # the exports
+        # the exports. Without cache, each stage is built once in this run: an export
+        # rebuilds only the stages no earlier export of this run built
         tar = os.path.join(work, 'base.tar')
         kdir = os.path.join(work, 'k')
+        dockerfile = os.path.join(REPO, 'Dockerfile')
+        built = set()
         for name in [BASE_EXPORT] + KERNEL_EXPORTS:
             dest = (f'type=tar,dest={tar}' if name == BASE_EXPORT
                     else f'type=local,dest={os.path.join(work, "k." + name)}')
+            extra = []
+            if o['no_cache']:
+                need = glassine_pins.reachable(dockerfile, [name], {**over, 'DEVICE': target})
+                fresh = [n for n in need if n not in built]
+                built.update(need)
+                if fresh:
+                    extra = ['--no-cache-filter', ','.join(fresh)]
             log(f'build: {name} ...')
             t = time.monotonic()
-            rc, out = log.stream(common + ['--target', name, '-o', dest, REPO], timeout)
+            rc, out = log.stream(common + extra + ['--target', name, '-o', dest, REPO], timeout)
             if rc != 0:
                 log(f'build: {name} failed (exit {rc}{", timeout" if rc == 124 else ""}):\n{tail(out)}')
                 return 1
