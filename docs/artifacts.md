@@ -71,6 +71,11 @@ and are never artifacts.
   a newline. With `format=1` that is `format=1\nlocks=<locks>\nneeds=<needs>\nfeatures=<features>\n`.
   So a change of `locks`, `needs` or `features` is another base.
 
+**Readers treat a base id as an opaque name.** They never parse, sort or compare its
+parts: a time comes from a record's `built`, a tree from its `tree`. The id's form may
+change for new bases while older ones keep theirs; a delta finds its parent by the
+received UUID, not by name.
+
 A build whose `tree16` equals that of a complete base of the same target reuses it: no
 new subvolume or stream. The base manifest
 (`/usr/share/glassine/base.manifest`, GlassineOS/boot's `docs/kernel-artifacts.md`) is
