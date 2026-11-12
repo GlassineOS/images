@@ -1,3 +1,6 @@
 # Onyx Boox Note Air: its services and scripts (the kernel is not in the base chain).
 # Its configuration files are in rootfs/.
 device-onyx-noteair
+# our Mesa for Flatpak apps (freedreno, Adreno 509): Flathub's loses texture uploads
+# on this GPU. Only for freedreno devices, since apps then prefer it to Flathub's Mesa.
+mesa-flatpak-glassine
