@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""The registry exports of a target (specs/003-kernel-outputs-registry, docs/registry.md):
+their keys, whether they are published, and the CI steps that build, reproduce and
+publish them. scripts/build uses the same code for a person's build.
+
+    scripts/registry keys TARGET [--build-arg N=V]... [--explain EXPORT]
+        each export's key; --explain prints what went into one key
+    scripts/registry status TARGET [--build-arg N=V]...
+        each export: published under its key (the digest), or why not
+    scripts/registry exports TARGET OUT [--build-arg N=V]... [--no-registry]
+                     [--cache-from SPEC]... [--cache-to SPEC]
+        each export into OUT/<export>/: pulled when published under its key, else built
+        here (taking in the pulled exports it reads, with its layer cache from
+        <prefix>/images-cache:<export> and each --cache-from). Writes OUT/plan (per export: key,
+        then <ref>@<digest> or built) and OUT/trees (the tree of each git input an
+        export built here fetches)
+    scripts/registry reproduce TARGET OUT [--all] [--build-arg N=V]...
+        builds again, from scratch, each export OUT/plan says was built here (--all:
+        every export), with no layer cache for its stages and an empty kernel cache
+        mount, compares the result with OUT/<export>/ and writes OUT/reproduced (per
+        export: key, same or differs). Exit 1 when one differs
+    scripts/registry publish TARGET OUT
+        publishes each export OUT/plan says was built here and OUT/reproduced says
+        is the same, under its key, unless it is published already. Refuses build
+        arguments, a checkout with changes, and an OUT whose keys aren't this
+        checkout's. Needs a login to the registry with write access (CI on main only)
+    scripts/registry cache TARGET OUT --cache-from SPEC
+        the layer cache of each export built here, from SPEC to <prefix>/images-cache:<export>
+
+GLASSINE_REGISTRY is the prefix (default ghcr.io/glassineos). BUILD_TIMEOUT: seconds
+per build (default 14400). Exit: 0 done, 1 failed, 2 usage.
+"""
+import os, re, shutil, subprocess, sys, threading
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+import glassine_pins  # noqa: E402
+import glassine_registry as reg  # noqa: E402
+
+DOCKERFILE = os.path.join(REPO, 'Dockerfile')
+EXPORTS = glassine_pins.REGISTRY_EXPORTS
+
+
+def usage():
+    print(__doc__, file=sys.stderr)
+    sys.exit(2)
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def run_shown(cmd, timeout):
+    """Run cmd with its output shown as it comes, killed after timeout seconds;
+    (returncode, its last lines), 124 on timeout."""
+    say('$ ' + ' '.join(cmd))
+    tail = []
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
+    except OSError as e:
+        return 127, str(e)
+    timer = threading.Timer(timeout, p.kill)
+    timer.start()
+    try:
+        for line in p.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            tail = (tail + [line])[-30:]
+        rc = p.wait()
+    finally:
+        expired = not timer.is_alive()
+        timer.cancel()
+    if expired and rc != 0:
+        return 124, ''.join(tail) + f'timed out after {timeout} s\n'
+    return rc, ''.join(tail)
+
+
+def target_arch(target):
+    path = os.path.join(REPO, 'targets', target, 'target')
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', target) or not os.path.isfile(path):
+        sys.exit(f'registry: no target {target!r} (no {path})')
+    with open(path) as f:
+        rec = dict(line.rstrip('\n').split('=', 1) for line in f if '=' in line and not line.startswith('#'))
+    if not re.fullmatch(r'[a-z0-9]+', rec.get('arch', '')):
+        sys.exit(f'registry: {path}: no arch')
+    return rec['arch']
+
+
+def parse(argv, npos, flags=(), values=()):
+    o = {'args': {}, 'cache_from': [], 'cache_to': None, 'explain': None}
+    for f in flags:
+        o[f] = False
+    pos, it = [], iter(argv)
+    for a in it:
+        if a == '--build-arg' or a in values:
+            v = next(it, None)
+            if v is None:
+                usage()
+            if a == '--build-arg':
+                k, sep, val = v.partition('=')
+                if not sep or not re.fullmatch(r'\w+', k) or k == 'DEVICE':
+                    usage()
+                o['args'][k] = val
+            elif a == '--cache-from':
+                o['cache_from'].append(v)
+            else:
+                o[a[2:].replace('-', '_')] = v
+        elif a.lstrip('-').replace('-', '_') in flags and a.startswith('--'):
+            o[a[2:].replace('-', '_')] = True
+        elif a.startswith('-'):
+            usage()
+        else:
+            pos.append(a)
+    if len(pos) != npos:
+        usage()
+    return o, pos
+
+
+def keys_for(target, o):
+    over = {**o['args'], 'DEVICE': target}
+    return glassine_pins.export_keys(DOCKERFILE, REPO, over, target_arch(target)), over
+
+
+def read_table(path):
+    """{export: [fields...]} from a file of lines '<export> <field> ...'."""
+    out = {}
+    if os.path.isfile(path):
+        with open(path) as f:
+            for line in f:
+                w = line.split()
+                if w:
+                    out[w[0]] = w[1:]
+    return out
+
+
+def write_table(path, rows):
+    with open(path + '.tmp', 'w') as f:
+        f.write(''.join(' '.join(r) + '\n' for r in rows))
+    os.replace(path + '.tmp', path)
+
+
+def build_cmd(target, arch, o, export, extra=()):
+    cmd = ['docker', 'buildx', 'build', '--progress=plain', '--platform', f'linux/{arch}',
+           '--build-arg', f'DEVICE={target}']
+    for k, v in o['args'].items():
+        cmd += ['--build-arg', f'{k}={v}']
+    return cmd + list(extra) + ['--target', export]
+
+
+def cmd_keys(argv):
+    o, (target,) = parse(argv, 1, values=('--explain',))
+    keys, _ = keys_for(target, o)
+    if o['explain']:
+        if o['explain'] not in keys:
+            sys.exit(f'registry: no export {o["explain"]} (one of {", ".join(EXPORTS)})')
+        sys.stdout.write(keys[o['explain']]['text'])
+        return 0
+    for e in EXPORTS:
+        say(f'{e} {keys[e]["key"]}')
+    return 0
+
+
+def cmd_status(argv):
+    o, (target,) = parse(argv, 1)
+    keys, _ = keys_for(target, o)
+    p = reg.plan(keys)
+    for e in EXPORTS:
+        say(f'{e} {keys[e]["key"]} ' + (p[e]['pull'] if p[e]['pull'] else f'not published: {p[e]["why"]}'))
+    return 0
+
+
+def cmd_exports(argv):
+    o, (target, out) = parse(argv, 2, flags=('no_registry',), values=('--cache-from', '--cache-to'))
+    arch = target_arch(target)
+    keys, over = keys_for(target, o)
+    timeout = int(os.environ.get('BUILD_TIMEOUT', '14400'))
+    os.makedirs(out, exist_ok=True)
+    work = os.path.join(out, '.work')
+    p = reg.plan(keys, use_registry=not o['no_registry'])
+    pulled = {e: p[e]['pull'] for e in EXPORTS if p[e]['pull']}
+    for e in EXPORTS:
+        say(f'registry: {e} key {keys[e]["key"]}: ' + (f'pull {pulled[e]}' if e in pulled
+                                                       else f'build here ({p[e]["why"]})'))
+    # the trees of the git inputs: from the pulled exports, or fetched (only the inputs
+    # an export built here fetches)
+    args, _ = glassine_pins.pins(DOCKERFILE, over)
+    repos = glassine_pins.repos(DOCKERFILE)
+    tree = {}
+    for e in EXPORTS:
+        if e in pulled:
+            for i in keys[e]['inputs']:
+                if p[e]['trees'].get(i):
+                    tree[i] = p[e]['trees'][i]
+    need = sorted({i for e in EXPORTS if e not in pulled for i in keys[e]['fetches']})
+    for i in need:
+        url, commit = args[repos[i]], args[i]
+        gd = os.path.join(work, 'git', i)
+        shutil.rmtree(gd, ignore_errors=True)
+        os.makedirs(gd)
+        subprocess.run(['git', 'init', '-q', '--bare', gd], check=True)
+        rc, _, msg = reg.git_fetch(gd, url, commit, f'the tree of {i}', log=say)
+        if rc != 0:
+            sys.exit(f'registry: {msg}')
+        r = subprocess.run(['git', '-C', gd, 'rev-parse', f'{commit}^{{tree}}'], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f'registry: {i}: commit {commit} from {url} has no tree')
+        tree[i] = r.stdout.strip()
+    write_table(os.path.join(out, 'trees'), [(i, tree[i]) for i in sorted(tree)])
+    rows = []
+    for e in EXPORTS:
+        dest = os.path.join(out, e)
+        if e in pulled:
+            why = reg.pull(e, pulled[e], dest, f'linux/{arch}', work, run=run_shown, log=say)
+            if why:
+                sys.exit(f'registry: {why}')
+            rows.append((e, keys[e]['key'], pulled[e]))
+            continue
+        shutil.rmtree(dest, ignore_errors=True)
+        extra = reg.contexts(e, keys, pulled)
+        if not o['no_registry']:
+            extra += ['--cache-from', f'type=registry,ref={reg.cache_ref(e)}']
+        extra += [x for c in o['cache_from'] for x in ('--cache-from', c)]
+        if o['cache_to']:
+            extra += ['--cache-to', o['cache_to']]
+        rc, tail = run_shown(build_cmd(target, arch, o, e, extra) + ['-o', f'type=local,dest={dest}', REPO], timeout)
+        if rc != 0:
+            sys.exit(f'registry: building {e} failed (exit {rc})')
+        rows.append((e, keys[e]['key'], 'built'))
+    write_table(os.path.join(out, 'plan'), rows)
+    shutil.rmtree(work, ignore_errors=True)
+    return 0
+
+
+def drop_cache_mount(kcache):
+    """Remove the kernel cache mount(s) <kcache>-sha256:... made by a from-scratch build."""
+    r = subprocess.run(['docker', 'buildx', 'du', '--verbose'], capture_output=True, text=True)
+    ids, cur = [], None
+    for line in r.stdout.splitlines():
+        if line.startswith('ID:'):
+            cur = line.split()[1] if len(line.split()) > 1 else None
+        elif line.startswith('Description:') and (f'with id "{kcache}-sha256:' in line
+                                                   or f'with id "/{kcache}-sha256:' in line):
+            ids.append(cur)
+    for i in ids:
+        subprocess.run(['docker', 'buildx', 'prune', '-f', '--filter', f'id={i}'], capture_output=True)
+    say(f'registry: removed cache mount {kcache} ({" ".join(ids) or "none found"})')
+
+
+def cmd_reproduce(argv):
+    o, (target, out) = parse(argv, 2, flags=('all',))
+    arch = target_arch(target)
+    keys, _ = keys_for(target, o)
+    plan = read_table(os.path.join(out, 'plan'))
+    if set(plan) != set(EXPORTS):
+        sys.exit(f'registry: {out}/plan doesn\'t list every export; run registry exports first')
+    for e in EXPORTS:
+        if plan[e][0] != keys[e]['key']:
+            sys.exit(f'registry: {out}/plan: {e} has key {plan[e][0]}, this checkout gives {keys[e]["key"]}')
+    pulled = {e: plan[e][1] for e in EXPORTS if plan[e][1] != 'built'}
+    todo = [e for e in EXPORTS if o['all'] or e not in pulled]
+    timeout = int(os.environ.get('BUILD_TIMEOUT', '14400'))
+    salt = 'kernel-repro-' + os.urandom(6).hex()
+    rows, rc_all = [], 0
+    try:
+        for e in todo:
+            again = os.path.join(out, '.again', e)
+            shutil.rmtree(again, ignore_errors=True)
+            # its own stages from scratch; the exports it takes in are those of the first
+            # build (pulled, or built here and reproduced on their own)
+            extra = reg.contexts(e, keys, pulled)
+            extra += ['--no-cache-filter', ','.join(keys[e]['stages'])]
+            if 'KCACHE' in keys[e]['args']:     # an empty kernel cache mount, only where one is used
+                extra += ['--build-arg', f'KCACHE={salt}']
+            rc, _ = run_shown(build_cmd(target, arch, o, e, extra) + ['-o', f'type=local,dest={again}', REPO], timeout)
+            if rc != 0:
+                sys.exit(f'registry: rebuilding {e} from scratch failed (exit {rc})')
+            c = subprocess.run([sys.executable, os.path.join(HERE, 'kernel-check'), '--compare',
+                                os.path.join(out, e), again], capture_output=True, text=True)
+            sys.stdout.write(c.stdout)
+            same = c.returncode == 0
+            rows.append((e, keys[e]['key'], 'same' if same else 'differs'))
+            say(f'registry: {e}: the rebuild from scratch is ' + ('the same, byte for byte' if same else 'DIFFERENT'))
+            rc_all |= 0 if same else 1
+    finally:
+        drop_cache_mount(salt)
+        write_table(os.path.join(out, 'reproduced'), rows)
+        shutil.rmtree(os.path.join(out, '.again'), ignore_errors=True)
+    return rc_all
+
+
+def checkout_changes():
+    r = subprocess.run(['git', '-C', REPO, 'status', '--porcelain', '--untracked-files=all'],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else 'not a git checkout'
+
+
+def cmd_publish(argv):
+    o, (target, out) = parse(argv, 2)
+    arch = target_arch(target)
+    changes = checkout_changes()
+    if changes:
+        sys.exit(f'registry: the checkout has changes, nothing is published (a trial):\n{changes}')
+    keys, _ = keys_for(target, o)
+    plan = read_table(os.path.join(out, 'plan'))
+    rep = read_table(os.path.join(out, 'reproduced'))
+    tree = {k: v[0] for k, v in read_table(os.path.join(out, 'trees')).items()}
+    rc = 0
+    for e in EXPORTS:
+        if e not in plan or plan[e][0] != keys[e]['key']:
+            sys.exit(f'registry: {out}/plan: {e} isn\'t this checkout\'s (key {keys[e]["key"]})')
+        if plan[e][1] != 'built':
+            say(f'registry: {e}: pulled ({plan[e][1]}), nothing to publish')
+            continue
+        if rep.get(e, [None, None])[:2] != [keys[e]['key'], 'same']:
+            say(f'registry: {e}: NOT published: no rebuild from scratch gave the same bytes')
+            rc = 1
+            continue
+        missing = [i for i in keys[e]['inputs'] if not tree.get(i)]
+        if missing:
+            say(f'registry: {e}: NOT published: no tree for {" ".join(missing)} in {out}/trees')
+            rc = 1
+            continue
+        ann = {f'tree.{i.lower()}': tree[i] for i in keys[e]['inputs']}
+        try:
+            state, ref = reg.publish(e, keys[e]['key'], os.path.join(out, e), f'linux/{arch}',
+                                     os.path.join(out, '.work'), ann, run=run_shown)
+        except RuntimeError as x:
+            say(f'registry: {e}: NOT published: {x}')
+            rc = 1
+            continue
+        say(f'registry: {e}: {"published" if state == "published" else "already published"} {ref}')
+    shutil.rmtree(os.path.join(out, '.work'), ignore_errors=True)
+    return rc
+
+
+def cmd_cache(argv):
+    o, (target, out) = parse(argv, 2, values=('--cache-from',))
+    arch = target_arch(target)
+    keys, _ = keys_for(target, o)
+    plan = read_table(os.path.join(out, 'plan'))
+    pulled = {e: v[1] for e, v in plan.items() if v[1:2] != ['built']}
+    timeout = int(os.environ.get('BUILD_TIMEOUT', '14400'))
+    rc = 0
+    for e in EXPORTS:
+        if e in pulled or e not in plan:
+            continue
+        extra = reg.contexts(e, keys, pulled)
+        extra += [x for c in o['cache_from'] for x in ('--cache-from', c)]
+        extra += ['--cache-to', f'type=registry,ref={reg.cache_ref(e)},mode=max', '-o', 'type=cacheonly']
+        r, _ = run_shown(build_cmd(target, arch, o, e, extra) + [REPO], timeout)
+        say(f'registry: {e}: layer cache ' + ('exported to ' + reg.cache_ref(e) if r == 0 else f'not exported (exit {r})'))
+        rc |= 1 if r else 0
+    return rc
+
+
+def main(argv):
+    if not argv:
+        usage()
+    cmds = {'keys': cmd_keys, 'status': cmd_status, 'exports': cmd_exports, 'reproduce': cmd_reproduce,
+            'publish': cmd_publish, 'cache': cmd_cache}
+    if argv[0] not in cmds:
+        usage()
+    return cmds[argv[0]](argv[1:])
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

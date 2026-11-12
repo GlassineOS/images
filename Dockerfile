@@ -41,7 +41,7 @@ ARG LINUX=https://github.com/GlassineOS/linux
 # Each git input's commit has the branch it follows on the line above it, as
 # "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
 # branch: glassine/sdm660-7.3
-ARG LINUX_SDM660=deb74f03e647c3d0a21377168758e1a138042152
+ARG LINUX_SDM660=803a2465faae8f6a3667dfce44afed98de2a0935
 # the commit device trees build from: a fixed tree ships without a new kernel
 # branch: glassine/sdm660-7.3
 ARG DTB_COMMIT=${LINUX_SDM660}
@@ -50,21 +50,25 @@ ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=9b0078a16986c4766eaab5329b9bf90159a4d698
+ARG BOOT_COMMIT=1ba4b071f603ad1f3173f15368065ae5d9381a04
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
-# for a commit id.
+# for a commit id. scripts/git-fetch.sh limits the time of each fetch and tries again on
+# network failures, and keeps the repository's objects in a cache mount, so a later
+# commit transfers only what it adds.
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS linux-sdm660-src
 ARG LINUX LINUX_SDM660
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    --mount=type=cache,id=glassine-src-linux,target=/cache/git,sharing=locked \
+    sh /run/git-fetch.sh linux-sdm660-src "$LINUX" "$LINUX_SDM660" /src/linux /cache/git
 WORKDIR /src/linux
-RUN git init -q && git fetch -q --depth=1 "$LINUX" "$LINUX_SDM660" \
-    && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = "$LINUX_SDM660"
 
 # Firmware the sdm660 kernel depends on, from linux-firmware (redistributable; never
 # vendor files): the Adreno 5xx CP microcode, whose PFP carries the marker the driver
-# needs for its multiple rings and preemption.
+# needs for its multiple rings and preemption, and the WCN3990's ath10k firmware file
+# (firmware-5.bin: the features and interface versions ath10k uses; the WLAN firmware
+# itself runs on the modem and comes from the device).
 FROM scratch AS firmware-sdm660
 ARG LINUX_FIRMWARE
 ADD --checksum=sha256:7ab3cd917e1f875f6a8387f8bc5efcf11ce9c88542ef2fc3cbda7d4b7b163286 \
@@ -73,6 +77,10 @@ ADD --checksum=sha256:6419f35956ec7307af83723fedfba752520bacd8389eda0d0120e185e4
     ${LINUX_FIRMWARE}/qcom/a530_pm4.fw /qcom/a530_pm4.fw
 ADD --checksum=sha256:be904cd28cb292b80cdb6cf412ab0d9159d431671e987ad433c1f62e0988a9bc \
     ${LINUX_FIRMWARE}/LICENSE.qcom /LICENSE.qcom
+ADD --checksum=sha256:fef6539e0127579536bc977be57a90d018b83f2931fedc3a8870fbe38d6c4127 \
+    ${LINUX_FIRMWARE}/ath10k/WCN3990/hw1.0/firmware-5.bin /ath10k/WCN3990/hw1.0/firmware-5.bin
+ADD --checksum=sha256:337a55102138d7baa143ee4a4c6c91693e0113fece35d380b2a12109e8c23b3f \
+    ${LINUX_FIRMWARE}/LICENSE.QualcommAtheros_ath10k /LICENSE.QualcommAtheros_ath10k
 
 # The kernel for SoCs of the sdm660 family: compiled once for every device whose target
 # names kernel=sdm660, with the firmware it needs. It names no device tree: those are
@@ -96,15 +104,16 @@ COPY --from=kernel /out/ /
 # differs (a fixed tree ships without a new kernel).
 FROM linux-sdm660-src AS dtb-src
 ARG LINUX DTB_COMMIT
-RUN if [ "$(git rev-parse HEAD)" != "$DTB_COMMIT" ]; then \
-        git fetch -q --depth=1 "$LINUX" "$DTB_COMMIT" \
-        && git -c advice.detachedHead=false checkout -q FETCH_HEAD; fi \
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    --mount=type=cache,id=glassine-src-linux,target=/cache/git,sharing=locked \
+    if [ "$(git rev-parse HEAD)" != "$DTB_COMMIT" ]; then \
+        sh /run/git-fetch.sh dtb-src "$LINUX" "$DTB_COMMIT" /src/linux /cache/git; fi \
     && test "$(git rev-parse HEAD)" = "$DTB_COMMIT"
 
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS dtb
 ARG LINUX DTB_COMMIT DEVICE JOBS
 RUN --mount=type=bind,from=dtb-src,source=/src/linux,target=/src/linux \
-    --mount=type=bind,source=targets/${DEVICE},target=/run/target \
+    --mount=type=bind,source=targets/${DEVICE}/target,target=/run/target/target \
     --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
     REPO=$LINUX COMMIT=$DTB_COMMIT DEVICE=$DEVICE JOBS=$JOBS sh /run/kernel.sh dtb
 
@@ -138,6 +147,8 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
 # /tmp is a tmpfs: `/` is read-only, and only /etc, /var, /usr/local and /opt are bound
 # writable, so without it nothing could write a temporary file.
 RUN printf '%s\n' 'overlay / overlay bind,ro 0 0' 'tmpfs /tmp tmpfs nosuid,nodev,mode=1777 0 0' > /etc/fstab
+# busybox-openrc's klogd service runs as the account klogd, which no package makes
+RUN addgroup -S klogd && adduser -S -D -H -h /dev/null -s /sbin/nologin -G klogd -g klogd klogd
 COPY stages/glassine-common/rootfs/ /
 
 # Any e-ink device: the panel daemons and the e-ink session, started at boot.
@@ -158,6 +169,10 @@ RUN --mount=type=bind,source=stages/device-onyx-noteair,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-onyx-noteair/rootfs/ /
+# the board keys the booted system reads (GlassineOS/boot: glassine-bootimg, the
+# developer mode's DEVMODE_*): the target's board.conf, the same file every boot image
+# carries as /etc/glassine-boot/board.conf
+COPY --chmod=644 targets/onyx-noteair/board.conf /etc/glassine-bootimg/board.conf
 
 # A made-up device that tests the chain: it must build on the generic stages unchanged.
 FROM eink AS device-example
@@ -172,7 +187,8 @@ COPY stages/device-example/rootfs/ /
 # The initramfs and the boot image (GlassineOS/boot's docs/kernel-artifacts.md):
 #
 #   boot-src + alpine → initramfs → initramfs-export          boot/initramfs/<commit12>@<id>.*
-#   kernel + dtb + initramfs + boot-src → boot → boot-export  bootimg/<id>.*, select/<device>
+#   kernel-export + dtb-export + initramfs-export + boot-src → boot → boot-export
+#                                                             bootimg/<id>.*, select/<device>
 #
 # The initramfs is GlassineOS/boot's build-initramfs.sh at BOOT_COMMIT, built in arm64
 # Alpine with a locked package set (stages/initramfs). The boot image packs with boot's
@@ -180,14 +196,14 @@ COPY stages/device-example/rootfs/ /
 # image. A change to the initramfs repacks without touching a kernel layer.
 
 # GlassineOS/boot at BOOT_COMMIT, fetched on the build computer's own platform (no
-# emulation on either kind of runner); git here is a fetch tool, not part of any output.
+# emulation on either kind of runner); git here is a fetch tool, not part of any output,
+# and the stage gives the same files on every platform (docs/registry.md counts on it).
 FROM --platform=$BUILDPLATFORM ${ALPINE} AS boot-src
 ARG BOOT BOOT_COMMIT
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    apk add -q --no-cache git \
+    && sh /run/git-fetch.sh boot-src "$BOOT" "$BOOT_COMMIT" /src/boot
 WORKDIR /src/boot
-RUN apk add -q --no-cache git \
-    && git init -q && git fetch -q --depth=1 "$BOOT" "$BOOT_COMMIT" \
-    && git -c advice.detachedHead=false checkout -q FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = "$BOOT_COMMIT"
 
 FROM alpine AS initramfs
 ARG LOCK=check
@@ -206,16 +222,21 @@ COPY --from=initramfs /out/ /
 
 # One device's boot image and its select record (which kernel, device tree and initramfs
 # the device boots). Fails when the image doesn't fit the board's PART_SIZE, or the
-# kernel isn't the release its directory names (--expect-release).
+# kernel isn't the release its directory names (--expect-release). It reads the other
+# exports, not their stages, so a published export given as a build context
+# (--build-context kernel-export=docker-image://...) stands in for building it.
+# CMDLINE_EXTRA: words appended to the board's command line for one build (a developer
+# image, such as glassine.devmode=usb for a device test); setting it makes the build a
+# trial, and the board's own CMDLINE never carries them.
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS boot
-ARG DEVICE
-RUN --mount=type=bind,from=kernel,source=/out/modules,target=/run/modules \
-    --mount=type=bind,from=dtb,source=/out/boot/dtb,target=/run/dtb \
-    --mount=type=bind,from=initramfs,source=/out/boot/initramfs,target=/run/initramfs \
+ARG DEVICE CMDLINE_EXTRA
+RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
+    --mount=type=bind,from=dtb-export,source=/boot/dtb,target=/run/dtb \
+    --mount=type=bind,from=initramfs-export,source=/boot/initramfs,target=/run/initramfs \
     --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
     --mount=type=bind,source=targets/${DEVICE},target=/run/target \
     --mount=type=bind,source=scripts/bootimg.sh,target=/run/bootimg.sh \
-    DEVICE=$DEVICE sh /run/bootimg.sh
+    DEVICE=$DEVICE CMDLINE_EXTRA="$CMDLINE_EXTRA" sh /run/bootimg.sh
 
 FROM scratch AS boot-export
 COPY --from=boot /out/ /
