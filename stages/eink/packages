@@ -1,8 +1,9 @@
 # Any e-ink device: the panel daemons, the compositor with the e-ink output, the
-# on-screen keyboard, the desktop (shell, settings, sway session) and its terminal
+# on-screen keyboard, the desktop (shell, Home screen, settings, sway session) and its terminal
 foot
 glassine-epdd
 glassine-epdd-desktop
+glassine-home
 glassine-shell
 sway-glassine
 wvkbd-glassine
