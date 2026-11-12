@@ -72,10 +72,11 @@ done
 # healthy boot, and a shutdown that stops everything, runs the switch, then leaves the
 # file systems read-only (glassine-mount-ro: userdata and the system partition, which
 # the root's overlay keeps alive past mount-ro); developer mode, which does nothing
-# without glassine.devmode=usb on the command line
+# without glassine.devmode=usb on the command line; the reboot with a reason, last in
+# the shutdown (glassine-reboot-clean leaves the reason for it)
 for s in boot/bootmisc boot/machine-id default/dbus default/glassine-deploy-accept \
 	default/glassine-devmode shutdown/killprocs shutdown/glassine-switch shutdown/mount-ro \
-	shutdown/glassine-mount-ro; do
+	shutdown/glassine-mount-ro shutdown/glassine-reboot-reason; do
 	[ -e /etc/runlevels/$s ] || no "a service a deployment needs isn't enabled: ${s#*/} in ${s%/*}"
 done
 # no SSH server of its own: developer mode starts one, only with glassine.devmode=usb
