@@ -65,6 +65,28 @@ permissions:
   contents: read
 
 jobs:
+  diag:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - run: |
+          docker buildx build --progress=plain --platform linux/arm64 --target kernel-export \
+            -o type=local,dest=/tmp/k . > /tmp/k.log 2>&1 || { tail -n 50 /tmp/k.log; exit 1; }
+          sha256sum /tmp/k/modules/*/Image.gz
+          mkdir -p /tmp/d && cp /tmp/k/modules/*/Image.gz /tmp/k/debug/* /tmp/d/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: diag-${{ matrix.n }}
+          path: /tmp/d
+          retention-days: 2
   kernel:
     runs-on: ubuntu-24.04
     timeout-minutes: 330

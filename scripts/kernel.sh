@@ -163,6 +163,7 @@ build() {
 	mkdir -p /out/debug
 	cp /cache/obj/vmlinux /cache/obj/System.map /cache/obj/.config /out/debug/
 	gzip -n -1 /out/debug/vmlinux
+	(cd /cache/obj && find . \( -name '*.o' -o -name '*.a' \) ! -name '.tmp_vmlinux*' -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > /out/debug/obj.sha
 	settle /out
 	echo "kernel.sh: $rel: $(find "$o" -name '*.ko' | wc -l) modules, Image.gz $(stat -c %s "$o/Image.gz") bytes"
 	cat "$o/kernel.manifest"
