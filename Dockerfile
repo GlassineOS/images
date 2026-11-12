@@ -147,6 +147,8 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
 # /tmp is a tmpfs: `/` is read-only, and only /etc, /var, /usr/local and /opt are bound
 # writable, so without it nothing could write a temporary file.
 RUN printf '%s\n' 'overlay / overlay bind,ro 0 0' 'tmpfs /tmp tmpfs nosuid,nodev,mode=1777 0 0' > /etc/fstab
+# busybox-openrc's klogd service runs as the account klogd, which no package makes
+RUN addgroup -S klogd && adduser -S -D -H -h /dev/null -s /sbin/nologin -G klogd -g klogd klogd
 COPY stages/glassine-common/rootfs/ /
 
 # Any e-ink device: the panel daemons and the e-ink session, started at boot.
