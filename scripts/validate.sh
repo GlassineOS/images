@@ -90,6 +90,12 @@ for s in hwclock swclock osclock; do [ ! -e /etc/runlevels/boot/$s ] || c=1; don
 for l in /etc/runlevels/*/*; do
 	[ -e "$l" ] || [ ! -L "$l" ] || no "enabled service without a script: $l -> $(readlink "$l")"
 done
+# every enabled service's account exists (OpenRC's command_user, USER[:GROUP])
+for l in /etc/runlevels/*/*; do
+	[ -e "$l" ] || continue
+	u=$(sed -n 's/^[[:space:]]*command_user="\{0,1\}\([^":]*\).*/\1/p' "$l" | head -n 1)
+	[ -z "$u" ] || case $u in *'$'*) ;; *) grep -q "^$u:" /etc/passwd || no "enabled service runs as an account that doesn't exist: ${l##*/} ($u)" ;; esac
+done
 # a switch carries what this list names (GlassineOS/boot docs/deployments.md)
 [ -s /usr/share/glassine/migrate.list ] || no "no migrate list (/usr/share/glassine/migrate.list)"
 exit $fail
