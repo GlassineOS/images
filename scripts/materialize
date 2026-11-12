@@ -28,7 +28,8 @@ Options:
   --no-parent     a new base gets no parent (only its full stream)
   --arg NAME=VAL  a build argument the build used besides the Dockerfile's defaults
                   (repeat). Goes into the record (arg.*); one that differs from its
-                  default makes the build a trial. DEVICE is set to TARGET
+                  default makes the build a trial (arg:NAME), except the commit of an
+                  input from a local checkout (local:NAME). DEVICE is set to TARGET
   --build-info F  what only the build command knows, key=value, one per line (# and
                   blank lines ignored). Keys:
                     images_commit        this repository's commit
@@ -38,6 +39,9 @@ Options:
                                          e.g. LINUX_SDM660, DTB_COMMIT, BOOT_COMMIT)
                     input.<ARG>.local    yes = a local checkout, no = the pinned source
                     builder.<image>      a builder image's digest (sha256:...)
+                    export.<export>.key  a registry export's key (docs/registry.md)
+                    export.<export>.from <ref>@<digest> when it was pulled, built when
+                                         it was built on this computer
                     unmerged             the inputs (<ARG> names) whose commits aren't on
                                          their branch, space-separated
                   Missing: images_commit and images_clean from git when this is a git
@@ -176,7 +180,7 @@ def build_info(path, inputs):
     if not path:
         return info
     keys = re.compile(r'images_commit|images_clean|unmerged|builder\.[^=\s]+'
-                      r'|input\.(\w+)\.(tree|local)')
+                      r'|input\.(\w+)\.(tree|local)|export\.([a-z0-9-]+)\.(key|from)')
     for n, line in enumerate(read(path).decode().splitlines(), 1):
         if not line.strip() or line.lstrip().startswith('#') or line == 'format=1':
             continue
@@ -186,6 +190,8 @@ def build_info(path, inputs):
             raise Fail(f'{path}:{n}: not a build-info key: {line!r}')
         if m.group(1) and m.group(1) not in inputs:
             raise Fail(f'{path}:{n}: {m.group(1)} is not a git input (no "# branch:" pin)')
+        if m.group(3) and m.group(3) not in glassine_pins.REGISTRY_EXPORTS:
+            raise Fail(f'{path}:{n}: {m.group(3)} is not a registry export')
         if k in info:
             raise Fail(f'{path}:{n}: {k} twice')
         info[k] = v
@@ -194,6 +200,19 @@ def build_info(path, inputs):
         if bad:
             raise Fail(f'{path}: unmerged names no git input: {sorted(bad)}')
     return info
+
+
+def trial_reasons(info, inputs, args, defaults):
+    """FR-017: local:<input> for each input from a local checkout; arg:<NAME> for each
+    build argument that differs from its default, except a local input's commit (the
+    checkout gives it: local says so); dirty or clean-unknown unless the checkout was
+    clean."""
+    local = [i for i in inputs if info.get(f'input.{i}.local') == 'yes']
+    why = [f'local:{i}' for i in local]
+    why += [f'arg:{a}' for a in args if args[a] != defaults.get(a) and a not in local]
+    if info.get('images_clean') != 'yes':
+        why.append('dirty' if info.get('images_clean') == 'no' else 'clean-unknown')
+    return why
 
 
 def git(repo, *args):
@@ -350,10 +369,7 @@ def main(argv):
     if 'images_clean' not in info:
         s = git(repo, 'status', '--porcelain')
         info['images_clean'] = '' if s is None else ('yes' if not s.strip() else 'no')
-    why = [f'local:{i}' for i in inputs if info.get(f'input.{i}.local') == 'yes']
-    why += [f'arg:{a}' for a in args if args[a] != defaults.get(a)]
-    if info['images_clean'] != 'yes':
-        why.append('dirty' if info['images_clean'] == 'no' else 'clean-unknown')
+    why = trial_reasons(info, inputs, args, defaults)
     # no feature table exists yet (GlassineOS/boot conf/kernel-features): needs and
     # features stay empty until it does
     needs, features = '', ''
@@ -445,6 +461,9 @@ def run(o, tar, kdir, target, adir, start, t_start, locks, all_locked, stages_di
             m += [(f'input.{i}.commit', args.get(i, '')), (f'input.{i}.tree', info.get(f'input.{i}.tree', '')),
                   (f'input.{i}.branch', branch), (f'input.{i}.local', info.get(f'input.{i}.local', 'no'))]
         m += sorted((key, v) for key, v in info.items() if key.startswith('builder.'))
+        for e in glassine_pins.REGISTRY_EXPORTS:
+            m += [(f'export.{e}.{x}', info[f'export.{e}.{x}']) for x in ('key', 'from')
+                  if f'export.{e}.{x}' in info]
         m += [('kernel_release', rel), ('bootimg', k['bootimg']), ('boot_commit', k['boot_commit']),
               ('stream', f'{target}/bases/{ident}/base.btrfs.zst'), ('stream_sha256', brec['stream_sha256']),
               ('delta', f'{target}/bases/{ident}/{brec["delta"]}' if brec.get('delta') else ''),

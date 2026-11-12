@@ -144,16 +144,18 @@ taken. The manifest never enters a base.
 | `images_commit` | this repository's commit |
 | `images_clean` | `yes` when the checkout had no uncommitted changes to tracked files and no untracked files git doesn't ignore (a stage's `COPY` reads those), `no` otherwise, empty when unknown |
 | `trial` | `yes` or `no` |
-| `trial_reasons` | why it is a trial, space-separated: `local:<input>`, `arg:<NAME>` (differs from the Dockerfile's default), `dirty`, `clean-unknown` |
-| `unmerged` | the inputs whose commits are not on their branch, space-separated |
+| `trial_reasons` | why it is a trial, space-separated: `local:<input>`, `arg:<NAME>` (differs from the Dockerfile's default; never for the commit of an input marked `local`, which `local:<input>` covers), `dirty`, `clean-unknown` |
+| `unmerged` | the inputs whose commits are not on their branch, space-separated; a local checkout's commit that its repository doesn't have (not pushed) is among them |
 | `locks` | the base manifest's `locks` |
 | `lock.<stage>` | sha256 of `stages/<stage>/lock`, for every locked stage the base and the boot image are built from |
 | `arg.<NAME>` | every build argument in effect: the Dockerfile's defaults with the overrides applied (`DEVICE` is the target) |
 | `input.<input>.commit` | a git input's commit; `<input>` is its commit argument (`LINUX_SDM660`, `DTB_COMMIT`, `BOOT_COMMIT`) |
-| `input.<input>.tree` | that commit's tree |
+| `input.<input>.tree` | that commit's tree (when no export built here fetched the commit, the tree a pulled export's annotation names, docs/registry.md) |
 | `input.<input>.branch` | the branch it follows (the `# branch: <name>` line above the argument in `Dockerfile`) |
-| `input.<input>.local` | `yes` when it came from a local checkout, else `no` |
+| `input.<input>.local` | `yes` when it came from a local checkout, else `no`. A checkout serves every input of its repository: a kernel checkout marks `DTB_COMMIT` too |
 | `builder.<image>` | each builder image's digest |
+| `export.<export>.key` | the key of each registry export (`kernel-export`, `dtb-export`, `initramfs-export`, `boot-export`), docs/registry.md |
+| `export.<export>.from` | where that export came from: `<package>@sha256:<digest>`, the published export pulled under its key (the digest the registry gave for the key, which the pull was checked against), or `built` when it was built on this computer |
 | `kernel_release` | the kernel release |
 | `bootimg` | the boot image id |
 | `boot_commit` | the GlassineOS/boot commit the initramfs is built from |
@@ -164,3 +166,36 @@ taken. The manifest never enters a base.
 A build is a trial when an input came from a local checkout, a build argument differs
 from its `Dockerfile` default, or the checkout had uncommitted changes. A trial can be
 sent to a device but is never promoted.
+
+**A developer boot image.** `--build-arg CMDLINE_EXTRA=<words>` appends the words to
+the command line of the build's boot image (such as `glassine.devmode=usb`, which a
+board's `CMDLINE` never carries): the image is packed from a copy of the target's
+`board.conf` whose last line is the longer `CMDLINE`, and its boot record's `cmdline`
+and `board` describe that copy. The build record names it (`arg.CMDLINE_EXTRA`,
+`trial_reasons` `arg:CMDLINE_EXTRA`). The boot image of a build that isn't a trial
+carries no `glassine.devmode`: `scripts/boot-check` fails it otherwise.
+
+**Local checkouts.** `scripts/build --local <NAME>=<DIR>` builds every input of a
+repository from a clean checkout of it: the input's commit is the checkout's (`arg.*`
+and `input.<input>.commit` name it), `input.<input>.tree` is that commit's tree, and
+`input.<input>.local=yes` is what tells the build apart from one of the pinned source.
+The records the build makes from that source keep the repository's URL:
+`kernel.manifest`'s `source=<repository>@<commit>` is the pinned repository, since a
+commit id names the same tree wherever it lies, and a path on the build computer would
+mean nothing on another one.
+
+## Promoted builds
+
+`promoted/<target>/<build-id>/manifest` in this repository: the build manifest of a
+promoted build, byte for byte. `scripts/promote` writes and stages it; the commit that
+adds it is the promotion. A build is promoted at a commit of this repository only when:
+
+- it is not a trial: `trial=no`, no `trial_reasons`, `images_clean=yes`, no input
+  `local=yes`;
+- its `images_commit` has the same tree as that commit;
+- each git input's `tree` is the tree of a commit on its `branch` in its repository
+  (the commit itself, or another one with the same files, such as a squash merge).
+
+A promoted record never changes: promoting the same build again finds the same bytes.
+Readers find the build's other files (the base, its streams, the modules stream, the
+boot image) by the names this record holds, in an artifacts folder that has them.

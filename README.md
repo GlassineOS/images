@@ -19,7 +19,7 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 | `alpine` | Alpine 3.24 and its repositories, plus ours (`glassine-keys`) |
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session and compressed swap with background-app parking (both enabled at boot) |
-| `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration |
+| `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration, and its `targets/onyx-noteair/board.conf` as `/etc/glassine-bootimg/board.conf` (the board keys the booted system reads) |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
 | `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing. It reads the final tree, after `finish`, not each stage: a file added in one stage and removed in a later one isn't seen |
@@ -71,12 +71,36 @@ be started by hand. `scripts/lock-diff.sh` writes the pull request's description
 
 builds everything a device receives for a target (a directory under `targets/`): it
 checks the host first and fails within seconds naming what is missing, builds the base's
-tree and the kernel, device tree, initramfs and boot image, checks them, and makes the
+tree, takes the kernel, device tree, initramfs and boot image from the registry when they
+are published under their keys or builds them (docs/registry.md), checks them, and makes the
 base and the build record with `scripts/materialize` (specs/001-base-build). The result
 goes to `artifacts/` in the checkout (git-ignored; `--artifacts DIR` for another
 folder), laid out as `docs/artifacts.md` defines; each run's log is kept under
 `artifacts/.logs/<target>/`. `scripts/build --help` lists the options and the checks;
-`scripts/test-build.sh` tests the checks without a build.
+`scripts/test-build.sh` tests the checks without a build, `scripts/test-registry.sh` the
+keys, the fetches and a registry round trip.
+
+    scripts/build <target> --local BOOT_COMMIT=../boot
+
+builds the kernel or `boot` from a clean local checkout instead of the pinned commit: a
+trial, which can go to a device but is never promoted.
+
+    scripts/build <target> --build-arg CMDLINE_EXTRA=glassine.devmode=usb
+
+builds a developer boot image: the words are appended to the command line of this one
+boot image (the boot record's `cmdline` and the board.conf the image carries say so),
+while `targets/<target>/board.conf` stays as it is. A board's own `CMDLINE` never
+carries `glassine.devmode` (GlassineOS/boot's rule: it gives anyone with a cable a root
+shell), so a device test that needs the developer mode uses this. Setting it makes the
+build a trial. `scripts/boot-check` fails a boot image whose command line carries
+`glassine.devmode` unless it is told the build's words (`--cmdline-extra`, which
+`scripts/build` passes); a build that isn't a trial never sets them.
+
+    scripts/promote <build-id> [--at <commit>]
+
+checks a build that is not a trial against a commit of this repository (default
+`origin/main`) and the inputs' branches, and stages its record under `promoted/`
+for a commit (`docs/artifacts.md`, "Promoted builds").
 
 One stage on its own:
 
@@ -100,8 +124,8 @@ dtb-src → dtb → dtb-export                                         boot/dtb/
 
 | Stage | Makes |
 |---|---|
-| `linux-sdm660-src` | the kernel source, `GlassineOS/linux` at the commit pinned in the Dockerfile (`LINUX_SDM660`), with a one-commit `.git` |
-| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode. Never vendor files |
+| `linux-sdm660-src` | the kernel source, `GlassineOS/linux` at the commit pinned in the Dockerfile (`LINUX_SDM660`), with a one-commit `.git`; fetched by `scripts/git-fetch.sh` (time limits, tries again on network failures) through a repository kept in a cache mount, so a new commit transfers only what it adds |
+| `firmware-sdm660` | firmware the kernel depends on, from `linux-firmware` at pinned checksums: the Adreno 5xx CP microcode and the WCN3990's ath10k `firmware-5.bin`, each with its license. Never vendor files |
 | `kernel-sdm660` | one compile for every device whose target names `kernel=sdm660`: `Image.gz`, the stripped modules with depmod's files, `firmware/` and `kernel.manifest` |
 | `kernel-export` | `modules/<release>/`, the tree a device receives as its modules subvolume |
 | `dtb-src`, `dtb` | one device's tree (`DEVICE`), from `DTB_COMMIT` (the kernel's commit unless set), so a fixed tree ships without a new kernel |
@@ -137,11 +161,26 @@ digest, so a new builder starts from an empty one.
 The `kernel` workflow builds and checks these on changes to the kernel side; started by
 hand it can also run the reproducibility check.
 
+## The registry
+
+CI on `main` publishes the kernel, device-tree, initramfs and boot-image exports to
+`ghcr.io/glassineos/images-*`, each under a key computed from every input that can
+change its bytes, once a second build from scratch gave the same bytes, and the layer
+cache beside them; anyone can read them without a login. `scripts/build` pulls an export
+published under its key instead of fetching the kernel's source and compiling, and
+builds the others; `--no-registry` builds everything. Names, keys and the image layout:
+`docs/registry.md`.
+
+    scripts/registry keys onyx-noteair             # each export's key
+    scripts/registry keys onyx-noteair --explain kernel-export   # what went into it
+    scripts/registry status onyx-noteair           # published under its key, or why not
+
 ## Initramfs and boot image
 
 ```
 boot-src + alpine → initramfs → initramfs-export           boot/initramfs/<commit12>@<id>.*
-kernel + dtb + initramfs + boot-src → boot → boot-export   bootimg/<id>.*, select/<device>
+kernel-export + dtb-export + initramfs-export + boot-src → boot → boot-export
+                                                           bootimg/<id>.*, select/<device>
 ```
 
 | Stage | Makes |
@@ -149,7 +188,7 @@ kernel + dtb + initramfs + boot-src → boot → boot-export   bootimg/<id>.*, s
 | `boot-src` | GlassineOS/boot at the commit pinned in the Dockerfile (`BOOT_COMMIT`) |
 | `initramfs` | boot's `build-initramfs.sh` in arm64 Alpine, with a locked package set (`stages/initramfs`). No board.conf and no kernel modules in it, so one initramfs serves every device |
 | `initramfs-export` | `boot/initramfs/<commit12>@<sha256-16>.cpio.gz` and its `.manifest`: named by boot's commit and the content, since the locked tools also shape the bytes |
-| `boot` | one device's boot image, packed by boot's `lib/glassine-bootimg-pack` |
+| `boot` | one device's boot image, packed by boot's `lib/glassine-bootimg-pack` from the other three exports (a published export given as a build context stands in for building it) |
 | `boot-export` | `bootimg/<id>.img`, its boot record `<id>.manifest`, and `select/<device>`: the kernel, device tree and initramfs the device's update installs |
 
 The packer takes every header value from `targets/<device>/board.conf`, the boot section
