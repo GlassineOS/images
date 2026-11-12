@@ -72,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [1, 2, 3, 4, 5, 6]
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
@@ -80,8 +80,13 @@ jobs:
       - run: |
           docker buildx build --progress=plain --platform linux/arm64 --target kernel-export \
             -o type=local,dest=/tmp/k . > /tmp/k.log 2>&1 || { tail -n 50 /tmp/k.log; exit 1; }
-          sha256sum /tmp/k/modules/*/Image.gz
-          mkdir -p /tmp/d && cp /tmp/k/modules/*/Image.gz /tmp/k/debug/* /tmp/d/
+          mkdir -p /tmp/d
+          { lscpu | grep -E 'Model name|^CPU\(s\)'; nproc; free -m; } > /tmp/d/host.txt; cat /tmp/d/host.txt
+          sha256sum /tmp/k/modules/*/Image.gz | tee /tmp/d/image.sha
+          cp /tmp/k/debug/obj.sha /tmp/k/debug/System.map /tmp/k.log /tmp/d/
+          if ! grep -q '^6a370727e3b06ddbded06c6ba4b4cfe311ee922999ba988e7f796897ece457a1 ' /tmp/d/image.sha; then
+            echo "DEVIANT"; cp /tmp/k/debug/* /tmp/d/
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: diag-${{ matrix.n }}
