@@ -160,13 +160,6 @@ build() {
 	features=
 	EOF
 	rm -rf /tmp/mod /tmp/want
-	mkdir -p /out/debug
-	cp /cache/obj/vmlinux /cache/obj/System.map /cache/obj/.config /out/debug/
-	gzip -n -1 /out/debug/vmlinux
-	(cd /cache/obj && find . -type f ! -name '.tmp_vmlinux*' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > /out/debug/obj.sha
-	aarch64-linux-gnu-objcopy --strip-debug /cache/obj/vmlinux.o /out/debug/vmlinux.o
-	cp /cache/obj/arch/arm64/boot/Image /out/debug/Image
-	gzip -n -1 /out/debug/vmlinux.o /out/debug/Image
 	settle /out
 	echo "kernel.sh: $rel: $(find "$o" -name '*.ko' | wc -l) modules, Image.gz $(stat -c %s "$o/Image.gz") bytes"
 	cat "$o/kernel.manifest"
