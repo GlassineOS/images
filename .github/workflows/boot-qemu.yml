@@ -1,17 +1,16 @@
 # The acceptance test of specs/002-base-boot-acceptance (scripts/test-boot-qemu.sh): the
 # generic reference base, a second base as a delta, and two defective bases, each booted
 # in QEMU (arm64 virt) with GlassineOS/boot's harness at the pinned BOOT_COMMIT. On a
-# native arm64 runner, so only the guest is emulated. Runs when a base's inputs, the
-# materialization or the test change, weekly, and by hand.
+# native arm64 runner, so only the guest is emulated. Runs when anything a base's build
+# reads changes (the Dockerfile, the stages and their locks, the targets, the keys, the
+# scripts: these hold the materialization and the test too), weekly, and by hand.
 name: boot-qemu
 on:
   pull_request:
-    paths: [Dockerfile, stages/**, targets/**, scripts/materialize, scripts/materialize-container.sh,
-            scripts/base_tree.py, scripts/tree-manifest.py, scripts/test-boot-qemu.sh, .github/workflows/boot-qemu.yml]
+    paths: [Dockerfile, stages/**, targets/**, keys/**, scripts/**, .github/workflows/boot-qemu.yml]
   push:
     branches: [main]
-    paths: [Dockerfile, stages/**, targets/**, scripts/materialize, scripts/materialize-container.sh,
-            scripts/base_tree.py, scripts/tree-manifest.py, scripts/test-boot-qemu.sh, .github/workflows/boot-qemu.yml]
+    paths: [Dockerfile, stages/**, targets/**, keys/**, scripts/**, .github/workflows/boot-qemu.yml]
   schedule:
     - cron: '41 4 * * 2'
   workflow_dispatch:
