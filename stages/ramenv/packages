@@ -1,0 +1,7 @@
+# What ramenv/build.sh puts in the RAM environment (busybox) and builds it with
+busybox-static
+gcc
+musl-dev
+linux-headers
+cpio
+gzip
