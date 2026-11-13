@@ -32,6 +32,21 @@ gadget, configfs, FunctionFS, its UDC, its eMMC host and its watchdog built in.
 The image is a boot image for starting once (`fastboot boot`), not an update: the
 export has no `select/` record and nothing in `bootimg/`.
 
+Starting it writes nothing to the disks' contents. On a boot loader that keeps A/B slot
+flags (Qualcomm's ABL, from its source: `CmdBoot`, then `LoadImageAndAuth` →
+`FindBootableSlot`), it can change the active slot's flags in the partition table:
+
+- the active slot is marked successful and not unbootable: nothing changes;
+- it is marked unbootable: `boot` clears that bit, and the GPT is written;
+- it isn't marked successful: a normal start lowers its retry count, but an image
+  from fastboot skips that (`CmdBoot` sets `BootDevImage` first). With no retries
+  left, the boot loader falls back to the other slot instead.
+
+The GPT is written only where an attribute differs from the table on the disk
+(`UpdatePartitionAttributes`). The installer reads the flags (`slot-successful:<s>`,
+`slot-unbootable:<s>`, `slot-retry-count:<s>`) before it boots the image, and only goes
+on unasked in the first case.
+
 ## Device config
 
 `ramenv/targets/<device>.conf`, sourced by `init`. It lives here, not in
