@@ -3,7 +3,7 @@
 # The RAM environment's init (docs/ramenv.md): started from memory by the boot loader
 # (fastboot boot), it mounts nothing from the device's storage, offers the disks
 # read-only through glassine-ramread and reboots when that ends. Device facts come from
-# /etc/glassine/ramenv.conf (the target's ramenv.conf):
+# /etc/glassine/ramenv.conf (the device's ramenv/targets/<device>.conf):
 #   RAMENV_DISKS            /sys/block name patterns to offer (required)
 #   RAMENV_TRANSPORT        usb (default) or stream
 #   RAMENV_STREAM           the character device of the stream transport

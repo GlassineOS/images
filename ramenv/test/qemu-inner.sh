@@ -12,6 +12,9 @@
 #           over usbfs; the client's reboot ends the run.
 #   stream  the virtio-serial port, read from outside by client.py; the run ends by
 #           the environment's own idle timeout.
+#   connect nobody connects: the environment reboots after its connect wait.
+#   wdreset a hash over a throttled disk outlasts the operation limit: the reader stops
+#           petting and the i6300esb resets the guest.
 # In both, test/check.sh checks inside the guest that every disk and partition is
 # read-only in the kernel and that a write to each fails.
 # Afterwards both images must be byte for byte what they were. Prints ok/FAIL lines.
@@ -118,9 +121,59 @@ else bad "stream: qemu exit (timeout or failure)"; fi
 qtest stream
 grep -aq 'glassine-ramread: no request for [0-9]* s: rebooting' $W/stream.log && ok "stream: the idle timeout rebooted it" || bad "stream: the idle timeout rebooted it"
 
+# --- connect: nobody connects, the environment reboots after RAMENV_CONNECT_WAIT -----
+testcpio connect "$common
+RAMENV_TRANSPORT=stream
+RAMENV_STREAM=/dev/ramread-stream
+RAMENV_CONNECT_WAIT=15"
+t0=$(date +%s)
+if qemu connect -device virtio-serial-pci -chardev socket,id=rr,path=$W/rc.sock,server=on,wait=off \
+	-device virtserialport,chardev=rr,name=glassine.ramread; then
+	t1=$(date +%s)
+	grep -aq 'glassine-ramread: no request for [0-9]* s: rebooting' $W/connect.log \
+		&& ok "connect: with no computer it rebooted by itself ($((t1 - t0)) s after power on, connect wait 15 s)" \
+		|| bad "connect: it ended without the connect-wait reboot"
+else bad "connect: qemu exit (timeout or failure)"; fi
+qtest connect
+
+# --- wdreset: a disk read that hangs; the reader stops petting, the hardware resets ----
+# vdb is throttled to 64 KiB/s, so hashing all of it (4 MiB) takes about a minute,
+# longer than the operation limit (5 s) plus the watchdog's timeout (5 s). The guest must
+# end by the i6300esb's reset, not by the reader's own reboot.
+testcpio wdreset "$common
+RAMENV_TRANSPORT=stream
+RAMENV_STREAM=/dev/ramread-stream
+RAMENV_WATCHDOG_TIMEOUT=5
+RAMENV_OP_LIMIT=5"
+t0=$(date +%s)
+timeout 900 qemu-system-aarch64 -M virt -cpu cortex-a57 -smp 2 -m 1024 -nographic -no-reboot \
+	-kernel /out/Image -initrd $W/t/wdreset.initrd \
+	-append "console=ttyAMA0 loglevel=6 panic=5 rdinit=/init" \
+	-drive file=$W/vda.img,format=raw,if=virtio -drive file=$W/vdb.img,format=raw,if=virtio,bps_rd=65536 \
+	-device i6300esb -nic none \
+	-device virtio-serial-pci -chardev socket,id=rr,path=$W/rw.sock,server=on,wait=off \
+	-device virtserialport,chardev=rr,name=glassine.ramread > $W/wdreset.log 2>&1 &
+qpid=$!
+c=0; python3 /src/test/client.py --hang-hash vdb $W/rw.sock > $W/wdreset.client 2>&1 || c=$?
+t1=$(date +%s)
+sed 's/^QTEST //' $W/wdreset.client | while read -r l; do echo "$l [wdreset]"; done
+if wait $qpid; then
+	t2=$(date +%s)
+	grep -aq 'glassine-ramread: watchdog /dev/watchdog0 armed, 5 s' $W/wdreset.log && ok "wdreset: the watchdog was armed with 5 s" || bad "wdreset: the watchdog was armed with 5 s"
+	grep -aq 'glassine-ramread: a disk operation has run [0-9]* s: no more petting' $W/wdreset.log \
+		&& ok "wdreset: the reader stopped petting during the hung hash" || bad "wdreset: the reader stopped petting during the hung hash"
+	grep -aq 'glassine-ramread: no request for\|glassine-ramread: reboot (' $W/wdreset.log \
+		&& bad "wdreset: the reader rebooted by itself (the watchdog was not what ended it)" \
+		|| ok "wdreset: the reader did not reboot by itself"
+	[ $((t2 - t0)) -lt 55 ] && ok "wdreset: the hardware watchdog reset the guest mid-hash ($((t2 - t1)) s after the hash was sent, $((t2 - t0)) s after power on)" \
+		|| bad "wdreset: the guest ended only after $((t2 - t0)) s (the hash would have finished: no watchdog reset)"
+else bad "wdreset: qemu exit (timeout or failure)"; fi
+[ $c = 0 ] || bad "wdreset: the client exited $c"
+qtest wdreset
+
 # --- nothing changed ----------------------------------------------------------------
-[ "$(sha256sum $W/vda.img | cut -c1-64)" = "$A0" ] && ok "vda.img unchanged after both runs" || bad "vda.img changed"
-[ "$(sha256sum $W/vdb.img | cut -c1-64)" = "$B0" ] && ok "vdb.img unchanged after both runs" || bad "vdb.img changed"
-grep -aq 'Trying to write to read-only block-device' $W/usb.log $W/stream.log && bad "a write reached the block layer" || ok "no write reached the block layer"
+[ "$(sha256sum $W/vda.img | cut -c1-64)" = "$A0" ] && ok "vda.img unchanged after all runs" || bad "vda.img changed"
+[ "$(sha256sum $W/vdb.img | cut -c1-64)" = "$B0" ] && ok "vdb.img unchanged after all runs" || bad "vdb.img changed"
+grep -aq 'Trying to write to read-only block-device' $W/usb.log $W/stream.log $W/connect.log $W/wdreset.log && bad "a write reached the block layer" || ok "no write reached the block layer"
 echo "qemu-inner: $fails failed"
 [ $fails = 0 ]

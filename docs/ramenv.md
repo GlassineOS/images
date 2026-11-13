@@ -22,7 +22,7 @@ kernel-export + dtb-export + boot-src ─────────┴→ ramenv-b
 | `ramenv/init` | busybox `sh`: mounts, USB gadget, starts the daemon, binds the UDC |
 | `ramenv/build.sh` | the initramfs: static busybox, the static daemon, init, the device's config |
 | `scripts/ramenv-bootimg.sh` | the boot image, packed by GlassineOS/boot's `lib/glassine-bootimg-pack` |
-| `targets/<device>/ramenv.conf` | everything device-specific (below) |
+| `ramenv/targets/<device>.conf` | everything device-specific (below) |
 | `stages/ramenv/packages`, `lock` | the locked build tools |
 
 The kernel is the system kernel (`kernel-export`), with the device tree from
@@ -34,7 +34,10 @@ export has no `select/` record and nothing in `bootimg/`.
 
 ## Device config
 
-`targets/<device>/ramenv.conf`, sourced by `init`:
+`ramenv/targets/<device>.conf`, sourced by `init`. It lives here, not in
+`targets/<device>/`, because the boot stage reads that directory whole: a change to the
+RAM environment must not change the system's boot image key.
+
 
 | Key | Meaning |
 |---|---|

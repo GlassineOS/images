@@ -94,6 +94,24 @@ int main(void)
 		CHECK(!strcmp(one, parts), "sha256 in pieces = in one piece");
 	}
 
+	/* the wire format, pinned: the same bytes are in the installer's tests
+	 * (core/tests/glassine_read.rs, wire_format_pinned), so the two sides agree */
+	{
+		static const char *rq = "4752525101000200040302010200000000100000000000000002000000000000";
+		static const char *rs = "475252530100020004030201000000000002000000000000001000000000000"
+			"0000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+		uint8_t b[REQ_SIZE], o[RSP_SIZE], sha[32];
+		for (int i = 0; i < REQ_SIZE; i++) sscanf(rq + 2 * i, "%2hhx", &b[i]);
+		struct request r;
+		CHECK(parse_request(b, &r) == 0 && r.version == 1 && r.op == 2 && r.tag == 0x01020304 && r.index == 2
+		      && r.offset == 0x1000 && r.length == 0x200, "the pinned READ request parses");
+		for (int i = 0; i < 32; i++) sha[i] = (uint8_t)i;
+		put_response(o, 2, 0x01020304, 0, 0x200, 0x1000, sha);
+		char h[2 * RSP_SIZE + 1];
+		for (int i = 0; i < RSP_SIZE; i++) sprintf(h + 2 * i, "%02x", o[i]);
+		CHECK(!strcmp(h, rs), "the response header is the pinned bytes");
+	}
+
 	/* a disk image: 3 MiB + 512 bytes of a pattern */
 	char path[] = "/tmp/ramread-unit-XXXXXX";
 	int w = mkstemp(path);

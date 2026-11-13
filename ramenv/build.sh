@@ -14,7 +14,7 @@ die() { echo "ramenv/build.sh: $*" >&2; exit 1; }
 [ $# = 4 ] || die "usage: build.sh SRC CONF DEVICE OUTDIR"
 SRC=$1 CONF=$2 DEVICE=$3 OUT=$4
 [ -f "$SRC/init" ] && [ -f "$SRC/glassine-ramread.c" ] || die "$SRC is not the ramenv directory"
-[ -f "$CONF" ] || die "no $CONF: the target has no ramenv.conf"
+[ -f "$CONF" ] || die "no $CONF: the device has no ramenv/targets/<device>.conf"
 grep -q '^RAMENV_DISKS=' "$CONF" || die "$CONF sets no RAMENV_DISKS"
 I=$(mktemp -d)
 trap 'rm -rf "$I"' EXIT
