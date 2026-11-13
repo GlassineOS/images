@@ -203,6 +203,12 @@ initramfs.
 
 (`boot-check` also needs the kernel, device-tree and initramfs exports in `out`.)
 
+## RAM environment
+
+A boot image that runs from RAM and reads the device's whole storage, read-only, to a
+computer over USB, for the backup before an install. Built only with
+`--target ramenv-export`; [docs/ramenv.md](docs/ramenv.md).
+
 ## License
 
 GPL-2.0-or-later (`LICENSE`). Images contain software under many licenses; each
