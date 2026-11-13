@@ -7,7 +7,11 @@ compares the device's hashes, and checks that an unknown operation is refused. T
 closes the connection and sends nothing more, so the environment's idle timeout has to
 reboot it. Prints QTEST lines; exit 0 = all passed.
 
+With --hang-hash NAME it only asks for the hash of all of disk NAME (a throttled disk
+in the wdreset run) and expects no answer: the watchdog must reset the guest first.
+
 usage: client.py SOCKET NAME=IMAGE...
+       client.py --hang-hash NAME SOCKET
 """
 import hashlib, socket, struct, sys, time
 
@@ -51,7 +55,27 @@ def ask(s, op, tag, index=0, off=0, length=0):
     return status, roff, sha, exact(s, n)
 
 
+def hang_hash(name, path):
+    s = connect(path)
+    s.settimeout(120)
+    status, _, _, text = ask(s, LIST, 1)
+    disk = [l.split() for l in text.decode().splitlines() if l.startswith('disk ') and l.split()[2] == name]
+    qt(status == 0 and len(disk) == 1, f'{name} listed (wdreset)')
+    if not disk:
+        sys.exit(1)
+    idx, size = int(disk[0][1]), int(disk[0][3])
+    s.sendall(REQ.pack(b'GRRQ', 1, HASH, 2, idx, 0, size))
+    try:
+        got = s.recv(RSP.size)
+    except OSError:
+        got = b''
+    qt(got == b'', f'no answer to the hash of all of {name}: the guest went away first (wdreset)')
+    sys.exit(1 if fails else 0)
+
+
 def main():
+    if sys.argv[1] == '--hang-hash':
+        hang_hash(sys.argv[2], sys.argv[3])
     path, images = sys.argv[1], dict(a.split('=', 1) for a in sys.argv[2:])
     s = connect(path)
     s.settimeout(120)

@@ -254,7 +254,9 @@ COPY --from=boot /out/ /
 # The device's own kernel and device tree, packed the way its boot image is (boot's
 # packer, the target's board.conf), with this initramfs and its own command line. The
 # device's facts (which disks, the USB controller, the command line) come from the
-# target's ramenv.conf; these stages name no device. Built only for --target
+# device's ramenv/targets/<device>.conf (kept out of targets/<device>/, which the boot
+# stage mounts whole: a ramenv change must not move boot-export's key); these stages
+# name no device. Built only for --target
 # ramenv-export, and nothing in it is a boot update (no select record).
 FROM alpine AS ramenv
 ARG LOCK=check
@@ -264,7 +266,7 @@ RUN --mount=type=bind,source=stages/ramenv,target=/run/stage \
     LOCK=$LOCK sh /run/apk-stage.sh
 ARG DEVICE
 RUN --mount=type=bind,source=ramenv,target=/src/ramenv \
-    --mount=type=bind,source=targets/${DEVICE}/ramenv.conf,target=/run/ramenv.conf \
+    --mount=type=bind,source=ramenv/targets/${DEVICE}.conf,target=/run/ramenv.conf \
     sh /src/ramenv/build.sh /src/ramenv /run/ramenv.conf "$DEVICE" /out/ramenv
 
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS ramenv-boot
@@ -274,6 +276,7 @@ RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
     --mount=type=bind,from=ramenv,source=/out/ramenv,target=/run/ramenv \
     --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
     --mount=type=bind,source=targets/${DEVICE},target=/run/target \
+    --mount=type=bind,source=ramenv/targets/${DEVICE}.conf,target=/run/ramenv.conf \
     --mount=type=bind,source=scripts/ramenv-bootimg.sh,target=/run/ramenv-bootimg.sh \
     DEVICE=$DEVICE sh /run/ramenv-bootimg.sh
 
