@@ -1,0 +1,20 @@
+#!/bin/sh
+# Flatpak updates: checked hourly, run when the last good run is 20 h or more old.
+# Hourly with a stamp instead of a daily job: a device sleeps most of the time and
+# busybox crond doesn't catch up on missed runs. Only while online, so a device
+# without a network doesn't retry on battery. Pinned runtimes (a device's GL
+# extension) stay through the cleanup of unused ones.
+STAMP=/var/lib/flatpak/.glassine-last-update
+LOG=/var/log/glassine-flatpak-update.log
+command -v flatpak >/dev/null || exit 0
+[ -n "$(flatpak remotes --system 2>/dev/null)" ] || exit 0
+[ -f $STAMP ] && [ $(( $(date +%s) - $(stat -c %Y $STAMP) )) -lt 72000 ] && exit 0
+nm-online -q -t 5 2>/dev/null || exit 0
+{
+	echo "== $(date)"
+	flatpak update --system --noninteractive -y && flatpak uninstall --system --unused --noninteractive -y \
+		&& touch $STAMP
+} >> $LOG 2>&1
+# keep the log small
+[ $(stat -c %s $LOG) -gt 262144 ] && tail -c 131072 $LOG > $LOG.tmp && mv $LOG.tmp $LOG
+exit 0

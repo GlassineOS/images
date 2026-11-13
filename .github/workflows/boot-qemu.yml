@@ -1,0 +1,42 @@
+# The acceptance test of specs/002-base-boot-acceptance (scripts/test-boot-qemu.sh): the
+# generic reference base, a second base as a delta, and two defective bases, each booted
+# in QEMU (arm64 virt) with GlassineOS/boot's harness at the pinned BOOT_COMMIT. On a
+# native arm64 runner, so only the guest is emulated. Runs when a base's inputs, the
+# materialization or the test change, weekly, and by hand.
+name: boot-qemu
+on:
+  pull_request:
+    paths: [Dockerfile, stages/**, targets/**, scripts/materialize, scripts/materialize-container.sh,
+            scripts/base_tree.py, scripts/tree-manifest.py, scripts/test-boot-qemu.sh, .github/workflows/boot-qemu.yml]
+  push:
+    branches: [main]
+    paths: [Dockerfile, stages/**, targets/**, scripts/materialize, scripts/materialize-container.sh,
+            scripts/base_tree.py, scripts/tree-manifest.py, scripts/test-boot-qemu.sh, .github/workflows/boot-qemu.yml]
+  schedule:
+    - cron: '41 4 * * 2'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: boot-qemu-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  boot-qemu:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # materialization and the harness's disk step mount btrfs on loop devices
+      - run: sudo modprobe btrfs
+      - name: the base boots as a deployment; the defective bases fail
+        run: sh scripts/test-boot-qemu.sh
+      - name: logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: boot-qemu-logs
+          path: |
+            .out/test-boot-qemu/*.log
+            .out/test-boot-qemu/run-*/*.log
+          if-no-files-found: ignore
