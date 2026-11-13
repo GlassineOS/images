@@ -240,6 +240,45 @@ RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
 
 FROM scratch AS boot-export
 COPY --from=boot /out/ /
+
+# ---------------------------------------------------------------------------------------
+# The RAM environment (docs/ramenv.md): what the installer starts from memory over the
+# boot loader (fastboot boot) to read the whole disk for the backup, read-only.
+#
+#   alpine → ramenv                                               (its initramfs)
+#   kernel-export + dtb-export + ramenv + boot-src → ramenv-boot → ramenv-export
+#                                                                 ramenv/<id>.img
+#
+#   docker buildx build --platform linux/arm64 --target ramenv-export -o type=local,dest=out .
+#
+# The device's own kernel and device tree, packed the way its boot image is (boot's
+# packer, the target's board.conf), with this initramfs and its own command line. The
+# device's facts (which disks, the USB controller, the command line) come from the
+# target's ramenv.conf; these stages name no device. Built only for --target
+# ramenv-export, and nothing in it is a boot update (no select record).
+FROM alpine AS ramenv
+ARG LOCK=check
+RUN --mount=type=bind,source=stages/ramenv,target=/run/stage \
+    --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    LOCK=$LOCK sh /run/apk-stage.sh
+ARG DEVICE
+RUN --mount=type=bind,source=ramenv,target=/src/ramenv \
+    --mount=type=bind,source=targets/${DEVICE}/ramenv.conf,target=/run/ramenv.conf \
+    sh /src/ramenv/build.sh /src/ramenv /run/ramenv.conf "$DEVICE" /out/ramenv
+
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS ramenv-boot
+ARG DEVICE
+RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
+    --mount=type=bind,from=dtb-export,source=/boot/dtb,target=/run/dtb \
+    --mount=type=bind,from=ramenv,source=/out/ramenv,target=/run/ramenv \
+    --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
+    --mount=type=bind,source=targets/${DEVICE},target=/run/target \
+    --mount=type=bind,source=scripts/ramenv-bootimg.sh,target=/run/ramenv-bootimg.sh \
+    DEVICE=$DEVICE sh /run/ramenv-bootimg.sh
+
+FROM scratch AS ramenv-export
+COPY --from=ramenv-boot /out/ /
 # ---------------------------------------------------------------------------------------
 
 # Build leftovers out, so two builds of the same inputs give the same tree: the machine
