@@ -27,3 +27,9 @@ b --no-cache-filter initramfs --target initramfs -o "type=tar,dest=$tmp/initramf
 tar -xOf "$tmp/initramfs.tar" lib/apk/db/installed \
 	| awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' | LC_ALL=C sort > stages/initramfs/lock
 echo "lock.sh: initramfs: $(wc -l < stages/initramfs/lock) packages" >&2
+# the RAM environment's tools: on alpine, apart from the device chain (its packages
+# install before anything device-specific, so the first device's build stands for all)
+b --no-cache-filter ramenv --target ramenv -o "type=tar,dest=$tmp/ramenv.tar"
+tar -xOf "$tmp/ramenv.tar" lib/apk/db/installed \
+	| awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' | LC_ALL=C sort > stages/ramenv/lock
+echo "lock.sh: ramenv: $(wc -l < stages/ramenv/lock) packages" >&2
