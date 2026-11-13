@@ -138,11 +138,18 @@ directly: busybox's `reboot` drops it.
   - `usb`: the real FunctionFS gadget on `dummy_hcd` inside the guest, read by a usbfs
     client; every disk read whole, sha256 compared with the image files.
   - `stream`: the same protocol over virtio-serial to a client on the host.
-  - Both check the watchdog was armed, the reboot (by request and when idle), the
-    images unchanged, and no write reached the block layer.
+  - `connect`: nobody connects; the environment reboots after its connect wait.
+  - `wdreset`: a hash over a disk throttled to 64 KiB/s outlasts the operation limit;
+    the reader stops petting and the emulated watchdog (i6300esb) resets the guest.
+  - All check the kernel's read-only state of every disk and partition and that
+    writes fail; afterwards the images are unchanged and no write reached the block
+    layer.
+- The unit test and the installer's tests share one request and one response header
+  as pinned bytes.
 
 The QEMU guest runs Debian's arm64 kernel, because Alpine's kernels have no
 `dummy_hcd`; only the test downloads it, nothing ships it.
 
 Not covered by the tests: the device kernel's UDC and watchdog, the bootloader's
-`fastboot boot`, Windows' WinUSB binding and a browser's WebUSB.
+`fastboot boot`, Windows' WinUSB binding, a browser's WebUSB, and the installer's
+reader against the daemon over a real transport (only the pinned bytes tie them).
