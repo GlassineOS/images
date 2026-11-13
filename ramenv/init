@@ -1,0 +1,100 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The RAM environment's init (docs/ramenv.md): started from memory by the boot loader
+# (fastboot boot), it mounts nothing from the device's storage, offers the disks
+# read-only through glassine-ramread and reboots when that ends. Device facts come from
+# /etc/glassine/ramenv.conf (the device's ramenv/targets/<device>.conf):
+#   RAMENV_DISKS            /sys/block name patterns to offer (required)
+#   RAMENV_TRANSPORT        usb (default) or stream
+#   RAMENV_STREAM           the character device of the stream transport
+#   RAMENV_UDC              the USB device controller (empty: the first one there)
+#   RAMENV_UDC_WAIT         seconds to wait for it (default 120: on some boards it binds late)
+#   RAMENV_USB_VENDOR, RAMENV_USB_PRODUCT   the gadget's ids (default 0x1d6b 0x0104)
+#   RAMENV_WATCHDOG         the hardware watchdog (default /dev/watchdog0)
+#   RAMENV_WATCHDOG_TIMEOUT, RAMENV_CONNECT_WAIT, RAMENV_IDLE, RAMENV_OP_LIMIT,
+#   RAMENV_DISK_WAIT        seconds, passed to glassine-ramread (its defaults when empty)
+/bin/busybox mkdir -p /bin /proc /sys /dev /run /tmp
+/bin/busybox --install -s /bin
+export PATH=/bin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+log() { echo "<5>glassine-ramenv: $*" > /dev/kmsg; }
+# never returns: a short pause so the log is out, then the previous system starts
+leave() { log "$*; rebooting in 5 s"; sleep 5; reboot -f; sleep 30; echo b > /proc/sysrq-trigger; }
+
+RAMENV_DISKS='' RAMENV_TRANSPORT=usb RAMENV_STREAM='' RAMENV_UDC='' RAMENV_UDC_WAIT=120
+RAMENV_USB_VENDOR=0x1d6b RAMENV_USB_PRODUCT=0x0104 RAMENV_WATCHDOG=/dev/watchdog0
+RAMENV_WATCHDOG_TIMEOUT='' RAMENV_CONNECT_WAIT='' RAMENV_IDLE='' RAMENV_OP_LIMIT='' RAMENV_DISK_WAIT=''
+[ -r /etc/glassine/ramenv.conf ] && . /etc/glassine/ramenv.conf
+log "starting ($(uname -r))"
+[ -n "$RAMENV_DISKS" ] || leave "no RAMENV_DISKS in /etc/glassine/ramenv.conf"
+
+set -f
+set -- --ready /run/ramread.ready
+for p in $RAMENV_DISKS; do set -- "$@" --disk "$p"; done
+set +f
+[ -n "$RAMENV_WATCHDOG" ] && set -- "$@" --watchdog "$RAMENV_WATCHDOG"
+[ -n "$RAMENV_WATCHDOG_TIMEOUT" ] && set -- "$@" --watchdog-timeout "$RAMENV_WATCHDOG_TIMEOUT"
+[ -n "$RAMENV_CONNECT_WAIT" ] && set -- "$@" --connect-wait "$RAMENV_CONNECT_WAIT"
+[ -n "$RAMENV_IDLE" ] && set -- "$@" --idle "$RAMENV_IDLE"
+[ -n "$RAMENV_OP_LIMIT" ] && set -- "$@" --op-limit "$RAMENV_OP_LIMIT"
+[ -n "$RAMENV_DISK_WAIT" ] && set -- "$@" --disk-wait "$RAMENV_DISK_WAIT"
+
+G=/sys/kernel/config/usb_gadget/glassine-ramenv
+case $RAMENV_TRANSPORT in
+usb)
+	mount -t configfs configfs /sys/kernel/config 2>/dev/null
+	mkdir -p $G/strings/0x409 $G/configs/c.1/strings/0x409 $G/functions/ffs.ramread \
+		|| leave "no USB gadget support (configfs)"
+	echo "$RAMENV_USB_VENDOR" > $G/idVendor
+	echo "$RAMENV_USB_PRODUCT" > $G/idProduct
+	echo 0x0200 > $G/bcdUSB
+	echo GlassineOS > $G/strings/0x409/manufacturer
+	echo "GlassineOS RAM environment" > $G/strings/0x409/product
+	echo "Read-only reader" > $G/configs/c.1/strings/0x409/configuration
+	echo 250 > $G/configs/c.1/MaxPower
+	# Microsoft OS descriptors: Windows binds WinUSB to the vendor interface by itself
+	if [ -d $G/os_desc ]; then
+		echo 1 > $G/os_desc/use
+		echo 0xcd > $G/os_desc/b_vendor_code
+		echo MSFT100 > $G/os_desc/qw_sign
+		ln -s $G/configs/c.1 $G/os_desc/ 2>/dev/null
+	fi
+	ln -s $G/functions/ffs.ramread $G/configs/c.1/
+	mkdir -p /dev/ffs-ramread
+	mount -t functionfs ramread /dev/ffs-ramread || leave "cannot mount the FunctionFS instance"
+	set -- --ffs /dev/ffs-ramread "$@"
+	;;
+stream)
+	[ -n "$RAMENV_STREAM" ] || leave "RAMENV_TRANSPORT=stream without RAMENV_STREAM"
+	set -- --stream "$RAMENV_STREAM" "$@"
+	;;
+*) leave "unknown RAMENV_TRANSPORT $RAMENV_TRANSPORT" ;;
+esac
+
+glassine-ramread "$@" &
+pid=$!
+# the descriptors are written (usb) or the stream is open; the disks take up to
+# RAMENV_DISK_WAIT (60 s by default) to appear
+t=0
+while [ ! -e /run/ramread.ready ]; do
+	kill -0 $pid 2>/dev/null || { wait $pid; leave "glassine-ramread stopped during setup (exit $?)"; }
+	[ $t -lt 900 ] || leave "glassine-ramread not ready after 90 s"
+	sleep 0.1; t=$((t + 1))
+done
+
+if [ "$RAMENV_TRANSPORT" = usb ]; then
+	udc=$RAMENV_UDC t=0
+	[ -n "$udc" ] || udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+	while [ -z "$udc" ] || [ ! -e "/sys/class/udc/$udc" ]; do
+		[ $t -lt "$RAMENV_UDC_WAIT" ] || leave "no USB device controller after $RAMENV_UDC_WAIT s"
+		sleep 1; t=$((t + 1))
+		[ -n "$RAMENV_UDC" ] || udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+	done
+	echo "$udc" > $G/UDC || leave "cannot bind the gadget to $udc"
+	log "USB gadget on $udc ($RAMENV_USB_VENDOR:$RAMENV_USB_PRODUCT)"
+fi
+
+wait $pid
+leave "glassine-ramread ended (exit $?)"
