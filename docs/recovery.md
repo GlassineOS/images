@@ -313,8 +313,9 @@ Input:
   it (the focused button has a second ring).
 
 The e-ink rules: black on white, IBM Plex (the GlassineOS shell's type, rasterized at build
-time by `font-gen` into the program: 64 px titles, 40 px text, 32 px notes, 28 px mono
-labels), no animation. Each page is one whole frame; moving the focus sends only the two
+time by `font-gen` into the program, 16 grey levels: 64 px titles, 40 px text, 32 px
+notes, 28 px mono labels; Latin-1 and the marks the texts use), no animation. Every text
+wraps to the content width; a word longer than a line breaks anywhere. Each page is one whole frame; moving the focus sends only the two
 buttons' rectangles. Whether the panel daemon refreshes in full or in part follows from
 the area (glassine-epdd does a full GC16 refresh when a frame changes more than half the
 panel); the protocol has no flag to ask for a full refresh.
@@ -583,8 +584,10 @@ These are the RAM environment's rules, with these additions:
   stand-in core that speaks version 3 with describe's texts and checks that every
   confirmed DEPLOY carried the token of its status-9 answer. Each page is compared pixel
   for pixel with its golden image `ramenv/test/screen/NAME.png`: every page, the
-  hibernation question, the empty device, no core, the idle notice and the power key's
-  focus. The goldens depend on the FreeType and font package versions in that container.
+  hibernation question, the empty device, no core, the idle notice, the power key's
+  focus, a deployment id longer than a line (wrapped, clear of its tags; the confirm
+  button then says "Start it") and one longer than the screen takes (left out with a
+  note, never sent cut), and `glyphs`: every glyph the pages use in each face and size. The goldens depend on the FreeType and font package versions in that container.
 
 Not covered:
 

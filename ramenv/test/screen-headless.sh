@@ -8,7 +8,8 @@
 #      package;
 #   2. its pages drawn without a panel: --events scripts (test/screen/*.events) against
 #      screen-core.py, a stand-in core (full with a hibernated session, idle 9 s, empty,
-#      and no core at all); each page shot is compared with its golden image
+#      and no core at all), a deployment id longer than a line, and a sweep of every
+#      glyph in each face; each page shot is compared with its golden image
 #      test/screen/NAME.png (pixel for pixel); /out/screen/ gets them all (UPDATE=1: the
 #      host copies them over the goldens);
 #   3. the QEMU screen run's programs, static: epd-sink (a stand-in panel daemon) and
@@ -54,6 +55,8 @@ run() {	# run NAME EVENTS IDLE CORE-ARGS...: the client through EVENTS against s
 run main /src/test/screen/main.events 600 full --hibernated
 run idle /src/test/screen/idle.events 9 full
 run empty /src/test/screen/empty.events 600 empty
+run glyphs /src/test/screen/glyphs.events 600 full
+run long /src/test/screen/long.events 600 long
 # no core: the page that says so
 printf 'await no-core\nshot no-core\nquit\n' > $W/nocore.events
 mkdir -p $W/shots/nocore
@@ -65,7 +68,7 @@ grep -c CONFIRMED $W/main.core.log | { read -r c; [ "$c" = 5 ] && ok "main: 5 op
 
 # the goldens: every explicit shot, and the working page (it takes no input, so the
 # script can't shoot it: the client shoots each such page as shown-NAME)
-for d in main idle empty nocore; do
+for d in main idle empty glyphs long nocore; do
 	for p in $W/shots/$d/*.pgm; do
 		b=$(basename "$p" .pgm)
 		case $d:$b in main:shown-working) b=working ;; *:shown-*) continue ;; esac

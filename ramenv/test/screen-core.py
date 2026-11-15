@@ -9,7 +9,9 @@ this core gave in its last status-9 answer to the same request, and that nothing
 confirmed that wasn't asked first. It is not the core: the QEMU run drives the screen
 against the real one.
 
-usage: screen-core.py SOCKET LOG {full|empty} [--hibernated]
+usage: screen-core.py SOCKET LOG {full|empty|long} [--hibernated]
+(long: full, with a kept deployment whose id is longer than a line and one whose id
+is longer than the screen takes: left out, with a note)
 Runs until SIGTERM; then prints QTEST lines and exits 0 when all passed.
 """
 import gzip, hashlib, io, os, signal, socket, struct, sys, tarfile, threading
@@ -31,6 +33,10 @@ deps = {'20261112-0930': ('base-20261110', '2026-11-12T09:30'),
 if kind == 'empty':
     st = dict.fromkeys(st, '')
     deps = {}
+LONG = '20261113-0800-made-by-hand-with-a-name-much-longer-than-one-line-of-the-screen'
+if kind == 'long':
+    deps[LONG] = ('base-20261110-with-a-long-name-too', '2026-11-13T08:00')
+    deps['20261113-0900-' + 'x' * 300] = ('base-20261110', '2026-11-13T09:00')   # more than the screen takes
 
 
 def state_of(i):
