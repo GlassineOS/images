@@ -28,4 +28,4 @@ musl=1.2.6-r3
 ncurses-terminfo-base=6.6_p20260516-r0
 scanelf=1.3.9-r1
 ssl_client=1.37.0-r31
-zlib=1.3.2-r1
+zlib=1.4-r0
