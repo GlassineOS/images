@@ -67,7 +67,9 @@ keep only the newest version of each package: when Alpine updates a locked packa
 build fails before installing anything, naming the lock line and the versions offered,
 and the locks need a refresh. (Packages the `alpine:3.24` image already carries are
 offered from its installed database; if that tag moves to a new point release, the same
-applies.)
+applies.) A refresh upgrades those too, so a lock never keeps an outdated version just
+because the Alpine image carries it; a check build then installs the newer locked version
+over the image's.
 
 The `lock-refresh` workflow refreshes every day on an arm64 runner and keeps one pull
 request (branch `lock-refresh`) with the changed packages: on Mondays for any change, and

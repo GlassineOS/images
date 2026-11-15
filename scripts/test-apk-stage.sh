@@ -5,7 +5,7 @@
 # the locked older version installs although a newer one is offered (as a dependency and
 # as a package the stage names), nothing is left in /tmp, the world names the
 # packages without a pin and matches a refresh build's, LOCK=refresh installs the
-# newest; refused with "refresh the locks": a lock line no repository offers (nothing
+# newest and upgrades what the stage starts with; refused with "refresh the locks": a lock line no repository offers (nothing
 # installed), a lock that misses a package the stage pulls in, a lock line nothing needs.
 #   scripts/test-apk-stage.sh     exit 0 = all checks pass
 set -eu
@@ -49,6 +49,10 @@ cp /etc/apk/world /root/world.check
 LOCK=refresh run
 check "LOCK=refresh installs the newest" "inst lib=2-r0"
 check "the world matches the refresh build" "cmp -s /etc/apk/world /root/world.check"
+# like zlib in the Alpine image: an older version installed, the world names it plainly
+reset; apk add -q lib=1-r0 >/dev/null; apk add -q lib >/dev/null
+LOCK=refresh sh /s/apk-stage.sh > /root/out 2>&1
+check "LOCK=refresh upgrades a version the stage starts with" "inst lib=2-r0 && inst app=1-r0"
 reset
 check "an upgrade moves the locked version on" "LOCK=check sh /s/apk-stage.sh >/dev/null 2>&1 && apk upgrade -q >/dev/null && inst lib=2-r0"
 
