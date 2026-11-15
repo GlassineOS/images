@@ -3,7 +3,8 @@
 # Inside the QEMU guest (qemu-inner.sh), next to the production init: once the reader
 # is serving, every disk and partition must be read-only in the kernel and a write to
 # any of them must fail. In the usb run, client-usb then reads everything over the
-# dummy USB host controller and reboots the guest. Prints QTEST lines.
+# dummy USB host controller, runs the write plan (/lib/qtest/w/plan) and reboots the
+# guest. Prints QTEST lines.
 B=/bin/busybox
 i=0
 while [ ! -e /run/ramread.ready ]; do
@@ -12,12 +13,14 @@ while [ ! -e /run/ramread.ready ]; do
 done
 echo "QTEST info partitions: $($B awk 'NR > 2 { printf "%s ", $4 }' /proc/partitions)"
 # every block device of the disks (whole disks and partitions), from the kernel's list
-for x in $($B awk 'NR > 2 && $4 ~ /^vd/ { print $4 }' /proc/partitions); do
+for x in $($B awk 'NR > 2 && $4 ~ /^(vd|mmcblk)/ { print $4 }' /proc/partitions); do
 	r=$($B blockdev --getro /dev/$x 2>&1)
 	if [ "$r" = 1 ]; then echo "QTEST ok   /dev/$x is read-only in the kernel"
 	else echo "QTEST FAIL /dev/$x is read-only in the kernel (getro: $r)"; fi
 done
-for x in vda vda1 vda2 vdb; do
+mmc=
+[ -b /dev/mmcblk0 ] && mmc="mmcblk0 mmcblk0p1 mmcblk0boot0 mmcblk0boot1"
+for x in vda vda1 vda2 vdb $mmc; do
 	[ -b /dev/$x ] || { echo "QTEST FAIL no block device /dev/$x"; continue; }
 	if $B dd if=/dev/zero of=/dev/$x bs=512 count=1 seek=40 conv=notrunc,fsync 2>/tmp/dd; then
 		echo "QTEST FAIL a write to /dev/$x succeeded"
@@ -44,4 +47,5 @@ for e in $itf/ep_*; do
 	[ "$($B cat $e/type)" = Bulk ] || continue
 	case $($B cat $e/direction) in in) in=0x$($B cat $e/bEndpointAddress) ;; out) out=0x$($B cat $e/bEndpointAddress) ;; esac
 done
-exec /lib/qtest/client-usb "$node" "$($B cat $itf/bInterfaceNumber)" "$in" "$out"
+plan=; [ -f /lib/qtest/w/plan ] && plan=/lib/qtest/w/plan
+exec /lib/qtest/client-usb "$node" "$($B cat $itf/bInterfaceNumber)" "$in" "$out" $plan

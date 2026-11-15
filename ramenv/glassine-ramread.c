@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* glassine-ramread: the RAM environment's reader (docs/ramenv.md). It offers the
- * device's whole disks to the computer, read-only, over one vendor-specific USB
- * interface (FunctionFS), or over a byte stream (a character device: the QEMU test's
- * virtio-serial port). The protocol has four operations: list, read a range, sha256
- * of a range, reboot. None of them writes.
+ * device's whole disks to the computer over one vendor-specific USB interface
+ * (FunctionFS), or over a byte stream (a character device: the QEMU test's
+ * virtio-serial port). Protocol version 1 has four operations: list, read a range,
+ * sha256 of a range, reboot; none of them writes. Version 2 adds three: arm ranges for
+ * writing (once per start), write inside an armed range, disarm.
  *
  *   glassine-ramread [options] --disk PATTERN [--disk PATTERN]...
  *     --disk PATTERN      a glob over /sys/block names (mmcblk[0-9], mmcblk[0-9]boot[0-9]);
@@ -21,11 +22,15 @@
  *     --op-limit S        a disk read or hash running longer than S seconds stops the
  *                         petting: the watchdog resets the device (default 120)
  *
- * Read-only by construction: every disk and each of its partitions is set read-only in
+ * Read-only until armed: every disk and each of its partitions is set read-only in
  * the kernel (BLKROSET, and force_ro where the kernel offers it) and checked with
- * BLKROGET before the first request is served; the disks are opened O_RDONLY; the
- * protocol has no operation that writes, and an unknown operation is refused. Exit
- * status: 0 never (it serves until it reboots), 1 setup failed, 2 usage.
+ * BLKROGET before the first request is served; the disks are opened O_RDONLY; an
+ * unknown operation is refused. Only ARM changes that, and only for the whole-disk
+ * device of a disk it names: that one is made writable (force_ro 0, BLKROSET 0) and
+ * opened for writing, its partitions and every other disk stay read-only (checked),
+ * and a WRITE must lie inside one armed range. The mmc boot areas (mmcblk*boot*) are
+ * never armed. DISARM (and a reboot) makes every disk read-only again. Exit status:
+ * 0 never (it serves until it reboots), 1 setup failed, 2 usage.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -55,26 +60,36 @@
 
 /* ---- the protocol (docs/ramenv.md) ------------------------------------------------ */
 
-#define PROTO_VERSION 1
+#define PROTO_V1 1
+#define PROTO_V2 2
 #define REQ_SIZE 32
 #define RSP_SIZE 64
 #define REQ_MAGIC "GRRQ"
 #define RSP_MAGIC "GRRS"
 
-enum { OP_LIST = 1, OP_READ = 2, OP_HASH = 3, OP_REBOOT = 4 };
+/* version 1: LIST, READ, HASH, REBOOT; version 2 adds ARM, WRITE, DISARM */
+enum { OP_LIST = 1, OP_READ = 2, OP_HASH = 3, OP_REBOOT = 4, OP_ARM = 5, OP_WRITE = 6, OP_DISARM = 7 };
 enum {
 	ST_OK = 0,
-	ST_BAD_REQUEST = 1, /* wrong magic, version or fields */
-	ST_UNKNOWN_OP = 2,  /* not one of the four */
+	ST_BAD_REQUEST = 1, /* wrong magic, version or fields; ARM text that doesn't parse */
+	ST_UNKNOWN_OP = 2,  /* not an operation of the request's version */
 	ST_NO_DISK = 3,
-	ST_RANGE = 4,       /* outside the disk, unaligned, empty or too long */
+	ST_RANGE = 4,       /* outside the disk or the armed ranges, unaligned, empty or too long */
 	ST_IO = 5,          /* the disk returned an error */
+	ST_NOT_ARMED = 6,   /* (v2) WRITE without ARM, or after DISARM */
+	ST_BAD_DATA = 7,    /* (v2) the WRITE's bytes don't have the sha256 sent with them */
+	ST_ARMED = 8,       /* (v2) ARM a second time in this start */
 };
 enum { REBOOT_NORMAL = 0, REBOOT_BOOTLOADER = 1 };
 
 #define ALIGN 512u
 #define MAX_READ (16u << 20)
 #define MAX_HASH (64u << 20)
+#define MAX_WRITE (16u << 20)
+#define MAX_ARM_TEXT 16384u
+#define MAX_RANGES 64
+#define RECV_CHUNK (1u << 20)
+_Static_assert(MAX_WRITE <= MAX_READ, "a WRITE is received into the read buffer");
 #define MAX_DISKS 16
 #define SEND_CHUNK (1u << 20)
 
@@ -106,15 +121,16 @@ static int parse_request(const uint8_t b[REQ_SIZE], struct request *r)
 	r->index = ld32(b + 12);
 	r->offset = ld64(b + 16);
 	r->length = ld64(b + 24);
-	return r->version == PROTO_VERSION ? 0 : -1;
+	return r->version == PROTO_V1 || r->version == PROTO_V2 ? 0 : -1;
 }
 
-static void put_response(uint8_t b[RSP_SIZE], uint16_t op, uint32_t tag, uint16_t status,
+/* the response carries the request's version (1 for a request that didn't parse) */
+static void put_response(uint8_t b[RSP_SIZE], uint16_t version, uint16_t op, uint32_t tag, uint16_t status,
 			 uint64_t length, uint64_t offset, const uint8_t *sha)
 {
 	memset(b, 0, RSP_SIZE);
 	memcpy(b, RSP_MAGIC, 4);
-	st16(b + 4, PROTO_VERSION);
+	st16(b + 4, version);
 	st16(b + 6, op);
 	st32(b + 8, tag);
 	st16(b + 12, status);
@@ -222,9 +238,14 @@ static long now_s(void)
 
 struct disk {
 	char name[64];
+	char path[PATH_MAX];
 	int fd;           /* O_RDONLY */
 	uint64_t size;    /* bytes */
 	uint32_t sector;  /* logical block size */
+	int block;        /* a block device (else a regular file: the unit test) */
+	int armed;        /* named by the ARM in force */
+	int wfd, rfd;     /* while armed: the write descriptor (O_DIRECT on a block device)
+			   * and the read-back one (O_DIRECT; -1 for a file: its fd reads back) */
 };
 
 static struct disk g_disk[MAX_DISKS];
@@ -285,6 +306,9 @@ static int disk_add(const char *name, const char *path, int block_only)
 	int fd = open(path, O_RDONLY | O_CLOEXEC | O_LARGEFILE);
 	if (fd < 0 || fstat(fd, &st) < 0) { say("%s: %s", path, strerror(errno)); goto fail; }
 	snprintf(d->name, sizeof d->name, "%.63s", name);
+	snprintf(d->path, sizeof d->path, "%s", path);
+	d->wfd = d->rfd = -1;
+	d->block = S_ISBLK(st.st_mode);
 	if (S_ISBLK(st.st_mode)) {
 		char fro[PATH_MAX];
 		/* the mmc boot areas: the kernel's own switch, read-only already by default */
@@ -385,7 +409,204 @@ static int pread_full(int fd, uint8_t *b, size_t n, uint64_t off)
 	return 0;
 }
 
-static uint8_t *g_buf; /* MAX_READ */
+static int pwrite_full(int fd, const uint8_t *b, size_t n, uint64_t off)
+{
+	while (n) {
+		ssize_t w = pwrite(fd, b, n, (off_t)off);
+		if (w < 0 && errno == EINTR) continue;
+		if (w <= 0) return -1;
+		b += w;
+		n -= (size_t)w;
+		off += (uint64_t)w;
+	}
+	return 0;
+}
+
+static uint8_t *g_buf; /* MAX_READ (= MAX_WRITE) */
+
+/* n bytes the computer sends after a request, in reads of at most RECV_CHUNK (a
+ * FunctionFS endpoint takes no more per read); b == NULL: read and dropped */
+static int recv_bytes(int in, uint8_t *b, uint64_t n)
+{
+	while (n) {
+		size_t k = n < RECV_CHUNK ? (size_t)n : RECV_CHUNK;
+		if (read_full(in, b ? b : g_buf, k) != 1) return -1;
+		if (b) b += k;
+		n -= k;
+	}
+	return 0;
+}
+
+/* ---- the armed state (protocol version 2) ----------------------------------------- */
+
+/* ARM is taken once per start: NEVER → ARMED → DONE (after DISARM or a reboot request) */
+enum { ARM_NEVER = 0, ARM_ARMED = 1, ARM_DONE = 2 };
+static int g_armed; /* changed only by the serving thread */
+
+struct range { uint32_t disk; uint64_t offset, length; };
+static struct range g_range[MAX_RANGES];
+static int g_nranges;
+
+/* the mmc boot areas (and their partitions): never armed, whatever the request */
+static int is_boot_area(const char *name) { return !fnmatch("mmcblk*boot*", name, 0); }
+
+static int set_force_ro(const char *name, int on)
+{
+	char p[PATH_MAX];
+	snprintf(p, sizeof p, "/sys/block/%s/force_ro", name);
+	if (access(p, F_OK)) return 0;
+	return write_file(p, on ? "1" : "0");
+}
+
+/* 0 when every partition of /sys/block/NAME is read-only in the kernel (BLKROGET) */
+static int partitions_ro(const char *name)
+{
+	char path[PATH_MAX];
+	snprintf(path, sizeof path, "/sys/block/%s", name);
+	DIR *dir = opendir(path);
+	if (!dir) return -1;
+	int bad = 0;
+	struct dirent *e;
+	while ((e = readdir(dir))) {
+		struct stat st;
+		int ro = 0;
+		if (e->d_name[0] == '.') continue;
+		snprintf(path, sizeof path, "/sys/block/%s/%s/partition", name, e->d_name);
+		if (stat(path, &st) < 0) continue;
+		snprintf(path, sizeof path, "/dev/%s", e->d_name);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0 || ioctl(fd, BLKROGET, &ro) < 0 || !ro) {
+			say("%s: not read-only (partition of %s)", e->d_name, name);
+			bad = 1;
+		}
+		if (fd >= 0) close(fd);
+	}
+	closedir(dir);
+	return bad ? -1 : 0;
+}
+
+/* The whole-disk device of d writable (force_ro 0, BLKROSET 0), its partitions still
+ * read-only, and the write and read-back descriptors open. A file (the unit test) only
+ * gets its write descriptor. */
+static int disk_writable(struct disk *d)
+{
+	d->armed = 1;
+	if (d->block) {
+		int zero = 0, ro = 1;
+		if (set_force_ro(d->name, 0) < 0) { say("%s: force_ro 0: %s", d->name, strerror(errno)); return -1; }
+		if (ioctl(d->fd, BLKROSET, &zero) < 0 || ioctl(d->fd, BLKROGET, &ro) < 0 || ro) {
+			say("%s: cannot be made writable: %s", d->name, ro ? "still read-only" : strerror(errno));
+			return -1;
+		}
+		if (partitions_ro(d->name) < 0) return -1;
+		d->wfd = open(d->path, O_RDWR | O_DIRECT | O_CLOEXEC | O_LARGEFILE);
+		d->rfd = open(d->path, O_RDONLY | O_DIRECT | O_CLOEXEC | O_LARGEFILE);
+		if (d->wfd < 0 || d->rfd < 0) { say("%s: open for writing: %s", d->path, strerror(errno)); return -1; }
+	} else {
+		d->wfd = open(d->path, O_RDWR | O_CLOEXEC | O_LARGEFILE);
+		if (d->wfd < 0) { say("%s: open for writing: %s", d->path, strerror(errno)); return -1; }
+	}
+	return 0;
+}
+
+/* back to read-only: descriptors flushed and closed, BLKROSET 1, force_ro 1, the cache
+ * dropped, and checked; 0 = read-only again */
+static int disk_readonly(struct disk *d)
+{
+	int bad = 0;
+	if (d->wfd >= 0) {
+		if (fsync(d->wfd) < 0) bad = 1;
+		close(d->wfd);
+		d->wfd = -1;
+	}
+	if (d->rfd >= 0) { close(d->rfd); d->rfd = -1; }
+	if (d->block) {
+		if (set_ro(d->fd) < 0) { say("%s: cannot set read-only again: %s", d->name, strerror(errno)); bad = 1; }
+		if (set_force_ro(d->name, 1) < 0) { say("%s: force_ro 1: %s", d->name, strerror(errno)); bad = 1; }
+		if (ioctl(d->fd, BLKFLSBUF, 0) < 0) bad = 1;
+		if (partitions_ro(d->name) < 0) bad = 1;
+	}
+	d->armed = 0;
+	return bad ? -1 : 0;
+}
+
+/* every armed disk read-only again; ARM can't be taken again in this start */
+static int disarm_all(void)
+{
+	int bad = 0;
+	for (int i = 0; i < g_ndisks; i++)
+		if (g_disk[i].armed && disk_readonly(&g_disk[i]) < 0) bad = 1;
+	if (g_armed == ARM_ARMED) { g_armed = ARM_DONE; say("disarmed: every disk read-only again%s", bad ? " (FAILED for one)" : ""); }
+	g_nranges = 0;
+	return bad ? -1 : 0;
+}
+
+/* a decimal number of at most 20 digits that fits in 64 bits */
+static int parse_u64(const char *s, uint64_t *v)
+{
+	if (!*s || strlen(s) > 20) return -1;
+	uint64_t x = 0;
+	for (; *s; s++) {
+		if (*s < '0' || *s > '9') return -1;
+		if (x > (UINT64_MAX - (uint64_t)(*s - '0')) / 10) return -1;
+		x = x * 10 + (uint64_t)(*s - '0');
+	}
+	*v = x;
+	return 0;
+}
+
+/* The ARM text: lines `range DISK OFFSET LENGTH` (DISK = the index LIST gives, or the
+ * disk's name; numbers decimal; fields separated by one space; empty lines ignored).
+ * Status 0 and the ranges, or a status and why. */
+static uint16_t parse_ranges(char *t, size_t len, struct range *rg, int *n, char *why, size_t wn)
+{
+	*n = 0;
+	if (memchr(t, 0, len)) { snprintf(why, wn, "the ARM text has a NUL byte"); return ST_BAD_REQUEST; }
+	int line = 0;
+	for (char *l = t, *e; l < t + len; l = e + 1) {
+		e = memchr(l, '\n', (size_t)(t + len - l));
+		if (!e) e = t + len;
+		*e = 0;
+		line++;
+		if (!*l) continue;
+		char *f[5];
+		int nf = 0;
+		for (char *p = l; nf < 5;) {
+			f[nf++] = p;
+			p = strchr(p, ' ');
+			if (!p) break;
+			*p++ = 0;
+		}
+		uint64_t idx = UINT64_MAX, off, ln;
+		if (nf != 4 || strcmp(f[0], "range") || parse_u64(f[2], &off) < 0 || parse_u64(f[3], &ln) < 0) {
+			snprintf(why, wn, "line %d is not `range DISK OFFSET LENGTH`", line);
+			return ST_BAD_REQUEST;
+		}
+		if (*n >= MAX_RANGES) { snprintf(why, wn, "more than %d ranges", MAX_RANGES); return ST_BAD_REQUEST; }
+		if (parse_u64(f[1], &idx) < 0)
+			for (int i = 0; i < g_ndisks; i++)
+				if (!strcmp(g_disk[i].name, f[1])) idx = (uint64_t)i;
+		if (idx >= (uint64_t)g_ndisks) { snprintf(why, wn, "line %d: no disk %.40s", line, f[1]); return ST_NO_DISK; }
+		const struct disk *d = &g_disk[idx];
+		if (is_boot_area(d->name)) { snprintf(why, wn, "line %d: %s is a boot area, never written", line, d->name); return ST_RANGE; }
+		if (!ln || off % ALIGN || ln % ALIGN || off % d->sector || ln % d->sector) {
+			snprintf(why, wn, "line %d: empty, or not a multiple of 512 and the disk's sector", line);
+			return ST_RANGE;
+		}
+		if (off > d->size || ln > d->size - off) { snprintf(why, wn, "line %d: past the end of %s", line, d->name); return ST_RANGE; }
+		for (int k = 0; k < *n; k++)
+			if (rg[k].disk == idx && off < rg[k].offset + rg[k].length && rg[k].offset < off + ln) {
+				snprintf(why, wn, "line %d overlaps another range", line);
+				return ST_RANGE;
+			}
+		rg[*n].disk = (uint32_t)idx;
+		rg[*n].offset = off;
+		rg[*n].length = ln;
+		(*n)++;
+	}
+	if (!*n) { snprintf(why, wn, "no range"); return ST_BAD_REQUEST; }
+	return ST_OK;
+}
 
 /* the reboot itself; the unit test replaces it */
 static void (*g_reboot)(int target);
@@ -402,7 +623,7 @@ static int reply(int out, const struct request *r, uint16_t status, const char *
 {
 	uint8_t h[RSP_SIZE];
 	size_t n = why ? strlen(why) : 0;
-	put_response(h, r->op, r->tag, status, n, r->offset, NULL);
+	put_response(h, r->version, r->op, r->tag, status, n, r->offset, NULL);
 	phase(PH_SEND);
 	int rc = write_full(out, h, RSP_SIZE) < 0 || (n && write_full(out, (const uint8_t *)why, n) < 0) ? -1 : 0;
 	phase(PH_WAIT);
@@ -424,12 +645,15 @@ static int op_list(int out, const struct request *r)
 {
 	char t[2048];
 	int n = snprintf(t, sizeof t, "glassine-ramread %d\nmax-read %u\nmax-hash %u\nalign %u\n",
-			 PROTO_VERSION, MAX_READ, MAX_HASH, ALIGN);
+			 r->version, MAX_READ, MAX_HASH, ALIGN);
+	if (r->version >= PROTO_V2)
+		n += g_armed == ARM_ARMED ? snprintf(t + n, sizeof t - (size_t)n, "writes armed %d\n", g_nranges)
+					  : snprintf(t + n, sizeof t - (size_t)n, "writes off\n");
 	for (int i = 0; i < g_ndisks && n < (int)sizeof t - 128; i++)
 		n += snprintf(t + n, sizeof t - (size_t)n, "disk %d %s %llu %u\n", i, g_disk[i].name,
 			      (unsigned long long)g_disk[i].size, g_disk[i].sector);
 	uint8_t h[RSP_SIZE];
-	put_response(h, r->op, r->tag, ST_OK, (uint64_t)n, 0, NULL);
+	put_response(h, r->version, r->op, r->tag, ST_OK, (uint64_t)n, 0, NULL);
 	phase(PH_SEND);
 	int rc = write_full(out, h, RSP_SIZE) < 0 || write_full(out, (uint8_t *)t, (size_t)n) < 0 ? -1 : 0;
 	phase(PH_WAIT);
@@ -452,7 +676,7 @@ static int op_read(int out, const struct request *r)
 	sha256_init(&s);
 	sha256_update(&s, g_buf, (size_t)r->length);
 	sha256_final(&s, sum);
-	put_response(h, r->op, r->tag, ST_OK, r->length, r->offset, sum);
+	put_response(h, r->version, r->op, r->tag, ST_OK, r->length, r->offset, sum);
 	phase(PH_SEND);
 	int rc = write_full(out, h, RSP_SIZE) < 0 || write_full(out, g_buf, (size_t)r->length) < 0 ? -1 : 0;
 	phase(PH_WAIT);
@@ -478,33 +702,151 @@ static int op_hash(int out, const struct request *r)
 	}
 	uint8_t sum[32], h[RSP_SIZE];
 	sha256_final(&s, sum);
-	put_response(h, r->op, r->tag, ST_OK, 0, r->offset, sum);
+	put_response(h, r->version, r->op, r->tag, ST_OK, 0, r->offset, sum);
 	phase(PH_SEND);
 	int rc = write_full(out, h, RSP_SIZE);
 	phase(PH_WAIT);
 	return rc;
 }
 
+/* ARM (v2): the text of `length` bytes names the ranges; once per start, all or nothing */
+static int op_arm(int in, int out, const struct request *r)
+{
+	static char t[MAX_ARM_TEXT + 1];
+	char why[160];
+	if (r->length > MAX_ARM_TEXT) {
+		if (recv_bytes(in, NULL, r->length) < 0) return -1;
+		snprintf(why, sizeof why, "ARM text above %u bytes", MAX_ARM_TEXT);
+		return reply(out, r, ST_BAD_REQUEST, why);
+	}
+	if (recv_bytes(in, (uint8_t *)t, r->length) < 0) return -1;
+	t[r->length] = 0;
+	if (g_armed != ARM_NEVER) return reply(out, r, ST_ARMED, "ARM was taken already in this start");
+	struct range rg[MAX_RANGES];
+	int n = 0;
+	uint16_t st = parse_ranges(t, (size_t)r->length, rg, &n, why, sizeof why);
+	if (st) return reply(out, r, st, why);
+	phase(PH_DISK);
+	int bad = 0;
+	for (int i = 0; i < g_ndisks && !bad; i++)
+		for (int k = 0; k < n; k++)
+			if (rg[k].disk == (uint32_t)i) { bad = disk_writable(&g_disk[i]) < 0; break; }
+	if (bad) {
+		int still = disarm_all() < 0;
+		phase(PH_WAIT);
+		return reply(out, r, ST_IO, still ? "a disk could not be made writable, and not read-only again either"
+						  : "a disk could not be made writable; every disk is read-only");
+	}
+	memcpy(g_range, rg, sizeof rg[0] * (size_t)n);
+	g_nranges = n;
+	g_armed = ARM_ARMED;
+	for (int k = 0; k < n; k++)
+		say("armed: %s [%llu, +%llu)", g_disk[rg[k].disk].name, (unsigned long long)rg[k].offset,
+		    (unsigned long long)rg[k].length);
+	phase(PH_WAIT);
+	snprintf(why, sizeof why, "armed %d", n);
+	return reply(out, r, ST_OK, why);
+}
+
+/* WRITE (v2): `length` bytes, then their sha256; written inside one armed range, then
+ * read back from the disk; the answer is the read-back's sha256 */
+static int op_write(int in, int out, const struct request *r)
+{
+	uint8_t want[32], got[32], h[RSP_SIZE], hs[32];
+	char why[160];
+	if (r->length > MAX_WRITE) {
+		if (recv_bytes(in, NULL, r->length) < 0 || recv_bytes(in, want, 32) < 0) return -1;
+		return reply(out, r, ST_RANGE, "length above the limit");
+	}
+	if (recv_bytes(in, g_buf, r->length) < 0 || recv_bytes(in, want, 32) < 0) return -1;
+	if (g_armed != ARM_ARMED) return reply(out, r, ST_NOT_ARMED, g_armed == ARM_DONE ? "disarmed" : "not armed");
+	const char *w = NULL;
+	uint16_t st = check_range(r, MAX_WRITE, &w);
+	if (st) return reply(out, r, st, w);
+	struct disk *d = &g_disk[r->index];
+	if (r->offset % d->sector || r->length % d->sector) return reply(out, r, ST_RANGE, "not a multiple of the disk's sector");
+	int inside = 0;
+	for (int k = 0; k < g_nranges; k++)
+		if (g_range[k].disk == r->index && r->offset >= g_range[k].offset
+		    && r->offset + r->length <= g_range[k].offset + g_range[k].length) inside = 1;
+	if (!inside) return reply(out, r, ST_RANGE, "not inside one armed range");
+	struct sha256 s;
+	sha256_init(&s);
+	sha256_update(&s, g_buf, (size_t)r->length);
+	sha256_final(&s, got);
+	if (memcmp(got, want, 32)) return reply(out, r, ST_BAD_DATA, "the bytes don't have the sha256 sent with them; nothing written");
+
+	phase(PH_DISK);
+	const char *fail = NULL;
+	if (pwrite_full(d->wfd, g_buf, (size_t)r->length, r->offset) < 0) fail = "the write failed";
+	else if (fdatasync(d->wfd) < 0) fail = "the flush to the disk failed";
+	else if (d->block && ioctl(d->wfd, BLKFLSBUF, 0) < 0) fail = "dropping the disk's cache failed";
+	else {
+		memset(g_buf, 0, (size_t)r->length);
+		if (pread_full(d->rfd >= 0 ? d->rfd : d->fd, g_buf, (size_t)r->length, r->offset) < 0) fail = "the read-back failed";
+	}
+	if (fail) {
+		say("%s: %s at %llu: %s", d->name, fail, (unsigned long long)r->offset, strerror(errno));
+		phase(PH_WAIT);
+		snprintf(why, sizeof why, "%s (the range may be partly written)", fail);
+		return reply(out, r, ST_IO, why);
+	}
+	sha256_init(&s);
+	sha256_update(&s, g_buf, (size_t)r->length);
+	sha256_final(&s, got);
+	if (memcmp(got, want, 32))
+		say("%s: the read-back at %llu differs from what was written", d->name, (unsigned long long)r->offset);
+	/* the header's sha256 is the payload's, as for every payload */
+	sha256_init(&s);
+	sha256_update(&s, got, 32);
+	sha256_final(&s, hs);
+	put_response(h, r->version, r->op, r->tag, ST_OK, 32, r->offset, hs);
+	phase(PH_SEND);
+	int rc = write_full(out, h, RSP_SIZE) < 0 || write_full(out, got, 32) < 0 ? -1 : 0;
+	phase(PH_WAIT);
+	return rc;
+}
+
+/* DISARM (v2): every disk read-only again (a no-op when nothing is armed) */
+static int op_disarm(int out, const struct request *r)
+{
+	phase(PH_DISK);
+	int bad = disarm_all() < 0;
+	phase(PH_WAIT);
+	return bad ? reply(out, r, ST_IO, "a disk could not be made read-only again")
+		   : reply(out, r, ST_OK, NULL);
+}
+
 /* One request. Returns 1 to go on, 0 when the request was a reboot (already answered),
  * -1 when the connection failed. */
-static int handle(int out, const uint8_t b[REQ_SIZE])
+static int handle(int in, int out, const uint8_t b[REQ_SIZE])
 {
 	struct request r = { 0 };
 	atomic_store(&g_last_request, now_s());
 	atomic_fetch_add(&g_requests, 1);
 	if (parse_request(b, &r) < 0) {
+		uint16_t v = ld16(b + 4);
+		r.version = PROTO_V1;
 		r.op = ld16(b + 6);
 		r.tag = ld32(b + 8);
 		r.offset = 0;
-		return reply(out, &r, ST_BAD_REQUEST, "not a request of protocol version 1") < 0 ? -1 : 1;
+		return reply(out, &r, ST_BAD_REQUEST, v <= PROTO_V1 ? "not a request of protocol version 1"
+							      : "not a request of protocol version 1 or 2") < 0 ? -1 : 1;
 	}
-	switch (r.op) {
+	/* a version 1 request knows only the four operations */
+	int op = r.version == PROTO_V1 && r.op > OP_REBOOT ? 0 : r.op;
+	switch (op) {
 	case OP_LIST: return op_list(out, &r) < 0 ? -1 : 1;
 	case OP_READ: return op_read(out, &r) < 0 ? -1 : 1;
 	case OP_HASH: return op_hash(out, &r) < 0 ? -1 : 1;
+	case OP_ARM: return op_arm(in, out, &r) < 0 ? -1 : 1;
+	case OP_WRITE: return op_write(in, out, &r) < 0 ? -1 : 1;
+	case OP_DISARM: return op_disarm(out, &r) < 0 ? -1 : 1;
 	case OP_REBOOT:
 		if (r.index != REBOOT_NORMAL && r.index != REBOOT_BOOTLOADER)
 			return reply(out, &r, ST_BAD_REQUEST, "reboot target is 0 (normal) or 1 (boot loader)") < 0 ? -1 : 1;
+		/* nothing stays writable across a reboot, even without DISARM */
+		disarm_all();
 		if (reply(out, &r, ST_OK, NULL) < 0) return -1;
 		say("reboot (%s) asked by the computer", r.index ? "boot loader" : "normal");
 		usleep(300000); /* let the answer leave */
@@ -523,7 +865,7 @@ static int serve(int in, int out)
 		phase(PH_WAIT);
 		int r = read_full(in, b, REQ_SIZE);
 		if (r <= 0) return r;
-		r = handle(out, b);
+		r = handle(in, out, b);
 		if (r <= 0) return r < 0 ? -1 : 2;
 	}
 }
@@ -619,7 +961,7 @@ static const struct {
 	.os_compat = { .bFirstInterfaceNumber = 0, .Reserved1 = 1, .CompatibleID = "WINUSB" },
 };
 
-#define IFACE_NAME "GlassineOS read-only disk reader"
+#define IFACE_NAME "GlassineOS disk reader"
 static const struct {
 	struct usb_functionfs_strings_head header;
 	struct { __le16 code; const char str1[sizeof IFACE_NAME]; } __attribute__((packed)) lang0;
