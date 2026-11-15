@@ -1,0 +1,6 @@
+# A generic x86-64 PC that boots by UEFI: what every such PC needs. Its kernel is not
+# in the base (kernel-lts). Its configuration files are in rootfs/.
+# the EFI system partition: a FAT file system, checked and written by these
+dosfstools
+# the firmware's boot entries
+efibootmgr

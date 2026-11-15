@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Runs inside a stage's RUN, with the stage directory bind-mounted at /run/stage:
 #   packages  plain package names (one per line, # comments)
-#   lock      the whole installed set after this stage, name=version, sorted
+#   lock      the whole installed set after this stage, name=version, sorted: for
+#             aarch64; lock.<arch> for any other architecture (lock.x86_64), the one
+#             apk --print-arch names
 #   rootfs/   files the stage copies over the tree afterwards (optional)
 # Installs exactly the versions the lock names, records the packages in /etc/apk/world
 # by plain name (no pin there: a live `apk upgrade` moves them on), then fails if the
@@ -18,6 +20,10 @@ C=/var/cache/apk
 W=$(mktemp -d /run/apk-stage.XXXXXX)
 trap 'rm -rf "$W"' EXIT
 pk=$(sed 's/#.*//' "$S/packages" | tr -s ' \t\n' ' ')
+# the lock of the architecture this stage builds for
+a=$(apk --print-arch)
+L=$S/lock
+[ "$a" = aarch64 ] || L=$S/lock.$a
 
 refresh() {
 	echo "apk-stage: refresh the locks with scripts/lock.sh" >&2
@@ -35,16 +41,16 @@ if [ "${LOCK:-check}" = refresh ]; then
 	# shellcheck disable=SC2086
 	[ -z "${pk# }" ] || apk add -q --cache-dir "$C" $pk
 else
-	[ -f "$S/lock" ] || { echo "apk-stage: no lock for this stage: run scripts/lock.sh" >&2; exit 1; }
+	[ -f "$L" ] || { echo "apk-stage: no lock for this stage on $a (${L##*/}): run scripts/lock.sh" >&2; exit 1; }
 	apk update -q --cache-dir "$C"
 	# every version of every locked name that apk can install (repositories and the
 	# installed database): "name version source"
 	# shellcheck disable=SC2046
-	apk policy --cache-dir "$C" $(cut -d= -f1 "$S/lock") | awk '
+	apk policy --cache-dir "$C" $(cut -d= -f1 "$L") | awk '
 		/^[^ ].* policy:$/ { p = $1; next }
 		/^  [^ ].*:$/ { v = substr($1, 1, length($1) - 1); next }
 		/^    / { print p, v, $1 }' > "$W/offered"
-	missing=$(awk 'NR == FNR { ok[$1 "=" $2] = 1; next } !($0 in ok)' "$W/offered" "$S/lock")
+	missing=$(awk 'NR == FNR { ok[$1 "=" $2] = 1; next } !($0 in ok)' "$W/offered" "$L")
 	if [ -n "$missing" ]; then
 		echo "apk-stage: lock lines that no repository offers any more:" >&2
 		for l in $missing; do
@@ -62,7 +68,7 @@ else
 	# then the stage's packages by name (installed versions satisfy them: apk upgrades
 	# nothing without -u); then the virtual goes, the versions stay
 	# shellcheck disable=SC2046
-	apk add -q --cache-dir "$C" -t .glassine-lock $(cat "$S/lock") || {
+	apk add -q --cache-dir "$C" -t .glassine-lock $(cat "$L") || {
 		echo "apk-stage: the locked versions don't install together" >&2; refresh; }
 	# shellcheck disable=SC2086
 	[ -z "${pk# }" ] || apk add -q --cache-dir "$C" $pk
@@ -79,9 +85,9 @@ fi
 
 [ "${LOCK:-check}" = refresh ] && exit 0
 have=$(awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' /lib/apk/db/installed | LC_ALL=C sort)
-if [ "$have" != "$(cat "$S/lock")" ]; then
+if [ "$have" != "$(cat "$L")" ]; then
 	echo "apk-stage: installed packages differ from the lock (- lock, + installed):" >&2
 	printf '%s\n' "$have" > "$W/have"
-	diff "$S/lock" "$W/have" | grep '^[-+][^-+]' >&2 || :
+	diff "$L" "$W/have" | grep '^[-+][^-+]' >&2 || :
 	refresh
 fi

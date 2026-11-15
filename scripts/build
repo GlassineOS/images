@@ -631,8 +631,9 @@ def preflight(o, target, adir, work, log):
                          f'(expected one stage per device, device-{target})')
         for name in glassine_pins.reachable(dockerfile, [BASE_EXPORT] + KERNEL_EXPORTS, over):
             sd = os.path.join(stages_dir, name)
-            if os.path.isfile(os.path.join(sd, 'packages')) and not os.path.isfile(os.path.join(sd, 'lock')):
-                fails.append(f'stage {name}: no lock (stages/{name}/lock; scripts/lock.sh writes it)')
+            lf = glassine_pins.lock_file(arch or 'arm64')
+            if os.path.isfile(os.path.join(sd, 'packages')) and not os.path.isfile(os.path.join(sd, lf)):
+                fails.append(f'stage {name}: no lock (stages/{name}/{lf}; scripts/lock.sh writes it)')
         return args
     args = guard('the Dockerfile', pins_checks) or {}
 
