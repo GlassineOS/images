@@ -113,16 +113,17 @@ tonistiigi/binfmt --install arm64` once). Keep to the tar export: image exports 
 
 ## A release for the installer
 
-    scripts/pool-image artifacts onyx-noteair --ramenv out-ramenv
+    scripts/pool-image artifacts onyx-noteair --ramenv out-ramenv --recovery out-recovery
 
 makes `artifacts/onyx-noteair/releases/<build-id>/`: `release.json` and the files it
 names, the format GlassineOS/installer reads. The base goes as a **pool image**: a small
 btrfs file system laid out by GlassineOS/boot's `glassine-deploy init` with the install
 marker, the base received (read-only, with its received UUID, so updates arrive as
 deltas) and the kernel's modules, which the installer writes to the system partition as
-bytes and the first start grows to the partition. The boot image and the RAM
-environment go as they are. The boot loader, the partition layout and the recovery
-aren't made here. Details: `docs/artifacts.md`, "Releases";
+bytes and the first start grows to the partition. The boot image, the RAM environment
+and the recovery go as they are. The boot loader and the partition layout aren't made
+here: `targets/<target>/release.conf` pins them by URL and SHA-256 (GlassineOS/abl's
+release, GlassineOS/installer's `layouts/`), and pool-image fetches them. Details: `docs/artifacts.md`, "Releases";
 `scripts/test-pool-image.sh` tests it.
 
 ## Kernel and device trees
