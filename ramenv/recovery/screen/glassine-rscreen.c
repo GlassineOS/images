@@ -25,7 +25,8 @@
  *             0.3 s on) and its buttons
  *   --shot    tests: "shot NAME" in --events writes the surface to DIR/NAME.pgm
  *   --events  tests: input from a script instead of evdev (tap LABEL, short, long,
- *             await PAGE, sleep MS, shot NAME, quit)
+ *             await PAGE, sleep MS, shot NAME, quit; glyphs draws every glyph in each
+ *             face, for a shot)
  *
  * Input: the touchscreen (a tap on a button chooses it) and the power key alone (a
  * short press moves to the next button, a press held 0.8 s chooses it). Input that
@@ -272,16 +273,18 @@ static void focus_ring(int i, int on)
 }
 
 /* a button row: title (bold) and an optional line below; height from its text */
+static int row_reserve;		/* room kept free right of the next row's title (its tags) */
 static struct button *row(int act, int arg, const char *title, const char *sub)
 {
 	if (nbtn == NBTN) return NULL;
 	struct button *b = &btn[nbtn++];
-	int pad = 30, w = SW - 2 * M, tw = w - 2 * pad;
-	int h = pad * 2 + wrap(F_BOLD, 0, 0, tw, title, 0, 0) + (sub ? wrap(F_SMALL, 0, 0, tw, sub, 0, 0) + 6 : 0);
+	int pad = 30, w = SW - 2 * M, tw = w - 2 * pad, ttw = tw - row_reserve;
+	row_reserve = 0;
+	int h = pad * 2 + wrap(F_BOLD, 0, 0, ttw, title, 0, 0) + (sub ? wrap(F_SMALL, 0, 0, tw, sub, 0, 0) + 6 : 0);
 	*b = (struct button){ M, py, w, h, act, arg, "" };
 	snprintf(b->label, sizeof b->label, "%s", title);
 	int y = py + pad;
-	y += wrap(F_BOLD, M + pad, y, tw, title, 0, 1);
+	y += wrap(F_BOLD, M + pad, y, ttw, title, 0, 1);
 	if (sub) wrap(F_SMALL, M + pad, y + 6, tw, sub, 0x30, 1);
 	ring(b->x, b->y, b->w, b->h, 20, 4, 0);
 	py += h + 24;
@@ -300,11 +303,16 @@ static void foot_buttons(int a1, const char *l1, int a2, const char *l2)
 		*b = (struct button){ x, y, w, h, a[k], 0, "" };
 		snprintf(b->label, sizeof b->label, "%s", l[k]);
 		ring(x, y, w, h, 20, 4, 0);
-		int tw = measure(F_BOLD, l[k], strlen(l[k]));
-		if (tw > w - 40) {
-			int th = wrap(F_SMALL, 0, 0, w - 40, l[k], 0, 0);
-			wrap(F_SMALL, x + 20, y + (h - th) / 2, w - 40, l[k], 0, 1);
-		} else text(F_BOLD, x + (w - tw) / 2, y + (h + F_BOLD->asc - F_BOLD->desc) / 2, l[k], 0);
+		int tw = measure(F_BOLD, l[k], strlen(l[k])), th = wrap(F_SMALL, 0, 0, w - 40, l[k], 0, 0);
+		if (tw <= w - 40) text(F_BOLD, x + (w - tw) / 2, y + (h + F_BOLD->asc - F_BOLD->desc) / 2, l[k], 0);
+		else if (th <= h - 30) wrap(F_SMALL, x + 20, y + (h - th) / 2, w - 40, l[k], 0, 1);
+		else {	/* never past the button: as much as fits, then "…" (callers keep labels short) */
+			size_t n = strlen(l[k]);
+			int ew = measure(F_BOLD, "…", strlen("…"));
+			while (n && ((l[k][n] & 0xc0) == 0x80 || measure(F_BOLD, l[k], n) + ew > w - 40)) n--;
+			int x1 = x + 20 + text_n(F_BOLD, x + 20, y + (h + F_BOLD->asc - F_BOLD->desc) / 2, l[k], n, 0);
+			text(F_BOLD, x1, y + (h + F_BOLD->asc - F_BOLD->desc) / 2, "…", 0);
+		}
 	}
 }
 
@@ -388,14 +396,16 @@ static void keepalive(void)
 /* ---- STATUS, parsed -------------------------------------------------------------- */
 
 #define NDEP 64
-struct dep { char id[64], state[16], base[64], present[8], created[40], size[24]; };
+/* an id never reaches the core cut: a record whose id doesn't fit is left out (dep_cut) */
+#define IDLEN 256
+struct dep { char id[IDLEN], state[16], base[128], present[8], created[40], size[24]; };
 static struct dep deps[NDEP];
-static int ndep, st_status = -1;
+static int ndep, dep_cut, st_status = -1;
 static char st_raw[4096], st_raw_full[16384], rec_boot[48], rec_build[24], rec_device[48], machine[96], kernel[96],
-	    actions[128], cur[64], prev[64], cand[64], tries[8], failedid[64];
+	    actions[128], cur[IDLEN], prev[IDLEN], cand[IDLEN], tries[8], failedid[IDLEN];
 
-/* the value of KEY=... in a tab-separated porcelain record */
-static void pfield(const char *rec, const char *key, char *out, size_t n)
+/* the value of KEY=... in a tab-separated porcelain record; -1 when it was cut to fit */
+static int pfield(const char *rec, const char *key, char *out, size_t n)
 {
 	size_t k = strlen(key);
 	*out = 0;
@@ -404,12 +414,13 @@ static void pfield(const char *rec, const char *key, char *out, size_t n)
 			const char *v = p + k + 1;
 			size_t l = strcspn(v, "\t\n");
 			snprintf(out, n, "%.*s", (int)(l < n ? l : n - 1), v);
-			return;
+			return l < n ? 0 : -1;
 		}
 		p = strpbrk(p, "\t\n");
-		if (p && *p == '\n') return;
+		if (p && *p == '\n') return 0;
 		if (p) p++;
 	}
+	return 0;
 }
 
 /* the value after "KEY " on its own line of STATUS */
@@ -443,7 +454,7 @@ static int status(void)
 	st_status = rq(OP_STATUS, 0, NULL, 0, &s, NULL, NULL);
 	snprintf(st_raw, sizeof st_raw, "%s", s);
 	snprintf(st_raw_full, sizeof st_raw_full, "%s", s);
-	ndep = 0;
+	ndep = dep_cut = 0;
 	*cur = *prev = *cand = *tries = *failedid = *actions = 0;
 	if (st_status == ST_OK) {
 		char r[256];
@@ -465,7 +476,7 @@ static int status(void)
 				pfield(p, "failed", failedid, sizeof failedid);
 			} else if (!strncmp(p, "type=deployment\t", 16) && ndep < NDEP) {
 				struct dep *d = &deps[ndep++];
-				pfield(p, "id", d->id, sizeof d->id);
+				if (pfield(p, "id", d->id, sizeof d->id)) { ndep--; dep_cut++; continue; }
 				pfield(p, "state", d->state, sizeof d->state);
 				pfield(p, "base", d->base, sizeof d->base);
 				pfield(p, "base_present", d->present, sizeof d->present);
@@ -678,6 +689,26 @@ static int hit(int u, int v)
 	return -1;
 }
 
+/* tests: every glyph the pages use, in each face and size (the golden "glyphs") */
+static void glyph_sweep(void)
+{
+	static const struct { const struct rs_font *f; const char *name; } faces[] = {
+		{ &rs_font_title, "TITLE · SANS 600 · 64" }, { &rs_font_body, "BODY · SANS 400 · 40" },
+		{ &rs_font_bold, "BOLD · SANS 600 · 40" }, { &rs_font_small, "SMALL · SANS 400 · 32" },
+		{ &rs_font_label, "LABEL · MONO 500 · 28" } };
+	char all[400] = "";
+	for (int c = 33; c < 127; c++) { size_t n = strlen(all); all[n] = (char)c; all[n + 1] = 0; }
+	strcat(all, " · – — ‘ ’ “ ” • … → é ü ß Ä Ö Ü ©");
+	new_page("glyphs");
+	py = 40;
+	for (size_t i = 0; i < sizeof faces / sizeof *faces; i++) {
+		label(M, py + F_LABEL->asc, faces[i].name, 0x60);
+		py += line_h(F_LABEL) + 4;
+		py += wrap(faces[i].f, M, py, SW - 2 * M, all, 0, 1);
+		py += wrap(faces[i].f, M, py, SW - 2 * M, "Full reset · Flatpak · Wi-Fi · 20261112-0930", 0, 1) + 20;
+	}
+}
+
 /* the next script line in --events mode, once the page takes input */
 static int script_event(struct ev *e)
 {
@@ -695,6 +726,7 @@ static int script_event(struct ev *e)
 			continue;
 		}
 		if (!strncmp(l, "shot ", 5)) { shot(l + 5); continue; }
+		if (!strcmp(l, "glyphs")) { glyph_sweep(); continue; }
 		if (!strncmp(l, "sleep ", 6)) { sleep_until = now_ms() + atol(l + 6); return 0; }
 		if (!strcmp(l, "quit")) { g_quit = 1; return 0; }
 		if (!strcmp(l, "short")) { e->kind = IN_SHORT; return 1; }
@@ -975,8 +1007,11 @@ static void names(const char *act, const char *id, char *title, size_t tn, char 
  * button, 0 = cancel. A text that doesn't fit isn't confirmable here */
 static int page_confirm(const char *act, const char *id, const char *what)
 {
-	char title[160], button[96];
+	char title[IDLEN + 40], button[IDLEN + 20];
 	names(act, id, title, sizeof title, button, sizeof button);
+	/* a long id stays in the title; its button then says "it" */
+	if (id && measure(F_BOLD, button, strlen(button)) > (SW - 2 * M - 36) / 2 - 40)
+		snprintf(button, sizeof button, "%s", !strcmp(act, "select") ? "Start it" : !strcmp(act, "remove") ? "Delete it" : act);
 	new_page(!strcmp(act, "reset-full") ? "confirm-reset-full" : !strcmp(act, "reset") ? "confirm-reset"
 		 : !strcmp(act, "rollback") ? "confirm-rollback" : !strcmp(act, "select") ? "confirm-select" : "confirm-remove");
 	header(title);
@@ -1010,7 +1045,7 @@ static void page_working(const char *title, const char *what)
  * the confirmation it named, then send it with that token */
 static void deploy(const char *act, const char *id)
 {
-	char base[512], req[640], tok[128] = "";
+	char base[IDLEN + 64], req[IDLEN * 3], tok[IDLEN + 64] = "";
 	int disc = 0;
 	snprintf(base, sizeof base, "action %s\n%s%s%s", act, id ? "id " : "", id ? id : "", id ? "\n" : "");
 	for (;;) {
@@ -1023,14 +1058,16 @@ static void deploy(const char *act, const char *id)
 		if (st == ST_CONFIRM) {
 			if (strncmp(a, "confirm ", 8)) { page_result("refused", "The recovery’s answer can’t be read", a, NULL); free(a); return; }
 			size_t l = strcspn(a + 8, "\n");
-			char t[128];
-			snprintf(t, sizeof t, "%.*s", (int)(l < sizeof t ? l : sizeof t - 1), a + 8);
+			char t[IDLEN + 64];
+			/* the token goes back whole or not at all */
+			if (l >= sizeof t) { page_result("refused", "The recovery’s answer can’t be read", "Its confirmation is longer than this screen takes.", NULL); free(a); return; }
+			snprintf(t, sizeof t, "%.*s", (int)l, a + 8);
 			const char *what = a[8 + l] ? a + 8 + l + 1 : "";
 			int yes = page_confirm(act, id, what);
 			free(a);
 			if (!yes) { page_result("cancelled", "Cancelled", "Nothing changed.", NULL); return; }
 			snprintf(tok, sizeof tok, "%s", t);
-			char title[160], button[96];
+			char title[IDLEN + 40], button[IDLEN + 20];
 			names(act, id, title, sizeof title, button, sizeof button);
 			page_working("Working", button);
 			continue;
@@ -1132,7 +1169,14 @@ static int deps_page(void)
 		if (status() != ST_OK) return 0;
 		new_page("deployments");
 		header("Deployments");
-		if (!ndep) para(F_BODY, "There is no GlassineOS deployment on this device.", 0);
+		if (!ndep && !dep_cut) para(F_BODY, "There is no GlassineOS deployment on this device.", 0);
+		if (dep_cut) {
+			char t[160];
+			snprintf(t, sizeof t, "%d deployment%s with a name too long for this screen %s left out: use the console or the installer for %s.",
+				 dep_cut, dep_cut == 1 ? "" : "s", dep_cut == 1 ? "is" : "are", dep_cut == 1 ? "it" : "them");
+			para(F_SMALL, t, 0x30);
+			py += 16;
+		}
 		/* room for the rows that always come: roll back, more, back */
 		int reserve = 3 * 150, shown = 0;
 		if (off >= ndep) off = 0;
@@ -1142,8 +1186,6 @@ static int deps_page(void)
 			snprintf(sub, sizeof sub, "base %s%s%s", *d->base ? d->base : "unknown", *d->created ? " · " : "", d->created);
 			if (py + 230 > SH - 150 - reserve) break;
 			int y0 = py;
-			struct button *b = row(A_DEP, i, d->id, sub);
-			if (!b) break;
 			/* the tags at the right of the title line */
 			int tw = 0, n = 0;
 			const char *t[3];
@@ -1159,12 +1201,15 @@ static int deps_page(void)
 			}
 			if (strcmp(d->state, "failed") && *failedid && !strcmp(d->id, failedid)) { t[n] = "FAILED"; fl[n++] = 1; }
 			for (int k = 0; k < n; k++) tw += measure(F_LABEL, t[k], strlen(t[k])) + 36 + 14;
+			row_reserve = tw + 10;
+			struct button *b = row(A_DEP, i, d->id, sub);
+			if (!b) break;
 			int x = M + (SW - 2 * M) - 30 - tw + 14;
 			for (int k = 0; k < n; k++) x += tag(x, y0 + 30, t[k], fl[k]) + 14;
 			shown++;
 		}
 		if (*prev) {
-			char t[100];
+			char t[IDLEN + 20];
 			snprintf(t, sizeof t, "Roll back to %s", prev);
 			row(A_ROLLBACK, 0, t, "The previous deployment starts next.");
 		}
@@ -1294,17 +1339,18 @@ static void home(void)
 	int y0 = py, h = 0;
 	py += 32;
 	if (!ndep && !*cur) {
-		para(F_BODY, "There is no GlassineOS deployment here.", 0);
+		/* inside the card, as its key-value lines */
+		py += wrap(F_BODY, M + 36, py, SW - 2 * M - 72, "There is no GlassineOS deployment here.", 0, 1);
 		char why[600];
 		sline(st_raw_full, "status-exit", why, sizeof why);
 		if (*why && strcmp(why, "0")) {
 			/* glassine-deploy's own words, the line after status-exit */
 			const char *p = strstr(st_raw_full, "\nstatus-exit ");
 			p = p ? strchr(p + 1, '\n') : NULL;
-			if (p) { snprintf(why, sizeof why, "%.*s", (int)strcspn(p + 1, "\n"), p + 1); py += 8; para(F_SMALL, why, 0x30); }
+			if (p) { snprintf(why, sizeof why, "%.*s", (int)strcspn(p + 1, "\n"), p + 1); py += 8; py += wrap(F_SMALL, M + 36, py, SW - 2 * M - 72, why, 0x30, 1); }
 		}
 	} else {
-		char t[160];
+		char t[IDLEN + 40];
 		if (*cand) {
 			snprintf(t, sizeof t, "%s, on trial (%s tries left)", cand, *tries ? tries : "?");
 			kv("STARTS NEXT", t);
