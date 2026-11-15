@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Host test of scripts/pool-image without a stage build. A fixture repository and a fake
 # kernel export (as in test-materialize.sh), two fixture bases made by scripts/materialize
-# (A, then B with A as its parent, so B has a delta from A), and a fake ram environment.
-# It checks: the release folder and release.json (format 1, the installer's rules for an
-# entry: plain path, 64 lower-case hex, size; kind, min_partition_bytes, the missing
-# roles), the pool image is small (not the partition), mounts read-only with
+# (A, then B with A as its parent, so B has a delta from A), a fake ram environment and
+# recovery export, and a fake boot loader and layout the fixture target pins (file:// URLs
+# in its release.conf). It checks: the release folder and release.json (format 1, the
+# installer's rules for an entry: plain path, 64 lower-case hex, size; kind,
+# min_partition_bytes, nothing missing), the boot loader taken from --boot-loader and the
+# layout fetched from its URL; a boot loader or layout that isn't the pinned one, and
+# --boot-loader for a target without pins, refused before anything is made; a target
+# without pins and without --ramenv / --recovery names those roles missing; the pool image is small (not the partition), mounts read-only with
 # bases/<A> read-only and carrying the base record's received UUID, modules/<release>,
 # state/format and the install marker; then, on a copy grown to min_partition_bytes as the
 # first start does, B's INCREMENTAL stream (base.from-A, as materialize made it) receives
@@ -59,6 +63,19 @@ head -c 2097152 /dev/urandom > "$RE/ramenv/$RID.img"
 printf 'format=1\nid=%s\ndevice=fixture\nkernel=%s\nsize=2097152\nsha256=%s\n' $RID $REL \
 	"$(sha256sum < "$RE/ramenv/$RID.img" | cut -c1-64)" > "$RE/ramenv/$RID.manifest"
 
+# --- a fake recovery export, and the boot loader and layout the fixture target pins
+RC=$O/recovery; mkdir -p "$RC/recovery"; CID=00000000000000cc
+head -c 3145728 /dev/urandom > "$RC/recovery/$CID.img"
+printf 'format=1\nid=%s\ndevice=fixture\nkernel=%s\nsize=3145728\nsha256=%s\nrole=recovery\n' $CID $REL \
+	"$(sha256sum < "$RC/recovery/$CID.img" | cut -c1-64)" > "$RC/recovery/$CID.manifest"
+PIN=$O/pinned; mkdir -p "$PIN"
+head -c 145592 /dev/urandom > "$PIN/abl.elf"; head -c 145592 /dev/urandom > "$PIN/other.elf"
+printf '{"sector": 512, "entries": 64}\n' > "$PIN/layout.json"; printf '{"sector": 4096}\n' > "$PIN/other.json"
+cp -r "$R" "$O/repo-nopins"
+printf 'BOOT_LOADER_URL=file://%s\nBOOT_LOADER_SHA256=%s\nBOOT_LOADER_PART_SIZE=1048576\nLAYOUT_URL=file://%s\nLAYOUT_SHA256=%s\n' \
+	"$PIN/abl.elf" "$(sha256sum < "$PIN/abl.elf" | cut -c1-64)" "$PIN/layout.json" "$(sha256sum < "$PIN/layout.json" | cut -c1-64)" \
+	> "$R/targets/fixture/release.conf"
+
 # --- boot: the commit this repository pins (BOOT_COMMIT), or a checkout given
 if [ -n "${POOL_TEST_BOOT:-}" ]; then
 	BOOT=$(cd "$POOL_TEST_BOOT" && pwd)
@@ -94,14 +111,22 @@ PI() { "$P/scripts/pool-image" --repo "$R" "$@"; }
 PI --build 20260101-100000 --boot "$NOINIT" --out "$O/rel-noinit" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
 check "boot without the init verb: exit 1, named, nothing left" "[ $rc = 1 ] && grep -q 'no init verb' '$O/o' && [ ! -e '$O/rel-noinit' ] && [ -z \"\$(ls -A '$O' | grep '^\.rel-noinit')\" ]"
 
+# --- pins: wrong bytes and options a target can't check are refused before anything is made
+PI --build 20260101-100000 --boot "$BOOT" --boot-loader "$PIN/other.elf" --out "$O/rel-x" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a boot loader that isn't the pinned one: exit 1, named, nothing left" "[ $rc = 1 ] && grep -q 'boot-loader: .*not the file the target pins' '$O/o' && [ ! -e '$O/rel-x' ] && [ -z \"\$(ls -A '$O' | grep '^\.rel-x')\" ]"
+PI --build 20260101-100000 --boot "$BOOT" --layout "$PIN/other.json" --out "$O/rel-x" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a layout that isn't the pinned one: exit 1, named" "[ $rc = 1 ] && grep -q 'partition-layout: .*not the file the target pins' '$O/o' && [ ! -e '$O/rel-x' ]"
+"$P/scripts/pool-image" --repo "$O/repo-nopins" --build 20260101-100000 --boot "$BOOT" --boot-loader "$PIN/abl.elf" --out "$O/rel-x" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "--boot-loader for a target without pins: exit 1" "[ $rc = 1 ] && grep -q 'no pins' '$O/o' && [ ! -e '$O/rel-x' ]"
+
 # --- the release of build A
-out=$(PI --build 20260101-100000 --boot "$BOOT" --ramenv "$RE" --out "$O/rel" "$A" fixture 2>&1) && rc=0 || rc=$?
+out=$(PI --build 20260101-100000 --boot "$BOOT" --ramenv "$RE" --recovery "$RC" --boot-loader "$PIN/abl.elf" --out "$O/rel" "$A" fixture 2>&1) && rc=0 || rc=$?
 echo "$out" | sed 's/^/    /'
 check "pool-image: exit 0" "[ $rc = 0 ]"
 check "release folder: release.json, base, kernel, ram environment, nothing temporary" "[ -s '$O/rel/release.json' ] && [ -s '$O/rel/base/$IDA.pool.img' ] && [ -s '$O/rel/kernel/$IMG.img' ] && [ -s '$O/rel/ram-environment/$RID.img' ] && [ -z \"\$(find '$O/rel' -name '.*' -o -name '*.tmp' -o -name o)\" ] && [ -z \"\$(ls -A '$O' | grep '^\.rel\.')\" ]"
-python3 -I - "$O/rel" "$IDA" "$IMG" "$RID" "$(v received_uuid "$BA/manifest")" > "$O/json.log" 2>&1 <<'EOF' && jrc=0 || jrc=$?
+python3 -I - "$O/rel" "$IDA" "$IMG" "$RID" "$(v received_uuid "$BA/manifest")" "$CID" "$PIN" > "$O/json.log" 2>&1 <<'EOF' && jrc=0 || jrc=$?
 import hashlib, json, os, re, sys
-d, ida, img, rid, ruuid = sys.argv[1:]
+d, ida, img, rid, ruuid, cid, pin = sys.argv[1:]
 r = json.load(open(os.path.join(d, 'release.json')))
 assert r['release_format'] == 1, r['release_format']
 plain = lambda p: p and not p.startswith('/') and '\\' not in p and ':' not in p and all(c not in ('', '.', '..') for c in p.split('/'))
@@ -112,7 +137,7 @@ for role, e in r['artifacts'].items():
     assert len(b) == e['size'], (role, len(b), e['size'])
     assert hashlib.sha256(b).hexdigest() == e['sha256'], role
     assert isinstance(e['min_partition_bytes'], int) and e['min_partition_bytes'] >= e['size'], role
-assert sorted(r['artifacts']) == ['base', 'kernel', 'ram-environment'], sorted(r['artifacts'])
+assert sorted(r['artifacts']) == ['base', 'boot-loader', 'kernel', 'partition-layout', 'ram-environment', 'recovery'], sorted(r['artifacts'])
 b = r['artifacts']['base']
 assert b['kind'] == 'btrfs-pool-image' and b['file'] == f'base/{ida}.pool.img' and b['base'] == ida, b
 assert b['received_uuid'] == ruuid, b
@@ -122,13 +147,23 @@ k = r['artifacts']['kernel']
 assert k['kind'] == 'raw-image' and k['file'] == f'kernel/{img}.img' and k['min_partition_bytes'] == 67108864, k
 e = r['artifacts']['ram-environment']
 assert e['kind'] == 'raw-image' and e['file'] == f'ram-environment/{rid}.img', e
-assert r['missing'] == ['boot-loader', 'partition-layout', 'recovery'], r['missing']
+l = r['artifacts']['boot-loader']
+assert l['kind'] == 'raw-image' and l['file'] == 'boot-loader/abl.elf' and l['min_partition_bytes'] == 1048576, l
+assert l['url'] == f'file://{pin}/abl.elf' and open(os.path.join(d, l['file']), 'rb').read() == open(f'{pin}/abl.elf', 'rb').read(), l
+y = r['artifacts']['partition-layout']
+assert y['kind'] == 'gpt-recipe' and y['file'] == 'partition-layout/layout.json' and y['min_partition_bytes'] == y['size'], y
+assert json.load(open(os.path.join(d, y['file']))) == {'sector': 512, 'entries': 64}, y
+c = r['artifacts']['recovery']
+assert c['kind'] == 'raw-image' and c['file'] == f'recovery/{cid}.img' and c['recovery'] == cid and c['min_partition_bytes'] == c['size'], c
+assert r['missing'] == [], r['missing']
 assert r['build'] == '20260101-100000' and r['target'] == 'fixture'
 assert r['trial'] is True and any(w.startswith('boot:') for w in r['trial_reasons']), r
 print('base size', b['size'], 'min', b['min_partition_bytes'])
 EOF
 sed 's/^/    /' "$O/json.log"
-check "release.json: format 1, entries by the installer's rules, kinds, min_partition_bytes, missing roles, trial boot:" "[ $jrc = 0 ]"
+check "release.json: format 1, entries by the installer's rules, kinds, min_partition_bytes, all six roles, trial boot:" "[ $jrc = 0 ]"
+"$P/scripts/pool-image" --repo "$O/repo-nopins" --build 20260101-100000 --boot "$BOOT" --out "$O/rel-nopins" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a target without pins, no --ramenv, no --recovery: those roles missing" "[ $rc = 0 ] && python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); assert r[\"missing\"] == [\"ram-environment\", \"boot-loader\", \"partition-layout\", \"recovery\"], r[\"missing\"]; assert sorted(r[\"artifacts\"]) == [\"base\", \"kernel\"]' '$O/rel-nopins/release.json'"
 PI --build 20260101-100000 --boot "$BOOT" --out "$O/rel" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
 check "an existing --out: exit 1" "[ $rc = 1 ] && grep -q exists '$O/o'"
 
