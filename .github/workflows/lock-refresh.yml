@@ -1,6 +1,7 @@
 # Refreshes the stage locks every day on a native arm64 runner (scripts/lock.sh) and
 # opens or updates one pull request with what changed: on Mondays for any change, on
-# any day when a change brings a fix listed in Alpine's security database.
+# any day when a change brings a fix listed in Alpine's security database or when a
+# version the current locks name is no longer offered (builds fail until it merges).
 name: lock-refresh
 on:
   schedule:
@@ -44,10 +45,11 @@ jobs:
         run: |
           if git diff --quiet -- stages; then echo "locks unchanged"; exit 0; fi
           kind=$(cat /tmp/locks/kind)
-          if [ "$kind" != security ] && [ "$(date -u +%u)" != 1 ] && [ "$OPEN" != true ]; then
+          if [ "$kind" = routine ] && [ "$(date -u +%u)" != 1 ] && [ "$OPEN" != true ]; then
             echo "routine changes only: the pull request waits for Monday"; exit 0
           fi
           title="Locks: refresh"
+          [ "$kind" = gone ] && title="Locks: refresh, locked versions gone"
           [ "$kind" = security ] && title="Locks: refresh with security fixes"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -60,5 +62,7 @@ jobs:
           else
             gh pr create --head lock-refresh --base main --title "$title" --body-file /tmp/locks/body.md
           fi
-          # a push with this token starts no workflow, so the build is started by hand
-          gh workflow run build.yml --ref lock-refresh
+          # a push or pull request by this token starts no workflow run that executes, so
+          # the checks the pull request would get are started by hand; they run on the
+          # branch's head commit and show on the pull request
+          for w in build.yml boot-qemu.yml safety.yml; do gh workflow run "$w" --ref lock-refresh; done
