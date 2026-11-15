@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# STATUS (docs/recovery.md): the recovery's identity, then glassine-deploy's status and
+# list, in its porcelain. Reads only: glassine-deploy mounts the system partition
+# read-only and reads userdata with debugfs.
+. /lib/glassine-recovery/common.sh
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+compat=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n 1)
+serial=$(tr -d '\0' < /proc/device-tree/serial-number 2>/dev/null)
+cid=$(cat /sys/class/mmc_host/*/mmc*/cid 2>/dev/null | head -n 1)
+echo "recovery boot=${RECOVERY_BOOT_COMMIT:-unknown} device=${RECOVERY_DEVICE:-unknown} build=${RECOVERY_BUILD:-unknown}"
+echo "kernel $(uname -r)"
+echo "machine ${model:-unknown}"
+echo "compatible ${compat:-unknown}"
+echo "serial ${serial:-unknown}"
+echo "emmc-cid ${cid:-none}"
+echo "system ${SYSTEM_DEV:-none}"
+echo "userdata ${USERDATA_DEV:-none}"
+a=''
+for x in select rollback reset reset-full remove pin; do offered "$x" && a="$a $x"; done
+echo "actions${a}"
+out=$("$GD" status --porcelain 2>&1); rc=$?
+echo "status-exit $rc"
+printf '%s\n' "$out"
+out=$("$GD" list --porcelain 2>&1); rc=$?
+echo "list-exit $rc"
+printf '%s\n' "$out"
+exit 0
