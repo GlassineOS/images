@@ -9,3 +9,10 @@ musl-dev
 linux-headers
 cpio
 gzip
+# the screen (docs/recovery.md, "The screen"): glassine-epdd's static daemon and its
+# frame protocol's header; the shell's IBM Plex and FreeType, to rasterize the screen's
+# type at the build (none of these four is in the image but the daemon)
+glassine-epdd
+glassine-epdd-dev
+glassine-shell-fonts
+freetype-dev
