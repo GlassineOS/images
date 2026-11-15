@@ -45,7 +45,7 @@ applets="sh mount mkdir ls head sleep kill reboot cat"
 # glassine-deploy and the recovery's tools
 [ -z "$BOOT" ] || applets="$applets awk sed tr stat readlink mountpoint blkid flock du date find sync dd cp mv rm
 	ln chown chmod cut grep sort uniq tail wc xargs tar gzip sha256sum mktemp setsid dmesg umount touch od
-	printf test expr env id basename dirname rmdir cmp"
+	printf test expr env id basename dirname rmdir cmp uname"
 # the screen: the recovery's only (the RAM environment reads the same CONF and has none)
 SCREEN=$(sed -n 's/^RECOVERY_SCREEN=//p' "$CONF" | tail -n 1 | tr -d '"')
 ADAPTER=$(sed -n 's/^RECOVERY_SCREEN_ADAPTER=//p' "$CONF" | tail -n 1 | tr -d '"')
@@ -54,7 +54,7 @@ case $SCREEN in
 '') ;;
 epd)
 	[ -n "$ADAPTER" ] || die "RECOVERY_SCREEN=epd without RECOVERY_SCREEN_ADAPTER (the device package with epd.conf)"
-	applets="$applets insmod uname" ;;
+	;;
 *) die "RECOVERY_SCREEN: epd or empty (is: $SCREEN)" ;;
 esac
 for a in $applets; do

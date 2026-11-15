@@ -9,7 +9,7 @@ The recovery is the [RAM environment](ramenv.md) plus deployments, resets, diagn
 console. Spec 008 says "the RAM environment is the recovery without its screen, deployments
 and resets". So it is built here from the same sources:
 
-- the same kernel, device tree and packer;
+- the same device tree and packer, with its own kernel ([below](#the-kernel));
 - the same daemon, `glassine-ramread`, compiled with `-DGLASSINE_RECOVERY`;
 - the same init;
 - the same device config.
@@ -25,7 +25,7 @@ reaches it over the vendor interface. The screen has run in QEMU only (no panel 
 
 ```
 alpine → recovery (+ boot-src at BOOT_COMMIT) ──────────────┐
-kernel-export + dtb-export + boot-src ───────────────────────┴→ recovery-boot → recovery-export
+recovery-kernel-export + dtb-export + boot-src ──────────────┴→ recovery-boot → recovery-export
                                                                  recovery/<id>.img, <id>.manifest
 ```
 
@@ -35,8 +35,9 @@ kernel-export + dtb-export + boot-src ──────────────
 | `ramenv/init` | the RAM environment's init; with `/etc/glassine/recovery.version` it also does the recovery's part (below) |
 | `ramenv/recovery/status`, `describe`, `deploy`, `diag` | the tools the core runs (busybox `sh`): glassine-deploy's state, what an action does, the action, the diagnostics |
 | `ramenv/recovery/menu`, `glassine-rcall.c` | the console: a text menu, and its client of the core |
-| `ramenv/recovery/screen/` | the screen: `glassine-rscreen.c` (its client), `font-gen.c` (its type, at build time), `start` (modules, waveform, programs) |
+| `ramenv/recovery/screen/` | the screen: `glassine-rscreen.c` (its client), `font-gen.c` (its type, at build time), `start` (waveform, programs) |
 | `ramenv/build.sh --recovery BOOT COMMIT` | the initramfs: the RAM environment's, plus the above, plus glassine-deploy |
+| `stages/kernel-sdm660recovery/` | its kernel's configuration ([below](#the-kernel)) |
 | `scripts/ramenv-bootimg.sh` (`ROLE=recovery`) | the boot image, packed like the RAM environment's, into `recovery/` |
 | `stages/recovery/packages`, `lock` | the locked build tools and the binaries copied in (e2fsprogs, btrfs-progs) |
 
@@ -56,15 +57,71 @@ On the Note Air the initramfs is about 3.4 MB with the screen (2.8 MB without), 
 0.7 MB for the RAM environment's; the boot image stays well inside the 64 MiB `recovery`
 partition.
 
-The system kernel at the pinned commit has everything the core uses built in: USB
-gadget, FunctionFS and the ACM function, btrfs, ext4, overlayfs, the qcom watchdog,
-ramoops (checked in that kernel's `modules.builtin`). Only the screen needs modules: the
-panel link and the touchscreen are modules in that kernel. `scripts/ramenv-bootimg.sh`
-packs the device's `RECOVERY_SCREEN_MODULES` and what they depend on (from the kernel
-export's `modules.dep`) into the image, under `/lib/modules/<release>/` with their load
-order in `recovery-screen.list`, and names them and their sha256 in the manifest
-(`screen_modules=`, `screen_modules_sha256=`). The screen's start script loads them; the
-core loads none. The RAM environment still loads no module.
+## The kernel
+
+The recovery has its own kernel (GlassineOS/boot spec 008, FR-014), from the system
+kernel's source at the same commit (`LINUX_SDM660`), with everything built in: it loads
+no modules, its image carries none, and it carries no firmware.
+
+    docker buildx build --platform linux/arm64 --target recovery-kernel-export -o type=local,dest=out .
+    scripts/kernel-check --stage kernel-sdm660recovery --partial out
+    scripts/kernel-repro.sh --recovery repro     # two builds, the second from scratch: same bytes
+
+Its configuration is the system kernel's with nothing as a module
+(`stages/kernel-sdm660recovery/`):
+
+1. the system kernel's defconfig and fragments (`kernel`: the same as
+   `stages/kernel-sdm660/kernel`);
+2. every option they make a module is left out (`modules=no`: `scripts/kernel.sh` turns
+   each `=m` off before anything else is merged; with `CONFIG_MODULES` off, kconfig would
+   build each one in);
+3. `build.config`: modules off, what the recovery needs built in by name, and what it
+   leaves out though the system kernel builds it in.
+
+Built in, and checked by name (`build.config`; the build fails if one is missing, and
+`scripts/kernel-check` checks them again in the configuration the kernel carries): the
+eMMC (sdhci-msm), ext4, btrfs with crc32c, vfat, device mapper with dm-crypt (xts, the
+AES instructions, and the crypto API's user interface for cryptsetup's keyslots), the USB
+controller (dwc3 with its qcom glue and the QUSB2 PHY) with the configfs gadget,
+FunctionFS and ACM, the display controller with DSI, the panel's link, udmabuf and the
+system dma-buf heap (glassine-epdd), the frontlight (lm3630a), the touchscreen (cyttsp5,
+with crc-itu-t), the power key (pm8941-pwrkey), evdev, the fuel gauge and charger (the
+panel's temperature is the battery's), the qcom watchdog and ramoops. The shared-GPIO
+proxy too: a module in the system kernel by its default, built in so the users of a
+shared line don't wait for it. Of the system kernel's modules, only those are built in;
+the build log lists what is built in beyond the system kernel (those, and what they
+select).
+
+Left out, with the system kernel's modules: WiFi, Bluetooth, the modem, the audio DSP and
+sound, the cameras and video, every remote processor, and so everything that needs vendor
+firmware; also the pen's digitizer (HID over I2C; the screen takes the finger), the
+PMIC's ADC and temperature alarms, the hardware RNG and the RPM statistics. Of the board's
+enabled device-tree nodes, those are the only ones the system kernel has a driver for and
+this one doesn't (the charger's current and voltage readings come from the RRADC, which
+is built in). Also left out though the system kernel builds them in: debug information,
+hibernation (the recovery never resumes or writes an image of the system), the
+firmware helper (a file the recovery doesn't carry fails at once), XFS, F2FS, SquashFS,
+exFAT, MD, NBD, binder and netfilter.
+
+The device tree is the system's (`dtb-export`), unchanged. Its GPU node stays: the GPU's
+driver asks for its microcode at the display's first open, gets no file, and the display
+goes on without it (glassine-epdd draws on the CPU).
+
+Its export is `modules/<release>/` (`Image.gz`, `modules.builtin`,
+`modules.builtin.modinfo`, an empty `firmware/` and `kernel.manifest`), with the release
+`<KERNELVERSION>-sdm660recovery.<cfg6>-g<commit12>`. The device's
+`RECOVERY_KERNEL` (`sdm660recovery`) names its flavor, and the boot image stage refuses a
+kernel of another flavor or one with modules. It is not in the registry: only the
+recovery's boot image reads it. The `kernel` workflow builds and checks it, and on `main`
+builds it again from scratch and compares.
+
+On the Note Air, `Image.gz` is about 10.8 MB and the recovery image about 14.3 MB, of the
+64 MiB `recovery` partition.
+
+The RAM environment keeps the system kernel: it is what the installer has run against,
+and it needs nothing the system kernel lacks. A release whose `recovery` role is this
+image ([below](#one-image-for-install-and-recovery)) starts the recovery's kernel during
+an install too.
 
 ## One image for install and recovery
 
@@ -341,13 +398,15 @@ seed on the partition `RECOVERY_DEVICE_LABEL` (`vendor_b` on the Note Air; Glass
 `docs/kernel-artifacts.md`, "Device data") with debugfs, nothing mounted (FR-001): one
 partition by that name, no journal waiting for a replay, `glassine/manifest` in format 1,
 the file's sha256 as the manifest names it, and the shape of a waveform (its length at
-offset 4). It goes into RAM at the adapter's path under `/run/glassine/device/`. Without
-the seed (a stock partition table, while installing), a matching waveform or the modules
-there is no screen; the core, USB and the console go on.
+offset 4). It goes into RAM at the adapter's path under `/run/glassine/device/`. The waveform is the only file of the device's the recovery reads for the screen; it is
+allowed under FR-014 because it is read at run time, read-only, into memory, and never
+part of the image. Without the seed (a stock partition table, while installing) or a
+matching waveform there is no screen; the core, USB and the console go on.
 
 `ramenv/init` starts `/lib/glassine-recovery/screen` once the core serves, when the
-device's config sets `RECOVERY_SCREEN=epd`. It loads the modules, reads the waveform and
-runs glassine-epdd and glassine-rscreen, each again when it ends.
+device's config sets `RECOVERY_SCREEN=epd`. It reads the waveform and runs glassine-epdd
+and glassine-rscreen, each again when it ends. The panel's link, the touchscreen and the
+power key are built into the kernel.
 
 The device config:
 
@@ -355,7 +414,6 @@ The device config:
 |---|---|
 | `RECOVERY_SCREEN` | `epd` |
 | `RECOVERY_SCREEN_ADAPTER` | `device-onyx-noteair` (the package with `etc/glassine/epd.conf`) |
-| `RECOVERY_SCREEN_MODULES` | `panel_onyx_na1_link cyttsp5` (cyttsp5 pulls in crc-itu-t) |
 | `RECOVERY_DEVICE_LABEL` | `vendor_b` (checked against the board's `DEVICE_PART`) |
 
 No board in GlassineOS/ui covers the recovery yet. The pages follow the shell's white
@@ -591,8 +649,14 @@ These are the RAM environment's rules, with these additions:
 
 Not covered:
 
-- the device's kernel, its UDC, eMMC host and watchdog, the boot loader's recovery
-  path, a device's real pool and logs, Windows' binding of the composite device;
+- the recovery's kernel: it has not booted anywhere. The QEMU runs boot Debian's arm64
+  kernel (`ramenv/test/kit.sh`); the recovery's kernel runs only on the device, and its
+  tests are the build's checks (every option `build.config` names, no module, no
+  firmware; `scripts/kernel-check --stage kernel-sdm660recovery`) and the boot image
+  stage's (flavor, no modules, size). On the device: its UDC, eMMC host and watchdog,
+  the panel's link, DSI, touch and the power key binding at boot instead of at a module's
+  load, and the boot loader's recovery path;
+- a device's real pool and logs, Windows' binding of the composite device; a device's real pool and logs, Windows' binding of the composite device;
 - the installer's client against version 3 (only the pinned bytes tie them);
 - `reset-full` and `discard-hibernation` against the real glassine-deploy (the unit test
   checks their arguments only), and a hibernated pool;
@@ -604,10 +668,9 @@ Not covered:
   connection at once);
 - CI: `scripts/test-ramenv.sh` and `scripts/test-recovery.sh` run by hand, no workflow
   runs them;
-- the screen on the device: the panel, glassine-epdd with the real waveform, the panel
-  link and touchscreen modules loading in the recovery, the touch coordinates' rotation,
-  the power key's driver, how the pages look on e-ink, and the frontlight (not loaded:
-  the page is lit by the room);
+- the screen on the device: the panel, glassine-epdd with the real waveform, the touch
+  coordinates' rotation, how the pages look on e-ink, and the frontlight (its driver is
+  built in, but nothing sets a brightness: the page is lit by the room);
 - a device data seed made by glassine-deploy (the QEMU seed is made by the test).
 
 ## Left for later
@@ -621,5 +684,5 @@ Not covered:
   - the fallback when the boot's tries run out. The Note Air's boot loader starts
     `recovery` only on `oem reboot-recovery`.
 - **Encrypted storage (FR-015).** No unlock yet.
-- **The recovery's own kernel configuration (FR-014).** It uses the system kernel, as the
-  RAM environment does.
+- **The recovery's kernel in the registry.** It is built and checked in CI, but not
+  published under a key like the system kernel's exports.
