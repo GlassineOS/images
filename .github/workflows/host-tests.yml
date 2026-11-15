@@ -4,7 +4,9 @@
 # scripts/git-fetch.sh, and a registry:2 container with a docker-container builder) and
 # scripts/test-materialize.sh (privileged containers with loop devices and btrfs on a
 # tmpfs, and one BuildKit tar export of a fixture tree) and scripts/test-pool-image.sh (the
-# installer's release folder, the pool image and a delta received into it).
+# installer's release folder, the pool image and a delta received into it) and
+# scripts/test-apk-stage.sh (a stage's locked install, in an Alpine container on a
+# made-up repository).
 name: host-tests
 on:
   pull_request:
@@ -26,6 +28,8 @@ on:
       - scripts/registry
       - scripts/git-fetch.sh
       - scripts/kernel-check
+      - scripts/apk-stage.sh
+      - scripts/test-apk-stage.sh
       - Dockerfile
       - targets/**
       - .github/workflows/host-tests.yml
@@ -49,6 +53,8 @@ on:
       - scripts/registry
       - scripts/git-fetch.sh
       - scripts/kernel-check
+      - scripts/apk-stage.sh
+      - scripts/test-apk-stage.sh
       - Dockerfile
       - targets/**
       - .github/workflows/host-tests.yml
@@ -86,3 +92,9 @@ jobs:
       - uses: actions/checkout@v7
       - run: sudo modprobe btrfs
       - run: sh scripts/test-pool-image.sh
+  apk-stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh scripts/test-apk-stage.sh
