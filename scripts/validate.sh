@@ -102,4 +102,33 @@ for l in /etc/runlevels/*/*; do
 done
 # a switch carries what this list names (GlassineOS/boot docs/deployments.md)
 [ -s /usr/share/glassine/migrate.list ] || no "no migrate list (/usr/share/glassine/migrate.list)"
+# the device's partitions agree: glassine-deploy's system and data partitions
+# (deploy.conf), when it names them by partition label, are the ones the initramfs
+# mounts (board.conf)
+b=/etc/glassine-bootimg/board.conf d=/etc/glassine/deploy.conf
+if [ -r "$b" ] && [ -r "$d" ]; then
+	for pair in SYSTEM_DEV:ROOT_PART USERDATA_DEV:USERDATA_PART; do
+		dk=${pair%:*} bk=${pair#*:}
+		bv=$( (. "$b" >/dev/null 2>&1; eval "printf %s \"\${$bk:-}\"") )
+		dv=$( (. "$d" >/dev/null 2>&1; eval "printf %s \"\${$dk:-}\"") )
+		case $dv in /dev/disk/by-partlabel/*)
+			[ -z "$bv" ] || [ "${dv#/dev/disk/by-partlabel/}" = "$bv" ] \
+				|| no "$d: $dk=$dv, but $b has $bk=$bv" ;;
+		esac
+	done
+fi
+# the device's own expectations (stages/device-<name>/expect, mounted by the validation
+# stage when the device has one): FILE KEY=VALUE, FILE read as its programs read it
+e=/run/device-stage/expect
+if [ -r "$e" ]; then
+	while read -r f kv; do
+		case $f in ''|'#'*) continue ;; esac
+		k=${kv%%=*} want=${kv#*=}
+		case $kv in [A-Za-z_]*=*) ;; *) no "$e: not FILE KEY=VALUE: $f $kv"; continue ;; esac
+		case $k in *[!A-Za-z0-9_]*) no "$e: $k is not a variable name"; continue ;; esac
+		[ -r "$f" ] || { no "$f is missing ($e wants $k=$want)"; continue; }
+		got=$( (. "$f" >/dev/null 2>&1; eval "printf %s \"\${$k:-}\"") )
+		[ "$got" = "$want" ] || no "$f: $k is '$got', the device wants '$want' ($e)"
+	done < "$e"
+fi
 exit $fail
