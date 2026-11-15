@@ -6,18 +6,22 @@
 # built).
 #
 # The disks of test-ramenv's runs (vda: 64 MiB, a GPT, two partitions; vdb: 4 MiB; in the
-# usb run QEMU's eMMC with two boot areas) and vdc, a pool disk made here without
-# privileges: a GPT with system_b (btrfs, by mkfs.btrfs --rootdir: bases/base1 a
-# read-only subvolume, state/ naming A current and B previous) and userdata (ext4, by
+# usb run QEMU's eMMC with two boot areas) and a pool disk made here without privileges
+# (pool.img, 512 MiB): a GPT with system_b (btrfs, by mkfs.btrfs --rootdir: bases/base1
+# a read-only subvolume, state/ naming A current and B previous) and userdata (ext4, by
 # mke2fs -d: media/glassine/deployments/A, B, C, A with a log).
-#   usb      the composite gadget (the vendor interface 0 and the USB serial) on
-#            dummy_hcd: the menu answers on the host's /dev/ttyACM0, and client-usb
-#            runs test-ramenv's whole read and write plan (protocol version 2) against
-#            the recovery: the installer's install writes unchanged.
-#   deploy   protocol version 3 over virtio-serial (client-recovery.py deploy):
-#            STATUS, select, rollback, pin, DIAG; disks hashed before and after.
-#   console  the menu on a virtio console (client-recovery.py console): rollback with a
-#            wrong then the right confirmation, reset, diagnostics.
+#   usb      the install case: no pool (a table without system_b and userdata), the
+#            composite gadget (the vendor interface 0 and the USB serial) on dummy_hcd.
+#            The recovery starts without waiting for the labels; the menu answers on
+#            the host's /dev/ttyACM0 with no deployment, a DEPLOY is refused before any
+#            window; client-usb runs test-ramenv's whole read and write plan (protocol
+#            version 2) against the recovery: the installer's install writes unchanged.
+#   deploy   the pool on QEMU's eMMC (mmcblk0, its force_ro too), protocol version 3
+#            over virtio-serial (client-recovery.py deploy): STATUS, select, rollback,
+#            pin, DIAG, disks hashed before and after; then remove.
+#   console  the pool as vdc; the menu on a virtio console (client-recovery.py
+#            console): rollback with a wrong then the right confirmation, reset,
+#            diagnostics.
 # Each run ends by the recovery's idle restart (deploy, console) or the client's reboot
 # (usb). test/check.sh checks in the guest that every disk and partition is read-only.
 # Prints ok/FAIL lines.
@@ -87,13 +91,17 @@ truncate -s 256M $W/sys.img
 mkfs.btrfs -q -r $R/sys -u ro:bases/base1 $W/sys.img
 truncate -s 64M $W/ud.img
 mke2fs -q -t ext4 -d $R/ud $W/ud.img
-truncate -s 400M $W/vdc.img
-sgdisk -o -n 1:2048:+256M -c 1:system_b -n 2:0:+64M -c 2:userdata $W/vdc.img > /dev/null
-S1=$(sgdisk -i 1 $W/vdc.img | sed -n 's/^First sector: \([0-9]*\).*/\1/p')
-S2=$(sgdisk -i 2 $W/vdc.img | sed -n 's/^First sector: \([0-9]*\).*/\1/p')
-dd if=$W/sys.img of=$W/vdc.img bs=512 seek=$S1 conv=notrunc status=none
-dd if=$W/ud.img of=$W/vdc.img bs=512 seek=$S2 conv=notrunc status=none
+# a power of 2: QEMU's eMMC wants one
+truncate -s 512M $W/pool.img
+sgdisk -o -n 1:2048:+256M -c 1:system_b -n 2:0:+64M -c 2:userdata $W/pool.img > /dev/null
+S1=$(sgdisk -i 1 $W/pool.img | sed -n 's/^First sector: \([0-9]*\).*/\1/p')
+S2=$(sgdisk -i 2 $W/pool.img | sed -n 's/^First sector: \([0-9]*\).*/\1/p')
+dd if=$W/sys.img of=$W/pool.img bs=512 seek=$S1 conv=notrunc status=none
+dd if=$W/ud.img of=$W/pool.img bs=512 seek=$S2 conv=notrunc status=none
 SYS_OFF=$((S1 * 512)) SYS_LEN=$((256 * 1048576))
+cp $W/pool.img $W/vdc.img
+head -c 2M /dev/urandom > $W/pmmcb.img
+cat $W/pmmcb.img $W/pool.img > $W/pemmc.img
 A0=$(sha $W/vda.img) B0=$(sha $W/vdb.img) C0=$(sha $W/vdc.img)
 ok "the pool disk: system_b (btrfs, base1 read-only) at $SYS_OFF, userdata (ext4) at $((S2 * 512))"
 
@@ -128,13 +136,14 @@ EOF
 	(cd $T && find . | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | gzip -n) > $W/t/$1.cpio.gz
 	cat /out/recovery.cpio.gz $W/t/$1.cpio.gz > $W/t/$1.initrd
 }
-qemu() {	# qemu RUN [extra args]: the guest, its console to $W/RUN.log
+qemu() {	# qemu RUN [extra args]: the guest, its console to $W/RUN.log; vda, vdb, and vdc
+	# when POOL=vdc
 	r=$1; shift
+	set -- -drive file=$W/vda.img,format=raw,if=virtio -drive file=$W/vdb.img,format=raw,if=virtio \
+		${POOL:+-drive file=$W/vdc.img,format=raw,if=virtio} "$@"
 	timeout 1200 qemu-system-aarch64 -M virt -cpu cortex-a57 -smp 2 -m 1024 -nographic -no-reboot \
 		-kernel /out/Image -initrd $W/t/$r.initrd \
 		-append "console=ttyAMA0 loglevel=6 panic=5 rdinit=/init" \
-		-drive file=$W/vda.img,format=raw,if=virtio -drive file=$W/vdb.img,format=raw,if=virtio \
-		-drive file=$W/vdc.img,format=raw,if=virtio \
 		-device i6300esb -nic none "$@" > $W/$r.log 2>&1
 }
 qtest() {
@@ -166,12 +175,13 @@ RECOVERY_IDLE=300
 RECOVERY_USB_SERIAL=yes
 RECOVERY_TTYS=ttyGS0"
 t0=$(date +%s)
+POOL=
 if qemu usb -device sdhci-pci -drive if=none,id=emmc,file=$W/emmc.img,format=raw \
 	-device emmc,drive=emmc,boot-partition-size=1048576; then ok "usb: the guest ended by itself ($(($(date +%s) - t0)) s)"; else bad "usb: qemu exit (timeout or failure)"; fi
 qtest usb
 grep -aq 'glassine-ramread: the local socket /run/glassine-recovery.sock is open' $W/usb.log && ok "usb: the reader is the recovery's (local socket open)" || bad "usb: the reader is the recovery's"
 grep -aq 'glassine-ramread: reboot (normal) asked by the computer' $W/usb.log && ok "usb: the client's reboot ended it" || bad "usb: the client's reboot ended it"
-for d in vda:$A0 vdb:$B0 vdc:$C0; do
+for d in vda:$A0 vdb:$B0; do
 	n=${d%%:*} h=${d#*:}
 	got=$(sed -n "s/^QTEST disk $n [0-9]* \([0-9a-f]*\).*/\1/p" $W/usb.log | head -n 1)
 	[ "$got" = "$h" ] && ok "usb: $n read whole over USB, sha256 = the image's" || bad "usb: $n read over USB has sha256 ${got:-none}, the image $h"
@@ -179,20 +189,29 @@ done
 cmp -s $W/vda.img $W/vda.want && ok "usb: vda.img = the original plus exactly the planned writes (cmp)" \
 	|| bad "usb: vda.img is not the original plus the planned writes ($(cmp $W/vda.img $W/vda.want 2>&1 | head -n 1))"
 cmp -s $W/emmc.img $W/emmc.want && ok "usb: emmc.img = the original plus exactly the planned write (cmp)" || bad "usb: emmc.img"
-[ "$(sha $W/vdb.img)" = "$B0" ] && [ "$(sha $W/vdc.img)" = "$C0" ] && ok "usb: vdb.img and the pool disk unchanged" || bad "usb: vdb.img or the pool disk changed"
+[ "$(sha $W/vdb.img)" = "$B0" ] && ok "usb: vdb.img unchanged" || bad "usb: vdb.img changed"
+grep -aq 'glassine-ramenv: system partition: none (system_b), userdata: none (userdata)' $W/usb.log \
+	&& ok "usb: no system_b or userdata: the recovery says so and goes on" || bad "usb: the recovery without the labelled partitions"
+st=$(sed -n 's/^\[ *\([0-9]*\)\.[0-9]*\] glassine-ramread: the local socket .* is open.*/\1/p' $W/usb.log | head -n 1)
+dk=$(sed -n 's/^\[ *\([0-9]*\)\.[0-9]*\] glassine-ramenv: starting.*/\1/p' $W/usb.log | head -n 1)
+[ -n "$st" ] && [ -n "$dk" ] && [ $((st - dk)) -le 25 ] && ok "usb: the socket open $((st - dk)) s after the init started (no wait for the labels)" \
+	|| bad "usb: the socket open at ${st:-never} s, init at ${dk:-?} s"
 sgdisk -v $W/vda.img 2>&1 | grep -q 'No problems found' && ok "usb: vda's new partition table is valid (sgdisk -v)" || bad "usb: vda's new partition table"
 A0=$(sha $W/vda.img)
 
 # --- deploy: protocol version 3 over virtio-serial ----------------------------------
 testcpio deploy "$common
+RAMENV_DISKS=\"vd[a-z] mmcblk[0-9] mmcblk[0-9]boot[0-9]\"
 RAMENV_TRANSPORT=stream
 RAMENV_STREAM=/dev/ramread-stream
 RECOVERY_IDLE=20"
 t0=$(date +%s)
-qemu deploy -device virtio-serial-pci -chardev socket,id=rr,path=$W/rr.sock,server=on,wait=off \
+POOL=
+qemu deploy -device sdhci-pci -drive if=none,id=emmc,file=$W/pemmc.img,format=raw \
+	-device emmc,drive=emmc,boot-partition-size=1048576 -device virtio-serial-pci -chardev socket,id=rr,path=$W/rr.sock,server=on,wait=off \
 	-device virtserialport,chardev=rr,name=glassine.ramread &
 qpid=$!
-client deploy $W/rr.sock $W/vda.img $W/vdb.img $SYS_OFF $SYS_LEN
+client deploy $W/rr.sock $W/vda.img $W/vdb.img mmcblk0 $SYS_OFF $SYS_LEN
 t1=$(date +%s)
 if wait $qpid; then
 	t2=$(date +%s)
@@ -211,6 +230,7 @@ RAMENV_TRANSPORT=stream
 RAMENV_STREAM=/dev/ramread-stream
 RECOVERY_IDLE=30
 RECOVERY_TTYS=hvc0"
+POOL=vdc
 qemu console -device virtio-serial-pci -chardev socket,id=rr,path=$W/rc.sock,server=on,wait=off \
 	-device virtserialport,chardev=rr,name=glassine.ramread \
 	-chardev socket,id=con,path=$W/con.sock,server=on,wait=off -device virtconsole,chardev=con &

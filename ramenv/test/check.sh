@@ -59,11 +59,18 @@ if [ -f /etc/glassine/recovery.version ] && [ "${RECOVERY_USB_SERIAL:-}" = yes ]
 		printf '\r' > /dev/ttyACM0
 		i=0
 		while ! $B grep -q '== GlassineOS recovery' /tmp/acm && [ $i -lt 60 ]; do $B sleep 1; i=$((i + 1)); done
-		$B grep -q '== GlassineOS recovery' /tmp/acm && $B grep -q ' current ' /tmp/acm \
-			&& echo "QTEST ok   the menu answers over the USB serial (host /dev/ttyACM0): $($B grep -c . /tmp/acm) lines, the deployments listed" \
+		# the usb run has no pool (the install case): the menu says there is no deployment
+		$B grep -q '== GlassineOS recovery' /tmp/acm && $B grep -q '^Deployments:' /tmp/acm && $B grep -q '  (none)' /tmp/acm \
+			&& echo "QTEST ok   the menu answers over the USB serial (host /dev/ttyACM0): $($B grep -c . /tmp/acm) lines, no deployment listed" \
 			|| echo "QTEST FAIL the menu over the USB serial showed: $($B tr '\n\r' '  ' < /tmp/acm | $B head -c 400)"
 		kill $cpid 2>/dev/null
 	else echo "QTEST FAIL no /dev/ttyACM0: the USB serial function is not there"; fi
+	# no system_b, no userdata: a confirmed DEPLOY is refused by the tools before any
+	# window opens (no partition was made writable: the read-only checks below and the
+	# host's cmp of every image say the same)
+	r=$(printf 'action rollback\nconfirm rollback\n' | /bin/glassine-rcall /run/glassine-recovery.sock deploy -); st=$?
+	[ $st = 10 ] && echo "QTEST ok   without system_b and userdata a confirmed rollback is refused (status 10)" \
+		|| echo "QTEST FAIL without system_b and userdata a confirmed rollback answered $st: $(echo "$r" | $B tr '\n' ' ' | $B head -c 300)"
 fi
 in= out=
 for e in $itf/ep_*; do

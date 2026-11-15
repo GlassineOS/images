@@ -6,16 +6,17 @@ deploy: over the virtio-serial port, protocol version 3 as the installer would s
 it: LIST, STATUS (the pool's deployments A current, B previous, C kept), DEPLOY select
 C (refused without the confirmation, then confirmed), rollback, select A, pin (not
 offered), DIAG (its sha256, its SHA256SUMS, A's log from userdata, every block device
-read-only in the kernel), a version 1 READ; every disk HASHed before and after: vda and
-vdb unchanged, vdc unchanged outside the system partition. Then it says nothing more:
-the recovery's idle time must restart it.
+read-only in the kernel), a version 1 READ; every disk HASHed before and after: the
+others unchanged, the pool disk unchanged outside the system partition. Then remove (A
+refused, C without and with the confirmation). Then it says nothing more: the
+recovery's idle time must restart it.
 
 console: over the virtio console (hvc0) the menu runs on: roll back (a wrong
 confirmation cancels, the right one does it), then a reset, each shown in the
 menu's list afterwards; then nothing more (the idle restart).
 
 Prints QTEST lines; exit 0 = all passed.
-usage: client-recovery.py deploy SOCKET VDA.IMG VDB.IMG SYS_OFFSET SYS_LENGTH
+usage: client-recovery.py deploy SOCKET VDA.IMG VDB.IMG POOL_DISK SYS_OFFSET SYS_LENGTH
        client-recovery.py console SOCKET
 """
 import hashlib, io, socket, struct, sys, tarfile, time
@@ -73,14 +74,14 @@ def records(text, kind):
     return out
 
 
-def deploy_run(path, vda, vdb, sys_off, sys_len):
+def deploy_run(path, vda, vdb, pool, sys_off, sys_len):
     s = connect(path)
     s.settimeout(600)
     st, _, t = ask(s, LIST)
     t = t.decode()
     qt(st == 0 and t.startswith('glassine-ramread 3\n'), 'LIST under version 3 says glassine-ramread 3')
     disks = {l.split()[2]: (int(l.split()[1]), int(l.split()[3])) for l in t.splitlines() if l.startswith('disk ')}
-    qt(set(disks) >= {'vda', 'vdb', 'vdc'}, f'the disks are listed ({" ".join(sorted(disks))})')
+    qt(set(disks) >= {'vda', 'vdb', pool}, f'the disks are listed ({" ".join(sorted(disks))})')
 
     def h(name, off=0, length=None):
         i, size = disks[name]
@@ -93,9 +94,9 @@ def deploy_run(path, vda, vdb, sys_off, sys_len):
                 raise SystemExit(f'QTEST FAIL HASH {name} {o}: status {st}')
             m.update(sha)
         return m.hexdigest()
-    vdc_size = disks['vdc'][1]
-    before = {n: h(n) for n in ('vda', 'vdb')}
-    outside = (h('vdc', 0, sys_off), h('vdc', sys_off + sys_len))
+    others = sorted(n for n in disks if n not in (pool,))
+    before = {n: h(n) for n in others}
+    outside = (h(pool, 0, sys_off), h(pool, sys_off + sys_len))
     for n, img in (('vda', vda), ('vdb', vdb)):
         data = open(img, 'rb').read()
         st, sha, b = ask(s, READ, disks[n][0], 0, 512, version=1)
@@ -111,7 +112,7 @@ def deploy_run(path, vda, vdb, sys_off, sys_len):
        'STATUS: version 3, the connection, a text payload')
     qt('\nrecovery boot=' in t and '\nkernel ' in t and '\nmachine ' in t and '\nemmc-cid ' in t, 'STATUS names the recovery, the kernel and the machine')
     acts = [l for l in t.splitlines() if l.startswith('actions')]
-    qt(acts and {'select', 'rollback', 'reset', 'reset-full'} <= set(acts[0].split()[1:]) and 'pin' not in acts[0],
+    qt(acts and {'select', 'rollback', 'reset', 'reset-full'} <= set(acts[0].split()[1:]) and 'remove' in acts[0] and 'pin' not in acts[0],
        f'STATUS lists the actions this glassine-deploy offers ({acts[0] if acts else "none"})')
     qt('\nstatus-exit 0\n' in t and '\nlist-exit 0\n' in t, 'glassine-deploy status and list ran (exit 0)')
     qt(rec.get('current') == 'A' and rec.get('previous') == 'B' and rec.get('candidate') == '',
@@ -165,12 +166,22 @@ def deploy_run(path, vda, vdb, sys_off, sys_len):
     sysinfo = files.get('system.txt', b'').decode()
     ro = sysinfo.split('read-only (', 1)[-1].split('\n\n', 1)[0].splitlines()[1:]
     flags = dict(l.split() for l in ro if len(l.split()) == 2)
-    vd = {k: v for k, v in flags.items() if k.startswith('vd')}
-    qt(len(vd) >= 5 and all(v == '1' for v in vd.values()), f'after the operations every disk and partition is read-only in the kernel ({vd})')
+    vd = {k: v for k, v in flags.items() if k.startswith(('vd', pool))}
+    qt(len(vd) >= 6 and any(k.startswith(pool + 'p') for k in vd) and all(v == '1' for v in vd.values()),
+       f'after the operations every disk and partition is read-only in the kernel ({vd})')
 
-    qt(all(h(n) == before[n] for n in ('vda', 'vdb')), 'HASH: vda and vdb unchanged by the operations')
-    qt((h('vdc', 0, sys_off), h('vdc', sys_off + sys_len)) == outside,
-       'HASH: vdc unchanged outside the system partition (userdata and the table too)')
+    qt(all(h(n) == before[n] for n in others), f'HASH: {", ".join(others)} unchanged by the operations')
+    qt((h(pool, 0, sys_off), h(pool, sys_off + sys_len)) == outside,
+       f'HASH: {pool} unchanged outside the system partition (userdata and the table too)')
+    st, _, t = ask(s, DEPLOY, payload=b'action remove\nid A\nconfirm remove A\n')
+    qt(st == 10, f'remove A (the current one): the tool refuses (status {st}: {t.decode().strip()[-120:]!r})')
+    st, _, t = ask(s, DEPLOY, payload=b'action remove\nid C\n')
+    qt(st == 9 and t.startswith(b'confirm remove C\n') and b'Delete deployment C' in t, 'remove C without the confirmation: status 9 and what it does')
+    st, _, t = ask(s, DEPLOY, payload=b'action remove\nid C\nconfirm remove C\n')
+    _, _, _, rec, deps = status()
+    qt(st == 0 and set(deps) == {'A', 'B'} and rec.get('current') == 'A',
+       f'remove C confirmed: the list holds A and B ({sorted(deps)}, {t.decode().strip()[-120:]!r})')
+
     s.close()
 
 
@@ -243,8 +254,8 @@ def console_run(path):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 7 and sys.argv[1] == 'deploy':
-        deploy_run(sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6]))
+    if len(sys.argv) == 8 and sys.argv[1] == 'deploy':
+        deploy_run(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]), int(sys.argv[7]))
     elif len(sys.argv) == 3 and sys.argv[1] == 'console':
         console_run(sys.argv[2])
     else:
