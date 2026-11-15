@@ -4,7 +4,11 @@
 # kernel-build image, from the Dockerfile's kernel and device-tree stages:
 #
 #   kernel.sh build   compile the kernel; write /out/modules/<release>/ (Image.gz, the
-#                     modules, depmod's files, firmware/, kernel.manifest)
+#                     modules, depmod's files, firmware/, kernel.manifest). A stage with
+#                     modules=no (the recovery's) gets no module: every option the
+#                     defconfig and fragments make a module is left out before
+#                     build.config, and the tree holds Image.gz, modules.builtin*,
+#                     an empty firmware/ and kernel.manifest
 #   kernel.sh dtb     one device's tree: /out/boot/dtb/<device>@<id>.dtb + .manifest
 #
 # Mounts: /src/linux the source at the pinned commit, with its shallow .git (read-only),
@@ -83,6 +87,8 @@ build() {
 	flavor=$(val flavor /run/stage/kernel)
 	defconfig=$(val defconfig /run/stage/kernel)
 	fragments=$(val fragments /run/stage/kernel)
+	modules=$(val modules /run/stage/kernel)
+	case ${modules:-yes} in yes|no) ;; *) die "/run/stage/kernel: modules is yes or no" ;; esac
 	[ -n "$flavor" ] && [ -n "$defconfig" ] || die "/run/stage/kernel: flavor and defconfig are required"
 	echo "$BUILDER" | grep -qE '^[^@[:space:]]+@sha256:[0-9a-f]{64}$' \
 		|| die "BUILDER is not <image>@sha256:<digest>: $BUILDER"
@@ -91,6 +97,7 @@ build() {
 	fw=$(cd /run/firmware && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
 		printf '%s@%.16s ' "$f" "$(sha "$f")"; done)
 	fw=${fw% }
+	[ "$modules" != no ] || [ -z "$fw" ] || die "modules=no: a kernel without modules carries no firmware ($fw)"
 	# The source goes into the cache by content: a file that didn't change keeps its
 	# mtime, so make rebuilds only what the new commit changed. An empty cache is a full
 	# build with the same result.
@@ -104,6 +111,12 @@ build() {
 	# the configuration, made fresh every time
 	# shellcheck disable=SC2086
 	$M -s $defconfig $fragments >/dev/null
+	if [ "$modules" = no ]; then
+		# every module the configuration made is left out (with MODULES off, kconfig
+		# would build each one in), before build.config builds in what it names
+		grep '=y$' /cache/obj/.config | LC_ALL=C sort > /tmp/had-y
+		sed -i -E 's/^(CONFIG_[A-Za-z0-9_]+)=m$/# \1 is not set/' /cache/obj/.config
+	fi
 	{ cat /run/stage/build.config; echo 'CONFIG_LOCALVERSION=""'
 	  echo '# CONFIG_LOCALVERSION_AUTO is not set'; } >> /cache/obj/.config
 	$M -s olddefconfig >/dev/null
@@ -114,6 +127,15 @@ build() {
 	check_fragments /cache/obj/.config $paths /run/stage/build.config || ok=1
 	grep -qx 'CONFIG_LOCALVERSION=""' /cache/obj/.config || ok=1
 	! grep -q '^CONFIG_LOCALVERSION_AUTO=' /cache/obj/.config || ok=1
+	if [ "$modules" = no ]; then
+		! grep -q '=m$' /cache/obj/.config || { echo "kernel.sh: modules=no, still a module: $(grep '=m$' /cache/obj/.config | head -n 3)" >&2; ok=1; }
+		! grep -q '^CONFIG_MODULES=y' /cache/obj/.config || { echo "kernel.sh: modules=no, but CONFIG_MODULES=y" >&2; ok=1; }
+		# what is built in here and wasn't before: what build.config names, and what
+		# those select
+		new=$(grep '=y$' /cache/obj/.config | LC_ALL=C sort | comm -13 /tmp/had-y - | tr '\n' ' ')
+		echo "kernel.sh: built in beyond the configuration with modules: ${new:-nothing}"
+		rm -f /tmp/had-y
+	fi
 	[ $ok = 0 ] || die "the configuration isn't what the fragments ask for"
 	# the release: <KERNELVERSION>-<flavor>.<cfg6>-g<commit12>, cfg6 over the final
 	# .config followed by the lines builder=, firmware= and layout=
@@ -121,16 +143,26 @@ build() {
 		| sha256sum | cut -c1-6)
 	lv="-$flavor.$cfg6-g$(c12 "$COMMIT")"
 	rel="$($M -s kernelversion)$lv"
-	$M -s -j"${JOBS:-$(nproc)}" LOCALVERSION="$lv" Image.gz modules
+	if [ "$modules" = no ]; then
+		$M -s -j"${JOBS:-$(nproc)}" LOCALVERSION="$lv" Image.gz
+	else
+		$M -s -j"${JOBS:-$(nproc)}" LOCALVERSION="$lv" Image.gz modules
+	fi
 	got=$($M -s LOCALVERSION="$lv" kernelrelease)
 	[ "$got" = "$rel" ] || die "the kernel calls itself $got, expected $rel"
 	o=/out/modules/$rel
 	rm -rf /tmp/mod /out
 	mkdir -p "$o"
-	# stripped modules, depmod run against the tree (-b)
-	$M -s LOCALVERSION="$lv" INSTALL_MOD_PATH=/tmp/mod INSTALL_MOD_STRIP=1 modules_install >/dev/null
-	rm -f "/tmp/mod/lib/modules/$rel/build" "/tmp/mod/lib/modules/$rel/source"
-	cp -a "/tmp/mod/lib/modules/$rel/." "$o/"
+	if [ "$modules" = no ]; then
+		# no module to install: the list of what is built in, as modules_install
+		# would have copied it
+		cp /cache/obj/modules.builtin /cache/obj/modules.builtin.modinfo "$o/"
+	else
+		# stripped modules, depmod run against the tree (-b)
+		$M -s LOCALVERSION="$lv" INSTALL_MOD_PATH=/tmp/mod INSTALL_MOD_STRIP=1 modules_install >/dev/null
+		rm -f "/tmp/mod/lib/modules/$rel/build" "/tmp/mod/lib/modules/$rel/source"
+		cp -a "/tmp/mod/lib/modules/$rel/." "$o/"
+	fi
 	# kbuild gzips with -n, so the checksum doesn't depend on the build time
 	cp /cache/obj/arch/arm64/boot/Image.gz "$o/Image.gz"
 	mkdir -p "$o/firmware"
