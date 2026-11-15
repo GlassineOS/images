@@ -477,6 +477,35 @@ int main(void)
 	usleep(800000); /* the answer leaves first, then the reboot */
 	CHECK(r.status == 0 && rebooted == 0, "local: REBOOT reaches the reboot hook");
 
+	{	/* a client that sends a WRITE header and part of its payload, then stalls
+		 * without going away: it holds the request lock, so the idle reboot can't
+		 * take it; past twice the idle time it reboots anyway, nothing written */
+		uint8_t before[32], after[32];
+		char *img = slurp(disk); /* the first 8 KiB are enough to see a write */
+		struct sha256 hs;
+		sha256_init(&hs); sha256_update(&hs, (uint8_t *)img, 8191); sha256_final(&hs, before);
+		g_armed = ARM_NEVER; g_deployed = 0;
+		c = usb[0];
+		send_req(3, OP_ARM, 430, 0, 0, 17);
+		send_bytes("range 0 0 4096\n\n\n", 17);
+		r = get_rsp();
+		CHECK(r.status == 0, "ARM for the stalled WRITE (%u %s)", r.status, r.data);
+		rebooted = -1;
+		g_idle = 2; g_connect_wait = 2; g_wd_timeout = 3;
+		pthread_t wd;
+		pthread_create(&wd, NULL, watchdog_thread, NULL);
+		uint8_t z[100];
+		memset(z, 0xee, sizeof z);
+		send_req(2, OP_WRITE, 431, 0, 0, 4096);
+		send_bytes(z, sizeof z);
+		long t0 = now_s();
+		while (rebooted < 0 && now_s() - t0 < 30) usleep(100000);
+		CHECK(rebooted == 0 && now_s() - t0 >= 4, "a WRITE whose payload stalls: the idle reboot comes anyway, after twice the idle time (%ld s)", now_s() - t0);
+		img = slurp(disk);
+		sha256_init(&hs); sha256_update(&hs, (uint8_t *)img, 8191); sha256_final(&hs, after);
+		CHECK(!memcmp(before, after, 32), "nothing of the stalled WRITE was written");
+	}
+
 	char cmd[PATH_MAX + 16];
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
 	if (system(cmd)) {}

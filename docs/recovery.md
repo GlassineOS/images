@@ -324,6 +324,20 @@ when the tool ends or is stopped, goes in this order:
    HASH see what the file systems wrote. Every disk and partition is checked read-only
    again, and the check is logged.
 
+Edges, each failing safe:
+
+- a process of the namespace stuck in the kernel (D state) keeps PID 1's exit from
+  completing. The tool then runs into its limit, and the watchdog stops being petted,
+  which resets the device;
+- mounts are told apart by their mount id. If the tool unmounts one of the baseline
+  mounts and the kernel gives its id to a new mount, that mount is taken for a baseline
+  one and stays. If it is on a deploy partition, it is unmounted anyway, by device. If
+  it holds one some other way (an overlay), the exclusive open in step 3 fails, and the
+  close counts as held;
+- the baseline keeps at most 512 mounts (the recovery has about a dozen). Mounts past
+  that would count as the tool's and be unmounted too. One that can't be unmounted
+  makes the close count as held.
+
 If step 2, 3 or 4 fails, the answer says so (status 5 for a tool that exited 0, with a
 warning). STATUS says `deploy partitions held: restart`, and DEPLOY and ARM are refused
 until a restart.
@@ -349,8 +363,13 @@ These are the RAM environment's rules, with these additions:
 - **Idle.** With no request from any client for `RECOVERY_IDLE` (600 s), the recovery
   reboots into the normal start. The boot then picks as always: the candidate if it has
   tries, else current (FR-013, SC-004). Nothing is changed on the way. The idle time
-  starts again when a tool ends, and the idle reboot never cuts into a request that is
-  running (it takes the request lock).
+  starts again when a tool ends, and the idle reboot doesn't cut into a request that is
+  running (it takes the request lock). A request that waits for its client instead
+  holds that lock: a payload that stops coming (a USB host paused mid-WRITE, a hung
+  local client), or an answer nobody reads. So past twice the idle time, with no tool
+  or disk operation running, the recovery reboots anyway. Nothing is written from a
+  payload that didn't arrive whole, and the reboot ends any armed range. The RAM
+  environment's build has no request lock and is unchanged.
 - **The tool limit.** A tool runs in its own PID namespace, with phase "tool": the
   watchdog keeps being petted, and the idle time doesn't count.
   - The tool ends when its first process has ended and its output is closed. Past
@@ -403,6 +422,8 @@ These are the RAM environment's rules, with these additions:
     step, a 1 TiB WRITE ending the connection, while STATUS, DEPLOY, READ and REBOOT
     work;
   - a bad request under version 2 answered with the RAM environment's text;
+  - a WRITE whose payload stalls after 100 bytes, with ranges armed: the idle reboot
+    comes after twice the idle time, and nothing was written;
   - a tool stopped at the limit.
 
   The tools run in a PID namespace there too when the host allows unprivileged user
@@ -463,8 +484,9 @@ Not covered:
 - pstore contents in DIAG (QEMU has no ramoops);
 - the real glassine-deploy stopped at the tool limit (the unit test stops a stand-in);
 - a client that stalls mid-request: a request holds the lock while it reads its
-  payload and answers, so a stalled client holds up the other connection (a local
-  write payload above 16 MiB ends its connection at once);
+  payload and answers, so a stalled client holds up the other connection until the
+  idle reboot, at twice the idle time (a local write payload above 16 MiB ends its
+  connection at once);
 - CI: `scripts/test-ramenv.sh` and `scripts/test-recovery.sh` run by hand, no workflow
   runs them.
 
