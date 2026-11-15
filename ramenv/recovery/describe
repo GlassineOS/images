@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# What a DEPLOY action does, for its confirmation (docs/recovery.md); reads only.
+#   describe ACTION [ID] [discard-hibernation]
+# Exit 0 = the text; 64 = not offered by this glassine-deploy; 1 = it can't be done
+# (the reason).
+. /lib/glassine-recovery/common.sh
+act=$1; shift
+id=''; disc=''
+for x in "$@"; do [ "$x" = discard-hibernation ] && disc=1 || id=$x; done
+offered "$act" || { echo "glassine-deploy (boot ${RECOVERY_BOOT_COMMIT:-?}) has no $act operation"; exit 64; }
+deploy_state
+cur=$(field current "$S_STATUS") prev=$(field previous "$S_STATUS") cand=$(field candidate "$S_STATUS")
+[ -n "$S_STATUS" ] || { echo "glassine-deploy cannot read the deployment state"; exit 1; }
+rec() { printf '%s\n' "$S_LIST" | grep "${TAB}id=$1${TAB}" | head -n 1; }
+case $act in
+select)
+	r=$(rec "$id"); [ -n "$r" ] || { echo "there is no deployment $id"; exit 1; }
+	if [ "$id" = "$cur" ]; then
+		echo "$id is the current deployment: this cancels the candidate${cand:+ $cand}; $id starts next."
+	else
+		echo "Start $id next (base $(field base "$r")). It gets 2 tries; if it does not start, ${cur:-the current one} starts again. Nothing is deleted."
+	fi ;;
+rollback)
+	[ -n "$prev" ] || { echo "there is no previous deployment"; exit 1; }
+	echo "Roll back: $prev (the previous deployment) starts next, with 2 tries; if it does not start, ${cur:-the current one} starts again. A kernel trial is cancelled. Nothing is deleted." ;;
+reset|reset-full)
+	[ -n "$cur" ] || { echo "there is no current deployment to reset"; exit 1; }
+	b=$(field base "$(rec "$cur")")
+	if [ "$act" = reset ]; then
+		echo "Reset system: a new deployment on base ${b:-?} that keeps only the migrate list (accounts, Wi-Fi, Bluetooth, settings). Your packages and edits to the system are not in it. Your home and Flatpak apps stay."
+	else
+		echo "Full reset: a new deployment on base ${b:-?} with nothing carried over (accounts, Wi-Fi, Bluetooth, settings, packages). Your home and Flatpak apps stay."
+	fi
+	echo "It is made now and starts next, with 2 tries; $cur stays on the device to go back to." ;;
+remove)
+	r=$(rec "$id"); [ -n "$r" ] || { echo "there is no deployment $id"; exit 1; }
+	echo "Delete deployment $id from userdata: its packages and its changes to the system are lost."
+	[ "$id" = "$prev" ] && echo "It is the previous deployment: the rollback to it is lost." ;;
+esac
+[ -z "$disc" ] || echo "The hibernated session on userdata is discarded: whatever was open in it is lost."
+exit 0
