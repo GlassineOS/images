@@ -49,21 +49,40 @@ and nothing above it changes.
 
 ## Locks
 
-A stage installs its plain names, then compares everything installed with its `lock`.
-A difference fails the build and says to refresh. The lock is also an input of its
-stage, so a refreshed lock rebuilds that stage and the ones after it. Versions are
-never pinned at install time: `apk add name=version` would write the pin into
-`/etc/apk/world` and block live upgrades.
+A stage installs exactly the versions its `lock` names (`scripts/apk-stage.sh`), so a
+newer version in a repository changes nothing until the locks are refreshed. The pins
+stay out of `/etc/apk/world`: a virtual package holds them during the install, the world
+gets the stage's plain names, and the virtual goes, so a live `apk upgrade` moves on as
+before. The build then compares everything installed with the lock and fails, saying to
+refresh, on any difference (a package the stage pulls in that the lock lacks, a lock
+line nothing needs any more). The lock is also an input of its stage, so a refreshed
+lock rebuilds that stage and the ones after it.
 
     scripts/lock.sh                   # rebuild from scratch, rewrite every lock
 
-A build that fails after Alpine or our repository moved on is expected: refresh the
-locks and review what changed.
+A locked version must still be offered. Our repository keeps every version for 30 days
+after a newer one replaces it, and every version `main`'s locks name (GlassineOS/packages,
+README "Earlier versions"), so our publishes don't break builds. Alpine's repositories
+keep only the newest version of each package: when Alpine updates a locked package, the
+build fails before installing anything, naming the lock line and the versions offered,
+and the locks need a refresh. (Packages the `alpine:3.24` image already carries are
+offered from its installed database; if that tag moves to a new point release, the same
+applies.) A refresh upgrades those too, so a lock never keeps an outdated version just
+because the Alpine image carries it; a check build then installs the newer locked version
+over the image's.
 
-The `lock-refresh` workflow does this every day on an arm64 runner and keeps one pull
-request (branch `lock-refresh`) with the changed packages: on Mondays for any change,
-and on any day when a change brings a fix from Alpine's security database. It can also
-be started by hand. `scripts/lock-diff.sh` writes the pull request's description.
+The `lock-refresh` workflow refreshes every day on an arm64 runner and keeps one pull
+request (branch `lock-refresh`) with the changed packages: on Mondays for any change, and
+on any day when a change brings a fix from Alpine's security database or when a version
+the current locks name is no longer offered (the build is broken until it merges). It
+can also be started by hand. `scripts/lock-diff.sh` writes the pull request's
+description. Runs started by the workflow's own push and pull request don't execute, so
+it starts `build`, `boot-qemu` and `safety` on the branch itself: their results show on
+the branch's commit and in Actions, not in the pull request's checks (closing and
+reopening the pull request starts those).
+
+`scripts/test-apk-stage.sh` tests the install and the comparison in an Alpine container
+on a made-up repository.
 
 ## Building
 

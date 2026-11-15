@@ -5,10 +5,11 @@
 #
 #   alpine → glassine-common → eink → device-<name> → finish → validation → base-export
 #
-# Each stage installs the plain package names in stages/<stage>/packages, then compares
-# the whole installed set with stages/<stage>/lock and fails if they differ
-# (scripts/lock.sh refreshes the locks). Versions are never pinned at install time:
-# `apk add name=version` would write the pin into /etc/apk/world and block live upgrades.
+# Each stage installs exactly the versions stages/<stage>/lock names, then compares the
+# whole installed set with the lock and fails if they differ or if a locked version is
+# no longer offered (scripts/apk-stage.sh; scripts/lock.sh refreshes the locks, and only
+# a refresh moves a version). The pins never reach /etc/apk/world, which holds the plain
+# names of stages/<stage>/packages, so live upgrades move on from the locked versions.
 #
 #   docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
 #

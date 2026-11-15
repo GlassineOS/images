@@ -4,8 +4,10 @@
 # brings a security fix from Alpine's security database (secdb).
 #   scripts/lock-diff.sh OLD_DIR NEW_DIR [OUT_FLAG]
 # OLD_DIR and NEW_DIR hold lock files (any names); packages are compared across all of
-# them. OUT_FLAG (optional) gets "security" or "routine". Runs in an Alpine container
-# (needs apk for version comparison, jq, wget).
+# them. OUT_FLAG (optional) gets "security" (a change brings a fix from Alpine's secdb),
+# "gone" (a version OLD_DIR names is no longer offered by Alpine's or our repository, so
+# builds of the current locks fail) or "routine". Runs in an Alpine container (needs apk
+# for version comparison, jq, wget).
 set -eu
 old=$1 new=$2 flag=${3:-}
 t=$(mktemp -d)
@@ -25,13 +27,20 @@ rel=$(sed -n 's/^\([0-9]*\.[0-9]*\).*/v\1/p' /etc/alpine-release)
 arch=$(apk --print-arch)
 for r in main community; do
 	wget -qO- "https://dl-cdn.alpinelinux.org/alpine/$rel/$r/$arch/APKINDEX.tar.gz" | tar -xzO APKINDEX
-done | awk -F: '/^P:/{p=$2} /^o:/{print p, $2}' | LC_ALL=C sort -u > "$t/origins"
+done > "$t/alpine"
+awk -F: '/^P:/{p=$2} /^o:/{print p, $2}' "$t/alpine" | LC_ALL=C sort -u > "$t/origins"
+# every name=version the repositories offer (ours keeps earlier versions, Alpine's not)
+wget -qO- "https://pkgs.glassine.org/alpine/$rel/glassine/$arch/APKINDEX.tar.gz" | tar -xzO APKINDEX > "$t/ours"
+cat "$t/alpine" "$t/ours" | awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' | LC_ALL=C sort -u > "$t/offered"
+# changed lines of the old locks that are gone (an unchanged line was installable now)
+awk '$2 != "-" {print $1 "=" $2}' "$t/changes" | LC_ALL=C sort | LC_ALL=C comm -23 - "$t/offered" > "$t/gone"
 for r in main community; do
 	wget -qO- "https://secdb.alpinelinux.org/$rel/$r.json"
 done | jq -r '.packages[].pkg as $p | $p.secfixes // {} | to_entries[]
 	| select(.key | test("^[0-9]")) | "\($p.name) \(.key) \(.value | join(","))"' > "$t/secfixes"
 
 security=routine
+[ ! -s "$t/gone" ] || security=gone
 : > "$t/sec"
 while read -r p o n; do
 	[ "$o" != - ] && [ "$n" != - ] || continue
@@ -54,6 +63,12 @@ if [ "$security" = security ]; then
 	echo "|---|---|---|"
 	awk '{k = $1 " " $2 " " $3; if (!(k in c)) c[k] = ""; if ($4 != "") c[k] = (c[k] == "") ? $4 : c[k] "," $4}
 		END {for (k in c) {split(k, f, " "); printf "| `%s` | %s → %s | %s |\n", f[1], f[2], f[3], c[k]}}' "$t/sec" | LC_ALL=C sort
+	echo
+fi
+if [ -s "$t/gone" ]; then
+	echo "**Locked versions no longer offered** (builds of the current locks fail until this merges):"
+	echo
+	sed 's/^/- `/; s/$/`/' "$t/gone"
 	echo
 fi
 echo "| Package | Was | Now |"
