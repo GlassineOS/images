@@ -136,11 +136,11 @@ EOF
 	(cd $T && find . | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | gzip -n) > $W/t/$1.cpio.gz
 	cat /out/recovery.cpio.gz $W/t/$1.cpio.gz > $W/t/$1.initrd
 }
-qemu() {	# qemu RUN [extra args]: the guest, its console to $W/RUN.log; vda, vdb, and vdc
-	# when POOL=vdc
+qemu() {	# qemu RUN [extra args]: the guest, its console to $W/RUN.log; vda, vdb, and
+	# POOL (an image) as vdc
 	r=$1; shift
 	set -- -drive file=$W/vda.img,format=raw,if=virtio -drive file=$W/vdb.img,format=raw,if=virtio \
-		${POOL:+-drive file=$W/vdc.img,format=raw,if=virtio} "$@"
+		${POOL:+-drive file=$POOL,format=raw,if=virtio} "$@"
 	timeout 1200 qemu-system-aarch64 -M virt -cpu cortex-a57 -smp 2 -m 1024 -nographic -no-reboot \
 		-kernel /out/Image -initrd $W/t/$r.initrd \
 		-append "console=ttyAMA0 loglevel=6 panic=5 rdinit=/init" \
@@ -224,13 +224,70 @@ grep -aq 'glassine-ramread: deploy: every disk read-only again (FAILED' $W/deplo
 	|| { grep -aq 'glassine-ramread: deploy: every disk read-only again' $W/deploy.log && ok "deploy: after each operation the reader checked every disk read-only again"; }
 [ "$(sha $W/vda.img)" = "$A0" ] && [ "$(sha $W/vdb.img)" = "$B0" ] && ok "deploy: vda.img and vdb.img unchanged" || bad "deploy: vda.img or vdb.img changed"
 
+# --- window: stand-in deploy tools that misbehave ----------------------------------
+# describe and deploy replaced (later archive entries win): deploy mounts system_b or
+# userdata and writes on (ignoring SIGTERM, in the background, with its output closed,
+# under an overlay and a bind whose mount point has a space), or leaves userdata as
+# swap. After each answer the pool image must not change and the window must have
+# closed (or, for the swap, say it didn't and refuse what follows).
+cp $W/pool.img $W/vdw.img
+testcpio window "$common
+RAMENV_TRANSPORT=stream
+RAMENV_STREAM=/dev/ramread-stream
+RECOVERY_IDLE=30
+RECOVERY_TOOL_LIMIT=5"
+T=$W/t/window; mkdir -p $T/lib/glassine-recovery
+cat > $T/lib/glassine-recovery/describe <<'STUB'
+#!/bin/sh
+echo "stand-in: $*"
+STUB
+cat > $T/lib/glassine-recovery/deploy <<'STUB'
+#!/bin/sh
+. /etc/glassine/deploy.conf
+B=/bin/busybox
+id=$2
+writer() { i=0; while :; do i=$((i + 1)); echo $i > "$1/stand-in-$id"; $B sync; $B sleep 0.2; done; }
+case $id in
+trap) $B mkdir -p /run/w; $B mount -t btrfs "$SYSTEM_DEV" /run/w || exit 3
+	trap '' TERM; echo mounted; writer /run/w ;;
+bg) $B mkdir -p /run/w; $B mount -t btrfs "$SYSTEM_DEV" /run/w || exit 3
+	( writer /run/w ) > /dev/null 2>&1 &
+	echo started ;;
+closeout) exec > /dev/null 2>&1
+	$B mkdir -p /run/w; $B mount -t btrfs "$SYSTEM_DEV" /run/w || exit 3; writer /run/w ;;
+overlay) $B mkdir -p /run/u /run/lo "/run/o x" /run/b; $B mount -t ext4 "$USERDATA_DEV" /run/u || exit 3
+	$B mkdir -p /run/u/up /run/u/wk
+	$B mount -t overlay overlay -o lowerdir=/run/lo,upperdir=/run/u/up,workdir=/run/u/wk "/run/o x" || exit 3
+	$B mount --bind "/run/o x" /run/b || exit 3
+	( writer /run/b ) > /dev/null 2>&1 &
+	echo started ;;
+swap) { $B mkswap "$USERDATA_DEV" && $B swapon "$USERDATA_DEV"; } > /dev/null 2>&1 || { echo "no swap here"; exit 3; }
+	echo swapping ;;
+*) exit 3 ;;
+esac
+STUB
+chmod 755 $T/lib/glassine-recovery/describe $T/lib/glassine-recovery/deploy
+(cd $T && find . | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | gzip -n) > $W/t/window.cpio.gz
+cat /out/recovery.cpio.gz $W/t/window.cpio.gz > $W/t/window.initrd
+POOL=$W/vdw.img
+qemu window -device virtio-serial-pci -chardev socket,id=rr,path=$W/rw.sock,server=on,wait=off \
+	-device virtserialport,chardev=rr,name=glassine.ramread &
+qpid=$!
+client window $W/rw.sock $W/vdw.img $W/window.log
+if wait $qpid; then ok "window: the guest ended by itself"; else bad "window: qemu exit (timeout or failure)"; fi
+qtest window
+grep -aq 'glassine-ramread: deploy: unmounted /run/o x after the tool' $W/window.log && ok "window: the overlay (a mount point with a space) unmounted" \
+	|| bad "window: the overlay was not unmounted by its name"
+grep -aq 'glassine-ramread: deploy: unmounted /run/b after the tool' $W/window.log && ok "window: the bind unmounted" || bad "window: the bind unmounted"
+[ "$(sha $W/vda.img)" = "$A0" ] && [ "$(sha $W/vdb.img)" = "$B0" ] && ok "window: vda.img and vdb.img unchanged" || bad "window: vda.img or vdb.img changed"
+
 # --- console: the menu on hvc0 ------------------------------------------------------
 testcpio console "$common
 RAMENV_TRANSPORT=stream
 RAMENV_STREAM=/dev/ramread-stream
 RECOVERY_IDLE=30
 RECOVERY_TTYS=hvc0"
-POOL=vdc
+POOL=$W/vdc.img
 qemu console -device virtio-serial-pci -chardev socket,id=rr,path=$W/rc.sock,server=on,wait=off \
 	-device virtserialport,chardev=rr,name=glassine.ramread \
 	-chardev socket,id=con,path=$W/con.sock,server=on,wait=off -device virtconsole,chardev=con &
@@ -240,7 +297,7 @@ t1=$(date +%s)
 if wait $qpid; then ok "console: the guest ended by itself ($(($(date +%s) - t1)) s after the last key, idle 30 s)"; else bad "console: qemu exit (timeout or failure)"; fi
 qtest console
 grep -aq 'glassine-ramread: no request for [0-9]* s: rebooting' $W/console.log && ok "console: the idle time restarted it" || bad "console: the idle time restarted it"
-grep -aq 'glassine-ramread: deploy: rollback confirmed (local connection)' $W/console.log && ok "console: the rollback came over the local connection" || bad "console: the rollback came over the local connection"
+grep -aq 'glassine-ramread: deploy: rollback [0-9a-f]\{8\} confirmed (local connection)' $W/console.log && ok "console: the rollback came over the local connection" || bad "console: the rollback came over the local connection"
 
 # --- nothing else changed -----------------------------------------------------------
 [ "$(sha $W/vda.img)" = "$A0" ] && [ "$(sha $W/vdb.img)" = "$B0" ] && ok "vda.img and vdb.img unchanged after all runs" || bad "vda.img or vdb.img changed"

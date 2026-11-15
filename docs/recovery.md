@@ -157,7 +157,7 @@ Every other status means what it means in version 2.
 
 - 1 is a DEPLOY text that doesn't parse, or an action this glassine-deploy doesn't
   offer (the payload starts `not offered: `).
-- 8 is a DEPLOY while ranges are armed.
+- 8 is a DEPLOY once ARM was taken in this start, or an ARM once a DEPLOY ran.
 
 Requests of versions 1 and 2 never see operations 8–10: they are unknown operations
 there. A version-4 request is refused with status 1, answered as version 1.
@@ -168,6 +168,7 @@ there. A version-4 request is refused with status 1, answered as version 1.
 glassine-recovery 3
 connection computer|local
 [writes armed]
+[deploy partitions held: restart]
 recovery boot=<boot commit> device=<device> build=<hash16>
 kernel <uname -r>
 machine <device tree model>
@@ -193,14 +194,21 @@ appears at most once, in any order.
 | Key | Value |
 |---|---|
 | `action` | `select`, `rollback`, `reset`, `reset-full`, `remove`, `pin` |
-| `id` | the deployment (`select`, `remove`, `pin` only): `[A-Za-z0-9._-]+`, not starting with a dot |
+| `id` | the deployment (`select`, `remove`, `pin` only): `[A-Za-z0-9._-]+`, not starting with a dot or a dash |
 | `discard-hibernation` | `yes`: discard a hibernated session on userdata, which glassine-deploy otherwise refuses with exit 4 |
 | `confirm` | the token |
 
-The token is the action, then the id, then `discard-hibernation` when that is asked, one
-space apart: `select 20261101-120000`, `reset-full`, `rollback discard-hibernation`.
+The token is the action, then the id, then `discard-hibernation` when that is asked, then
+the first 8 hex digits of the sha256 of what `describe` said, one space apart:
+`select 20261101-120000 3fa01c2e`, `reset-full 9b0e51d7`, `rollback discard-hibernation
+1db382ab`. The hash ties the confirmation to the state the person was shown. If the
+state changed in between (another client selected a deployment, say), describe says
+something else, the token is another, and the request gets status 9 again with the new
+text.
 
-The core runs `describe` (read-only) for every DEPLOY. It answers like this:
+The core runs `describe` (read-only) for every DEPLOY. Both tools get their arguments by
+position, `ACTION ID|- yes|no` (`-` for no id, `yes` to discard the hibernation), so an
+id can't be taken for a flag. It answers like this:
 
 - an action describe says isn't offered: status 1;
 - a describe that fails (no such deployment, no previous one): status 10;
@@ -290,21 +298,49 @@ The writes that happen go through the file systems glassine-deploy mounts itself
 - `select`, `rollback`: the state on the system partition;
 - `reset`, `remove`: userdata too.
 
-When it ends, or is stopped:
+The window's real exposure is the whole disk that holds those partitions, not just them:
+its whole-disk flags are off while the tool runs, so a writer that opened the whole-disk
+device then could write anywhere on it. Nothing in the recovery does, and the tools are
+the recovery's own.
 
-- whatever is still mounted from those partitions is unmounted;
-- `BLKROSET 1` and `force_ro 1` are set again;
-- each disk's cache is dropped, so READ and HASH see what the file systems wrote;
-- every disk and partition is checked read-only again, and the check is logged.
+The flags alone don't end the window. The kernel checks them when a device is opened or
+mounted, so a file system still mounted rw would keep writing after them. So the close,
+when the tool ends or is stopped, goes in this order:
+
+1. nothing of the tool is left. It runs as the first process of its own PID namespace,
+   so when it ends the kernel kills every process it started, also backgrounded,
+   daemonised and `setsid` ones, before its end is reported. Without PID namespaces it
+   runs in its own process group, which is killed and waited for. That covers fewer
+   cases: a `setsid` child escapes the group.
+2. every mount made since the window opened (file systems, overlays, binds, wherever
+   they are) and every mount of a deploy partition is unmounted, the newest first. A
+   lazy unmount (`MNT_DETACH`) is never used: it would hide a file system that is still
+   alive.
+3. each deploy partition and its disk are proven free: an exclusive open (`O_EXCL`)
+   must succeed. It fails while anything holds them (a mounted file system in any mount
+   namespace, detached or not, a swap area, a device mapper target).
+4. on every served disk, whatever happened above: `BLKROSET 1` on the whole-disk device
+   and on every partition, and `force_ro 1`. Each disk's cache is dropped, so READ and
+   HASH see what the file systems wrote. Every disk and partition is checked read-only
+   again, and the check is logged.
+
+If step 2, 3 or 4 fails, the answer says so (status 5 for a tool that exited 0, with a
+warning). STATUS says `deploy partitions held: restart`, and DEPLOY and ARM are refused
+until a restart.
 
 STATUS, `describe` and DIAG open no window: glassine-deploy reads the system partition
 through its own `ro,rescue=nologreplay` mount, and userdata with `debugfs`.
 
 DEPLOY is refused (status 8) once ARM was taken in this start, armed or disarmed: after
 an install's writes the partition table may have changed, and the deploy partitions found
-at the start may not be what is on the disk now. A restart finds them again. ARM can't
-come while a DEPLOY runs because requests are serialized. So the two kinds of writes
-never overlap.
+at the start may not be what is on the disk now. A restart finds them again. The other
+way round, ARM is refused (status 8) once a DEPLOY opened the window in this start,
+however that window closed: raw writes and file systems the tool used never meet in one
+start. Requests are serialized, so the two kinds of writes never overlap.
+
+The deploy partitions are the partitions with those names on a served disk
+(`RAMENV_DISKS`). When two partitions share a name, neither is used. Each must be a
+partition of a served disk, not of a boot area, or the window doesn't open.
 
 ## Idle, watchdog, limits
 
@@ -312,12 +348,19 @@ These are the RAM environment's rules, with these additions:
 
 - **Idle.** With no request from any client for `RECOVERY_IDLE` (600 s), the recovery
   reboots into the normal start. The boot then picks as always: the candidate if it has
-  tries, else current (FR-013, SC-004). Nothing is changed on the way.
-- **The tool limit.** A tool runs in its own process group, with phase "tool": the
+  tries, else current (FR-013, SC-004). Nothing is changed on the way. The idle time
+  starts again when a tool ends, and the idle reboot never cuts into a request that is
+  running (it takes the request lock).
+- **The tool limit.** A tool runs in its own PID namespace, with phase "tool": the
   watchdog keeps being petted, and the idle time doesn't count.
-  - Past `RECOVERY_TOOL_LIMIT` (900 s) it gets SIGTERM, then SIGKILL 20 s later.
-  - A tool that still hasn't ended 30 s after that is stuck in the kernel. The petting
-    stops, and the hardware resets the device.
+  - The tool ends when its first process has ended and its output is closed. Past
+    `RECOVERY_TOOL_LIMIT` (900 s from its start, whatever it does with its output) it
+    gets SIGTERM, then SIGKILL 20 s later.
+  - A tool that still hasn't ended 30 s after that is stuck in the kernel. So is a tool
+    whose processes can't all be killed. The petting stops, and the hardware resets the
+    device.
+- **The local socket.** An ARM, WRITE or DISARM there with a payload above 16 MiB ends
+  that connection; a smaller one is read and dropped.
 - **The write window** (`BLKROSET`, `force_ro`, unmount) runs under the disk phase and its
   120 s operation limit, like ARM.
 
@@ -336,18 +379,34 @@ These are the RAM environment's rules, with these additions:
   - operations 8–10 refused under versions 1 and 2;
   - STATUS;
   - every refusal of a DEPLOY text (too long, NUL, no action, unknown action, missing,
-    extra or bad id, unknown or repeated key), each running no tool;
+    extra or bad id, an id starting with a dash, unknown or repeated key), each running
+    no tool;
   - status 9 without or with a wrong token (also another id's, another action's, and a
-    token missing `discard-hibernation`), with the token and describe's text;
+    token missing `discard-hibernation`), with the token (its hash computed in the
+    test) and describe's text;
+  - a token from before the state changed (describe now says something else): status
+    9 and a new token;
+  - an id named `discard-hibernation` reaching describe as the id;
   - pin not offered;
-  - each confirmed action reaching `deploy` with exactly its arguments, once;
+  - each confirmed action reaching `deploy` with exactly its positional arguments, once;
   - a failing tool (status 10, its exit code);
+  - nothing of a tool outlives it: a background child and a `setsid` child stop
+    writing when the answer comes; a child that holds the output doesn't hold a
+    finished tool's answer; a tool that closes its output and goes on is stopped at the
+    limit; output above 256 KiB is cut, the rest intact;
+  - ARM refused after a DEPLOY; DEPLOY refused after a window that didn't close, and
+    STATUS saying so;
   - DEPLOY refused while armed and after DISARM (an unconfirmed one still says what it
     does);
   - DIAG and its sha256;
   - on the local connection: ARM, WRITE (versions 2 and 3) and DISARM refused and kept in
-    step, while STATUS, DEPLOY, READ and REBOOT work;
+    step, a 1 TiB WRITE ending the connection, while STATUS, DEPLOY, READ and REBOOT
+    work;
+  - a bad request under version 2 answered with the RAM environment's text;
   - a tool stopped at the limit.
+
+  The tools run in a PID namespace there too when the host allows unprivileged user
+  namespaces. Without them the `setsid` check is skipped, and the test says so.
 - QEMU (`ramenv/test/qemu-recovery.sh`, arm64 virt, the RAM environment test's Debian
   kernel). A pool disk is made without privileges: a GPT with `system_b`
   (btrfs from `mkfs.btrfs --rootdir`, `bases/base1` a read-only subvolume, `state/` naming
@@ -376,6 +435,16 @@ These are the RAM environment's rules, with these additions:
     - remove: A (current) refused by the tool (status 10); C: status 9 without the
       confirmation, then done, and the list holds A and B.
     - The idle restart.
+  - `window`: the pool as a virtio disk, with stand-in `describe` and `deploy` tools
+    and a 5 s tool limit, against the real daemon and kernel. Each stand-in mounts
+    `system_b` or userdata and writes and syncs on: one ignores SIGTERM, one leaves a
+    writer in the background and exits, one closes its output first, and one leaves
+    an overlay on userdata with a bind, at a mount point with a space. After each answer
+    the pool image (hashed on the host) doesn't change for 8 s. The window closed
+    cleanly: every mount was unmounted by name, and STATUS doesn't say held. ARM is
+    refused after the first DEPLOY. The last stand-in makes userdata a swap area, an
+    exclusive holder no unmount ends: status 5 with a warning, STATUS says held, and
+    the next DEPLOY is refused until a restart.
   - `console`: the pool as a virtio disk; the menu on a virtio console.
     - rollback: a wrong token cancels, the right one does it.
     - reset: `reset --now` makes a new deployment, the candidate.
@@ -393,8 +462,9 @@ Not covered:
   checks their arguments only), and a hibernated pool;
 - pstore contents in DIAG (QEMU has no ramoops);
 - the real glassine-deploy stopped at the tool limit (the unit test stops a stand-in);
-- a client that stalls mid-request: a request holds the lock while it reads its payload and answers,
-  so a stalled client holds up the other connection until its operation limit;
+- a client that stalls mid-request: a request holds the lock while it reads its
+  payload and answers, so a stalled client holds up the other connection (a local
+  write payload above 16 MiB ends its connection at once);
 - CI: `scripts/test-ramenv.sh` and `scripts/test-recovery.sh` run by hand, no workflow
   runs them.
 

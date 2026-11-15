@@ -1,18 +1,20 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
 # What a DEPLOY action does, for its confirmation (docs/recovery.md); reads only.
-#   describe ACTION [ID] [discard-hibernation]
+#   describe ACTION ID|- yes|no     (the id, - for none; yes = discard the hibernation)
 # Exit 0 = the text; 64 = not offered by this glassine-deploy; 1 = it can't be done
-# (the reason).
+# (the reason). The text is what the person confirms: the daemon puts a hash of it
+# into the confirmation token, so it names the state it is about.
 . /lib/glassine-recovery/common.sh
-act=$1; shift
-id=''; disc=''
-for x in "$@"; do [ "$x" = discard-hibernation ] && disc=1 || id=$x; done
+[ $# = 3 ] || { echo "usage: describe ACTION ID|- yes|no"; exit 2; }
+act=$1 id=$2 disc=''
+[ "$id" != - ] || id=''
+[ "$3" != yes ] || disc=1
 offered "$act" || { echo "glassine-deploy (boot ${RECOVERY_BOOT_COMMIT:-?}) has no $act operation"; exit 64; }
 deploy_state
 cur=$(field current "$S_STATUS") prev=$(field previous "$S_STATUS") cand=$(field candidate "$S_STATUS")
 [ -n "$S_STATUS" ] || { echo "glassine-deploy cannot read the deployment state"; exit 1; }
-rec() { printf '%s\n' "$S_LIST" | grep "${TAB}id=$1${TAB}" | head -n 1; }
+rec() { printf '%s\n' "$S_LIST" | grep -F "${TAB}id=$1${TAB}" | head -n 1; }
 case $act in
 select)
 	r=$(rec "$id"); [ -n "$r" ] || { echo "there is no deployment $id"; exit 1; }

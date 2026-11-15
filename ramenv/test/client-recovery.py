@@ -17,9 +17,10 @@ menu's list afterwards; then nothing more (the idle restart).
 
 Prints QTEST lines; exit 0 = all passed.
 usage: client-recovery.py deploy SOCKET VDA.IMG VDB.IMG POOL_DISK SYS_OFFSET SYS_LENGTH
+       client-recovery.py window SOCKET POOL.IMG GUEST.LOG
        client-recovery.py console SOCKET
 """
-import hashlib, io, socket, struct, sys, tarfile, time
+import hashlib, io, os, re, socket, struct, sys, tarfile, time
 
 REQ, RSP = struct.Struct('<4sHHIIQQ'), struct.Struct('<4sHHIHHQQ32s')
 LIST, READ, HASH, STATUS, DEPLOY, DIAG = 1, 2, 3, 8, 9, 10
@@ -64,6 +65,18 @@ def ask(s, op, index=0, off=0, length=0, payload=b'', version=3):
     if magic != b'GRRS' or ver != version or rop != op or rtag != tag:
         raise SystemExit(f'QTEST FAIL a response out of step ({magic!r} {ver} {rop} {rtag})')
     return status, sha, exact(s, n)
+
+
+def confirmed(s, payload):
+    """DEPLOY PAYLOAD, then again with the token its status 9 named (the hash of the
+    state the answer described)"""
+    st, sha, t = ask(s, DEPLOY, payload=payload)
+    if st != 9:
+        return st, sha, t
+    tok = t.split(b'\n', 1)[0]
+    if not tok.startswith(b'confirm '):
+        raise SystemExit(f'QTEST FAIL a status 9 without a token: {t[:200]!r}')
+    return ask(s, DEPLOY, payload=payload + tok + b'\n')
 
 
 def records(text, kind):
@@ -123,22 +136,24 @@ def deploy_run(path, vda, vdb, pool, sys_off, sys_len):
 
     st, _, t = ask(s, DEPLOY, payload=b'action select\nid C\n')
     t = t.decode()
-    qt(st == 9 and t.startswith('confirm select C\n') and 'Start C next' in t,
+    qt(st == 9 and re.match(r'confirm select C [0-9a-f]{8}\n', t) and 'Start C next' in t,
        f'select C without the confirmation: status 9, the token and what it does ({t.splitlines()[1] if st == 9 else t})')
     st, _, t = ask(s, DEPLOY, payload=b'action select\nid C\nconfirm select B\n')
     qt(st == 9, 'select C with the token of another id: status 9')
     st, _, rec, _ = (lambda r: (r[0], r[1], r[3], r[4]))(status())
     qt(rec.get('candidate') == '', 'nothing changed: still no candidate')
     st, _, t = ask(s, DEPLOY, payload=b'action select\nid C\nconfirm select C\n')
+    qt(st == 9, 'select C with the token of the old form (no hash): status 9')
+    st, _, t = confirmed(s, b'action select\nid C\n')
     qt(st == 0 and t.startswith(b'exit 0\n'), f'select C confirmed: done ({t.decode().strip()!r})')
     _, _, _, rec, deps = status()
     qt(rec.get('candidate') == 'C' and rec.get('tries') == '2' and deps['C']['state'] == 'candidate',
        f'STATUS: C is the candidate with 2 tries (candidate {rec.get("candidate")!r}, tries {rec.get("tries")!r})')
-    st, _, t = ask(s, DEPLOY, payload=b'action rollback\nconfirm rollback\n')
+    st, _, t = confirmed(s, b'action rollback\n')
     qt(st == 0, f'rollback confirmed: done ({t.decode().strip()!r})')
     _, _, _, rec, _ = status()
     qt(rec.get('candidate') == 'B' and rec.get('current') == 'A', f'STATUS: B (the previous one) is the candidate ({rec.get("candidate")!r})')
-    st, _, t = ask(s, DEPLOY, payload=b'action select\nid A\nconfirm select A\n')
+    st, _, t = confirmed(s, b'action select\nid A\n')
     _, _, _, rec, _ = status()
     qt(st == 0 and rec.get('candidate') == '' and rec.get('current') == 'A', 'select A (current): the candidate is cancelled')
     st, _, t = ask(s, DEPLOY, payload=b'action pin\nid A\nconfirm pin A\n')
@@ -173,11 +188,11 @@ def deploy_run(path, vda, vdb, pool, sys_off, sys_len):
     qt(all(h(n) == before[n] for n in others), f'HASH: {", ".join(others)} unchanged by the operations')
     qt((h(pool, 0, sys_off), h(pool, sys_off + sys_len)) == outside,
        f'HASH: {pool} unchanged outside the system partition (userdata and the table too)')
-    st, _, t = ask(s, DEPLOY, payload=b'action remove\nid A\nconfirm remove A\n')
+    st, _, t = confirmed(s, b'action remove\nid A\n')
     qt(st == 10, f'remove A (the current one): the tool refuses (status {st}: {t.decode().strip()[-120:]!r})')
     st, _, t = ask(s, DEPLOY, payload=b'action remove\nid C\n')
-    qt(st == 9 and t.startswith(b'confirm remove C\n') and b'Delete deployment C' in t, 'remove C without the confirmation: status 9 and what it does')
-    st, _, t = ask(s, DEPLOY, payload=b'action remove\nid C\nconfirm remove C\n')
+    qt(st == 9 and re.match(rb'confirm remove C [0-9a-f]{8}\n', t) and b'Delete deployment C' in t, 'remove C without the confirmation: status 9 and what it does')
+    st, _, t = confirmed(s, b'action remove\nid C\n')
     _, _, _, rec, deps = status()
     qt(st == 0 and set(deps) == {'A', 'B'} and rec.get('current') == 'A',
        f'remove C confirmed: the list holds A and B ({sorted(deps)}, {t.decode().strip()[-120:]!r})')
@@ -220,7 +235,7 @@ def console_run(path):
        'the menu shows the recovery and the deployments')
     c.send('r')
     t = c.until('anything else to cancel: ')
-    qt('Roll back: B' in t and 'Type "rollback"' in t, 'roll back: the menu shows what the core says it does and the token')
+    qt('Roll back: B' in t and re.search(r'Type "rollback [0-9a-f]{8}"', t), 'roll back: the menu shows what the core says it does and the token')
     c.send('roll back')
     t = c.until('back to the menu ')
     qt('Cancelled. Nothing changed.' in t, 'a wrong confirmation cancels')
@@ -228,8 +243,8 @@ def console_run(path):
     m = c.until('> ')
     qt('candidate' not in m, 'nothing changed: no candidate in the list')
     c.send('r')
-    c.until('anything else to cancel: ')
-    c.send('rollback')
+    t = c.until('anything else to cancel: ')
+    c.send(re.search(r'Type "([^"]*)"', t).group(1))
     t = c.until('back to the menu ', 600)
     qt('Done.' in t, 'the confirmed rollback is done')
     c.send('')
@@ -237,8 +252,8 @@ def console_run(path):
     qt(any('B' in l and 'candidate' in l for l in m.splitlines()), 'the list shows B as the candidate')
     c.send('x')
     t = c.until('anything else to cancel: ')
-    qt('Reset system' in t and 'Type "reset"' in t and 'home and Flatpak apps stay' in t, 'reset: what it keeps and loses, the token')
-    c.send('reset')
+    qt('Reset system' in t and re.search(r'Type "reset [0-9a-f]{8}"', t) and 'home and Flatpak apps stay' in t, 'reset: what it keeps and loses, the token')
+    c.send(re.search(r'Type "([^"]*)"', t).group(1))
     t = c.until('back to the menu ', 600)
     qt('Done.' in t, f'the confirmed reset is done{"" if "Done." in t else ": " + t[-800:]}')
     c.send('')
@@ -253,9 +268,82 @@ def console_run(path):
     # nothing more: the idle restart
 
 
+def file_sha(path):
+    m = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for b in iter(lambda: f.read(1 << 20), b''):
+            m.update(b)
+    return m.hexdigest()
+
+
+ARM = 5
+
+
+def window_run(path, pool_img, log):
+    """stand-in deploy tools that misbehave (test/qemu-recovery.sh, window run): after
+    each answer the pool disk's image must not change any more"""
+    # the guest's read-only checks write to every disk (they must fail): not while a
+    # window is open
+    for _ in range(600):
+        if b'QTEST info read-only checks done' in open(log, 'rb').read():
+            break
+        time.sleep(0.2)
+    else:
+        raise SystemExit('QTEST FAIL the guest\'s read-only checks never ended')
+    s = connect(path)
+    s.settimeout(900)
+    st, _, t = ask(s, LIST)
+    disks = {l.split()[2]: int(l.split()[1]) for l in t.decode().splitlines() if l.startswith('disk ')}
+
+    def still(what, wait=8):
+        a = file_sha(pool_img)
+        time.sleep(wait)
+        b = file_sha(pool_img)
+        qt(a == b, f'{what}: nothing reaches the pool disk after the answer ({wait} s)')
+
+    def status_text():
+        return ask(s, STATUS)[2].decode()
+
+    t0 = time.time()
+    st, _, t = confirmed(s, b'action select\nid trap\n')
+    qt(st == 10 and t.startswith(b'exit 124\n') and time.time() - t0 < 120,
+       f'a tool that mounts system_b, ignores SIGTERM and writes on: stopped at the limit (status {st}, {time.time() - t0:.0f} s, {t[:60]!r})')
+    still('trap')
+    qt('deploy partitions held' not in status_text(), 'trap: the window closed cleanly (unmounted, the partitions free)')
+    st, _, t = ask(s, ARM, payload=b'range vda 0 512\n')
+    qt(st == 8 and b'DEPLOY' in t, f'ARM after a DEPLOY in this start: refused (status {st}: {t.decode()!r})')
+
+    t0 = time.time()
+    st, _, t = confirmed(s, b'action select\nid bg\n')
+    qt(st == 0 and time.time() - t0 < 60, f'a tool that leaves a writer in the background: answered (status {st}, {time.time() - t0:.0f} s)')
+    still('bg')
+
+    t0 = time.time()
+    st, _, t = confirmed(s, b'action select\nid closeout\n')
+    qt(st == 10 and t.startswith(b'exit 124\n'), f'a tool that closes its output and writes on: stopped at the limit (status {st}, {time.time() - t0:.0f} s)')
+    still('closeout')
+
+    st, _, t = confirmed(s, b'action select\nid overlay\n')
+    qt(st == 0, f'a tool that leaves an overlay on userdata, a bind and a writer: answered (status {st})')
+    still('overlay')
+    qt('deploy partitions held' not in status_text(), 'overlay: the window closed cleanly (overlay, bind and file systems unmounted)')
+
+    st, _, t = confirmed(s, b'action select\nid swap\n')
+    if st == 10 and b'no swap here' in t:
+        print('QTEST info no swap in this guest (busybox or kernel): the held-partition case is not run', flush=True)
+    else:
+        qt(st == 5 and b'WARNING' in t, f'a tool that leaves userdata as swap (an exclusive holder no unmount ends): status 5 and a warning (status {st}, {t[:200]!r})')
+        qt('deploy partitions held' in status_text(), 'STATUS says the partitions are held')
+        st, _, t = confirmed(s, b'action select\nid bg\n')
+        qt(st == 5 and b'restart first' in t, f'after it, DEPLOY is refused until a restart (status {st})')
+    s.close()
+
+
 if __name__ == '__main__':
     if len(sys.argv) == 8 and sys.argv[1] == 'deploy':
         deploy_run(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6]), int(sys.argv[7]))
+    elif len(sys.argv) == 5 and sys.argv[1] == 'window':
+        window_run(sys.argv[2], sys.argv[3], sys.argv[4])
     elif len(sys.argv) == 3 and sys.argv[1] == 'console':
         console_run(sys.argv[2])
     else:
