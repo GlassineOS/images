@@ -60,10 +60,15 @@ set +f
 if [ -n "$RECOVERY" ]; then
 	# no udev: partitions by their GPT names from sysfs; glassine-deploy gets a
 	# configuration naming the devices themselves
-	part() {	# part LABEL: the /sys/class/block name of the partition named LABEL
-		for u in /sys/class/block/*/uevent; do
-			grep -qx "PARTNAME=$1" "$u" 2>/dev/null && { u=${u%/uevent}; echo "${u##*/}"; return; }
-		done
+	part() {	# part LABEL: the partition named LABEL on a served disk (RAMENV_DISKS);
+		# none when two have that name (another system's disk, a USB stick)
+		f='' n=0
+		for p in $RAMENV_DISKS; do for u in /sys/block/$p/*/uevent; do
+			[ -e "${u%/uevent}/partition" ] && grep -qx "PARTNAME=$1" "$u" 2>/dev/null || continue
+			u=${u%/uevent}; f=${u##*/} n=$((n + 1))
+		done; done
+		[ $n -le 1 ] || { log "$n partitions named $1: none used" >&2; f=''; }
+		echo "$f"
 	}
 	# a served disk there (any match of RAMENV_DISKS)
 	disk_here() {

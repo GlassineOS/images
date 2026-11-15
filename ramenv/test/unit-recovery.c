@@ -11,12 +11,20 @@
  *   - STATUS: the identity lines and the tool's output; a failing tool is status 10;
  *   - DEPLOY: every refusal of the text (too long, read and dropped; NUL; no action; an
  *     unknown action; a missing, extra or bad id; an unknown or repeated key), each
- *     before any tool runs; without the confirmation or with a wrong one: status 9,
- *     the token and what describe said, and deploy never runs; pin (describe exit 64)
- *     is not offered; the right token runs deploy with exactly the action's arguments,
- *     discard-hibernation is its own confirmation; a failing tool is status 10 with its
- *     exit code; DEPLOY is refused (8) once ARM was taken in this start, also after
- *     DISARM (the partition table may have changed);
+ *     before any tool runs (also an id starting with a dash); without the confirmation
+ *     or with a wrong one: status 9, the token (with the hash of what describe said)
+ *     and what describe said, and deploy never runs; a token from another state (describe
+ *     says something else now) is refused; pin (describe exit 64) is not offered; the
+ *     right token runs deploy with exactly the action's arguments, by position (an id
+ *     named discard-hibernation stays an id); discard-hibernation is its own
+ *     confirmation; a failing tool is status 10 with its exit code; DEPLOY is refused
+ *     (8) once ARM was taken in this start, also after DISARM, and ARM once a DEPLOY
+ *     ran; after a window that didn't close, DEPLOY is refused (5);
+ *   - the tools' end: nothing of a tool outlives it (a background child, a setsid'ed
+ *     one), a child holding the output doesn't keep a finished tool's answer, a tool
+ *     that closes its output and goes on is stopped at the limit; a tool's output above
+ *     256 KiB is cut, what is kept intact;
+ *   - a request with a bad magic under version 2: the RAM environment's text;
  *   - DIAG: the file the tool wrote, with its sha256 in the header;
  *   - the local connection: ARM, WRITE, DISARM refused, their bytes read and dropped,
  *     the next request in step; STATUS, DEPLOY, DIAG served there too;
@@ -73,6 +81,39 @@ static struct rsp deploy(uint32_t tag, const char *text)
 	send_bytes(text, strlen(text));
 	return get_rsp();
 }
+
+/* the token of a ST_CONFIRM answer (its first line, `confirm TOKEN`) */
+static const char *token_of(const struct rsp *r)
+{
+	static char t[256];
+	t[0] = 0;
+	if (r->status == ST_CONFIRM && !strncmp(r->data, "confirm ", 8)) sscanf(r->data + 8, "%255[^\n]", t);
+	return t;
+}
+
+/* TEXT without a confirmation, then again with the token the answer named */
+static struct rsp confirmed(uint32_t tag, const char *text)
+{
+	struct rsp r = deploy(tag, text);
+	if (r.status != ST_CONFIRM) return r;
+	char t[1024];
+	snprintf(t, sizeof t, "%sconfirm %s\n", text, token_of(&r));
+	return deploy(tag, t);
+}
+
+/* the token the daemon names for ACTION-TEXT given describe's output */
+static void want_token(char *out, size_t n, const char *head, const char *described)
+{
+	struct sha256 s;
+	uint8_t d[32];
+	sha256_init(&s);
+	sha256_update(&s, (const uint8_t *)described, strlen(described));
+	sha256_final(&s, d);
+	snprintf(out, n, "%s %02x%02x%02x%02x", head, d[0], d[1], d[2], d[3]);
+}
+
+/* the size of a file, -1 = none */
+static long fsize(const char *p) { struct stat st; return stat(p, &st) < 0 ? -1 : (long)st.st_size; }
 
 /* the stand-in tools' log: one line per deploy run */
 static char *slurp(const char *p)
@@ -186,6 +227,9 @@ int main(void)
 		{ "an unknown action", "action format\n", ST_BAD_REQUEST },
 		{ "select without an id", "action select\nconfirm select\n", ST_BAD_REQUEST },
 		{ "an id starting with a dot", "action select\nid .A\nconfirm select .A\n", ST_BAD_REQUEST },
+		{ "an id starting with a dash", "action select\nid -x\n", ST_BAD_REQUEST },
+		{ "an id that is an option", "action remove\nid --full\n", ST_BAD_REQUEST },
+		{ "an id that is a dash", "action remove\nid -\n", ST_BAD_REQUEST },
 		{ "an id with a slash", "action select\nid ../A\n", ST_BAD_REQUEST },
 		{ "an id with a space", "action select\nid A B\n", ST_BAD_REQUEST },
 		{ "rollback with an id", "action rollback\nid A\nconfirm rollback A\n", ST_BAD_REQUEST },
@@ -204,12 +248,29 @@ int main(void)
 		CHECK(r.status == bad[i].want && r.tag == 300 + i && r.length, "DEPLOY refused: %s (status %u)", bad[i].what, r.status);
 	}
 	CHECK(access(logf, F_OK) != 0, "none of the refused DEPLOYs ran the deploy tool");
+	char want[128], text[1024];
 	r = deploy(320, "action select\nid A\n");
-	CHECK(r.status == ST_CONFIRM && !strcmp(r.data, "confirm select A\ndescribe select A\n"),
-	      "DEPLOY without the confirmation: the token's line, then what describe says");
+	want_token(want, sizeof want, "select A", "describe select A no\n");
+	snprintf(text, sizeof text, "confirm %s\ndescribe select A no\n", want);
+	CHECK(r.status == ST_CONFIRM && !strcmp(r.data, text),
+	      "DEPLOY without the confirmation: the token's line (the hash of what describe says), then what describe says (%s)", token_of(&r));
 	r = deploy(321, "action rollback\ndiscard-hibernation yes\n");
-	CHECK(r.status == ST_CONFIRM && !strncmp(r.data, "confirm rollback discard-hibernation\n", 37),
-	      "discard-hibernation is part of the token");
+	want_token(want, sizeof want, "rollback discard-hibernation", "describe rollback - yes\n");
+	CHECK(r.status == ST_CONFIRM && !strcmp(token_of(&r), want), "discard-hibernation is part of the token");
+	r = deploy(325, "action select\nid discard-hibernation\n");
+	CHECK(r.status == ST_CONFIRM && strstr(r.data, "\ndescribe select discard-hibernation no\n"),
+	      "an id named discard-hibernation reaches describe as the id, not the flag");
+	{	/* a token for another state: describe says something else now */
+		r = deploy(326, "action rollback\n");
+		char old[256];
+		snprintf(old, sizeof old, "%s", token_of(&r));
+		tool("describe", "echo \"describe $* (the state moved on)\"\n");
+		snprintf(text, sizeof text, "action rollback\nconfirm %s\n", old);
+		r = deploy(327, text);
+		CHECK(r.status == ST_CONFIRM && strcmp(token_of(&r), old), "a token from before the state changed: status 9, a new token (%s, was %s)", token_of(&r), old);
+		tool("describe", "case $1 in pin) echo 'glassine-deploy has no pin'; exit 64 ;; broken) exit 3 ;; esac\n"
+				 "echo \"describe $*\"\n");
+	}
 	{	/* NUL in the text */
 		static const char t[] = "action rollback\0\nconfirm rollback\n";
 		send_req(3, OP_DEPLOY, 322, 0, 0, sizeof t - 1);
@@ -232,18 +293,91 @@ int main(void)
 	CHECK(access(logf, F_OK) != 0, "still nothing ran");
 
 	/* confirmed */
-	r = deploy(330, "action select\nid 20261101-120000\nconfirm select 20261101-120000\n");
-	CHECK(r.status == 0 && !strcmp(r.data, "exit 0\ndone select 20261101-120000\n"), "DEPLOY select, confirmed: deploy runs, exit 0 and its output");
-	r = deploy(331, "confirm rollback\naction rollback\n");
-	CHECK(r.status == 0, "DEPLOY rollback, confirmed (the lines in any order)");
-	r = deploy(332, "action reset-full\nconfirm reset-full\n");
+	r = confirmed(330, "action select\nid 20261101-120000\n");
+	CHECK(r.status == 0 && !strcmp(r.data, "exit 0\ndone select 20261101-120000 no\n"), "DEPLOY select, confirmed: deploy runs, exit 0 and its output");
+	{
+		r = deploy(331, "action rollback\n");
+		snprintf(text, sizeof text, "confirm %s\naction rollback\n", token_of(&r));
+		r = deploy(331, text);
+		CHECK(r.status == 0, "DEPLOY rollback, confirmed (the lines in any order)");
+	}
+	r = confirmed(332, "action reset-full\n");
 	CHECK(r.status == 0, "DEPLOY reset-full, confirmed");
-	r = deploy(333, "action rollback\ndiscard-hibernation yes\nconfirm rollback discard-hibernation\n");
+	r = confirmed(333, "action rollback\ndiscard-hibernation yes\n");
 	CHECK(r.status == 0, "DEPLOY rollback discarding the hibernation, confirmed");
-	r = deploy(334, "action remove\nid A\nconfirm remove A\n");
+	r = confirmed(334, "action remove\nid A\n");
 	CHECK(r.status == ST_TOOL && !strcmp(r.data, "exit 4\nboom\n"), "a failing tool: status 10, its exit code and output");
-	CHECK(!strcmp(slurp(logf), "select 20261101-120000\nrollback\nreset-full\nrollback discard-hibernation\nremove A\n"),
-	      "deploy ran with exactly the actions' arguments, once each");
+	CHECK(!strcmp(slurp(logf), "select 20261101-120000 no\nrollback - no\nreset-full - no\nrollback - yes\nremove A no\n"),
+	      "deploy ran with exactly the actions' arguments (ACTION ID|- yes|no), once each");
+	/* the recovery runs as root and gets one; here it needs unprivileged user
+	 * namespaces, which some hosts turn off */
+	printf("info the tools ran %s\n", g_tool_ns == 1 ? "in a PID namespace of their own" : "in a process group (no PID namespace here)");
+
+	/* nothing of a tool outlives it */
+	{
+		char bg[1200], bg2[1200], body[8192];
+		snprintf(bg, sizeof bg, "%s/bg", dir);
+		snprintf(bg2, sizeof bg2, "%s/bg2", dir);
+		snprintf(body, sizeof body,
+			 "( while [ -d '%s' ]; do echo x >> '%s'; sleep 0.1; done ) &\n"
+			 "setsid sh -c 'while [ -d \"%s\" ]; do echo x >> \"%s\"; sleep 0.1; done' > /dev/null 2>&1 < /dev/null &\n"
+			 "sleep 0.5; echo started\n", dir, bg, dir, bg2);
+		tool("deploy", body);
+		long t0 = now_s();
+		r = confirmed(336, "action rollback\n");
+		CHECK(r.status == 0 && now_s() - t0 < 10, "a tool that leaves a child behind: answered when it ends (%ld s)", now_s() - t0);
+		long a = fsize(bg), a2 = fsize(bg2);
+		sleep(1);
+		CHECK(a > 0 && fsize(bg) == a, "its background child is gone when the answer comes (%ld then %ld bytes)", a, fsize(bg));
+		if (g_tool_ns == 1) CHECK(a2 > 0 && fsize(bg2) == a2, "a setsid'ed child too (%ld then %ld bytes)", a2, fsize(bg2));
+		else printf("info a setsid'ed child: not checked without a PID namespace\n");
+		tool("deploy", "sleep 60 &\necho quick\n");
+		t0 = now_s();
+		r = confirmed(337, "action rollback\n");
+		CHECK(r.status == 0 && !strcmp(r.data, "exit 0\nquick\n") && now_s() - t0 < 10,
+		      "a child that holds the output doesn't hold a finished tool's answer (status %u, %ld s)", r.status, now_s() - t0);
+		long lim = g_tool_limit;
+		g_tool_limit = 3;
+		tool("deploy", "echo before\nexec > /dev/null 2>&1\nsleep 60\n");
+		t0 = now_s();
+		r = confirmed(338, "action rollback\n");
+		CHECK(r.status == ST_TOOL && !strcmp(r.data, "exit 124\nbefore\n") && now_s() - t0 < 30,
+		      "a tool that closes its output and goes on is stopped at the limit (%ld s)", now_s() - t0);
+		g_tool_limit = lim;
+		tool("deploy", "echo \"$*\" >> \"$LOG\"\ncase $1 in remove) echo 'boom' >&2; exit 4 ;; esac\necho \"done $*\"\n");
+	}
+	/* output above the limit: cut, what is kept intact (the buffer grows past 4 KiB
+	 * several times) */
+	tool("status", "i=0; while [ $i -lt 5000 ]; do printf '%063d\\n' $i; i=$((i + 1)); done\n");
+	send_req(3, OP_STATUS, 339, 0, 0, 0);
+	r = get_rsp();
+	{
+		const char *p = strstr(r.data, "\n0000");
+		int good = p != NULL;
+		for (int i = 0; good && i < 4000; i++) {
+			char line[80];
+			snprintf(line, sizeof line, "%063d\n", i);
+			if (strncmp(p + 1 + 64 * i, line, 64)) good = 0;
+		}
+		CHECK(r.status == 0 && good && strstr(r.data, "[output cut at 262144 bytes]") && r.length < 263000,
+		      "a tool's output above 256 KiB: cut, the first 4000 lines intact (%llu bytes)", (unsigned long long)r.length);
+	}
+	tool("status", "printf 'machine test\\nglassine-deploy 1\\ntype=status\\tcurrent=A\\n'\n");
+
+	/* ARM after a DEPLOY in this start: refused */
+	send_req(3, OP_ARM, 339, 0, 0, 17);
+	send_bytes("range 0 0 512\n\n\n\n", 17);
+	r = get_rsp();
+	CHECK(r.status == ST_ARMED && strstr(r.data, "DEPLOY"), "ARM after a DEPLOY in this start: refused (8: %s)", r.data);
+	/* a window that didn't close: DEPLOY refused, STATUS says so */
+	g_window_broken = 1;
+	r = confirmed(339, "action rollback\n");
+	CHECK(r.status == ST_IO, "after a window that didn't close, a confirmed DEPLOY is refused (5)");
+	send_req(3, OP_STATUS, 339, 0, 0, 0);
+	r = get_rsp();
+	CHECK(r.status == 0 && strstr(r.data, "\ndeploy partitions held: restart\n"), "STATUS says the partitions are held");
+	g_window_broken = 0;
+	g_deployed = 0; /* as a new start, for the ARM checks below */
 	r = deploy(335, "action broken\nconfirm broken\n");
 	CHECK(r.status == ST_BAD_REQUEST, "an action outside the list never reaches a tool");
 
@@ -255,16 +389,16 @@ int main(void)
 	send_req(3, OP_STATUS, 341, 0, 0, 0);
 	r = get_rsp();
 	CHECK(r.status == 0 && strstr(r.data, "\nwrites armed\n"), "STATUS says writes are armed");
-	r = deploy(342, "action rollback\nconfirm rollback\n");
+	r = confirmed(342, "action rollback\n");
 	CHECK(r.status == ST_ARMED, "DEPLOY while armed: refused (8)");
 	send_req(3, OP_DISARM, 343, 0, 0, 0);
 	r = get_rsp();
 	CHECK(r.status == 0, "DISARM");
-	r = deploy(344, "action rollback\nconfirm rollback\n");
+	r = confirmed(344, "action rollback\n");
 	CHECK(r.status == ST_ARMED, "DEPLOY after DISARM: refused (8): the partition table may have changed");
 	r = deploy(345, "action rollback\n");
 	CHECK(r.status == ST_CONFIRM, "after ARM, an unconfirmed DEPLOY still says what it does");
-	CHECK(!strcmp(slurp(logf), "select 20261101-120000\nrollback\nreset-full\nrollback discard-hibernation\nremove A\n"), "deploy did not run once ARM was taken");
+	CHECK(!strcmp(slurp(logf), "select 20261101-120000 no\nrollback - no\nreset-full - no\nrollback - yes\nremove A no\n"), "deploy did not run once ARM was taken");
 
 	/* DIAG */
 	send_req(3, OP_DIAG, 350, 0, 0, 0);
@@ -301,8 +435,31 @@ int main(void)
 	CHECK(r.status == 0 && r.tag == 404 && !strncmp(r.data, "glassine-recovery 3\nconnection local\n", 37), "local: STATUS in step, connection local");
 	r = deploy(405, "action rollback\n");
 	CHECK(r.status == ST_CONFIRM, "local: DEPLOY needs the same confirmation");
-	r = deploy(406, "action rollback\nconfirm rollback\n");
+	r = confirmed(406, "action rollback\n");
 	CHECK(r.status == ST_ARMED, "local: DEPLOY refused too once ARM was taken (on the other connection)");
+	{	/* a write's payload above any real one ends the local connection (it is
+		 * dropped under the lock) */
+		int lp[2];
+		socketpair(AF_UNIX, SOCK_STREAM, 0, lp);
+		pthread_t tx;
+		int ax[2] = { lp[1], 1 };
+		pthread_create(&tx, NULL, server, ax);
+		int keep = c;
+		c = lp[0];
+		send_req(3, OP_WRITE, 408, 0, 0, (uint64_t)1 << 40);
+		void *ret;
+		pthread_join(tx, &ret);
+		CHECK((long)ret == -1, "local: a WRITE of 1 TiB ends the connection at once");
+		close(lp[1]);
+		close(lp[0]);
+		c = keep;
+	}
+	{	/* a bad magic under version 2: the RAM environment's words */
+		uint8_t b[REQ_SIZE] = { 'X', 'X', 'X', 'X', 2, 0, 1, 0 };
+		send_bytes(b, REQ_SIZE);
+		r = get_rsp();
+		CHECK(r.status == ST_BAD_REQUEST && !strcmp(r.data, "not a request of protocol version 1 or 2"), "a bad version 2 request: the RAM environment's text (%s)", r.data);
+	}
 	send_req(3, OP_READ, 407, 0, 0, 512);
 	r = get_rsp();
 	CHECK(r.status == 0 && r.length == 512, "local: READ served");

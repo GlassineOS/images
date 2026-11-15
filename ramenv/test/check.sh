@@ -28,6 +28,7 @@ for x in vda vda1 vda2 vdb $pool $mmc; do
 		echo "QTEST FAIL a write to /dev/$x succeeded"
 	else echo "QTEST ok   a write to /dev/$x fails ($($B head -n 1 /tmp/dd))"; fi
 done
+echo "QTEST info read-only checks done"
 . /etc/glassine/ramenv.conf
 [ "$RAMENV_TRANSPORT" = usb ] || exit 0
 
