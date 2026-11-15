@@ -203,8 +203,8 @@ boot image) by the names this record holds, in an artifacts folder that has them
 
 ## Releases
 
-`scripts/pool-image ARTIFACTS TARGET [--build ID] [--ramenv DIR]` turns one build into
-what GlassineOS/installer reads (its spec 002, FR-019a): a folder with `release.json`
+`scripts/pool-image ARTIFACTS TARGET [--build ID] [--ramenv DIR] [--recovery DIR|FILE]
+[--boot-loader FILE] [--layout FILE]` turns one build into what GlassineOS/installer reads (its spec 002, FR-019a): a folder with `release.json`
 and the files it names. Default place: `<artifacts>/<target>/releases/<build-id>/`
 (`--out DIR` for another); it is written under a `.`-name ending in `.tmp` and renamed
 when complete, and an existing one is never replaced.
@@ -214,8 +214,29 @@ releases/<build-id>/
 ├── release.json
 ├── base/<base-id>.pool.img          the system partition's first contents (btrfs)
 ├── kernel/<bootimg-id>.img          the build's boot image, for boot_b
-└── ram-environment/<id>.img         with --ramenv: the RAM environment, for recovery
+├── ram-environment/<id>.img         with --ramenv: the RAM environment, for recovery
+├── boot-loader/<name>               the boot loader the target pins, for its partition
+├── partition-layout/<name>          the partition layout the target pins
+└── recovery/<id>.img                with --recovery: the recovery, for recovery
 ```
+
+**Pinned roles.** The boot loader and the partition layout aren't built here.
+`targets/<target>/release.conf` pins each by URL and SHA-256 (`BOOT_LOADER_URL`,
+`BOOT_LOADER_SHA256`, `BOOT_LOADER_PART_SIZE`, the boot loader partition's size;
+`LAYOUT_URL`, `LAYOUT_SHA256`). pool-image fetches each before it makes the pool image,
+or takes `--boot-loader FILE` / `--layout FILE` instead (offline, or a file built by
+hand from the same source), and refuses any file whose SHA-256 isn't the pin's. The file
+keeps its URL's name. A target without a pin for a role has no such role in its
+releases, and the option for it is refused. For the Onyx Boox Note Air the boot loader
+is the `abl.elf` asset of GlassineOS/abl's release
+`LA.UM.7.2.c25-12600-sdm660.0-glassine1` (which rebuilds the flashed image byte for
+byte), and the layout is GlassineOS/installer's `layouts/onyx-noteair.json` at a pinned
+commit (the installer's tests hold it against the device description and the A/B
+table).
+
+**The recovery** (`--recovery`) is a recovery-export (`--target recovery-export`):
+`DIR/recovery/<id>.img` checked against its `.manifest` (this target, `role=recovery`),
+like the RAM environment; or one image FILE, taken as it is.
 
 **The pool image** (role `base`, kind `btrfs-pool-image`) is a whole btrfs file system
 that the installer writes as bytes to the start of the system partition (the RAM
@@ -253,14 +274,20 @@ the folder), `sha256`, `size`, `kind` and `min_partition_bytes`:
 | `base` | `btrfs-pool-image` | spec 002's rule: the base's used bytes as received + 4 × 64 MiB + the modules' used bytes, × 1.25, at least 1 GiB, a whole MiB; never below the image |
 | `kernel` | `raw-image` | the target's `board.conf` `PART_SIZE` (every later boot image is packed to that limit) |
 | `ram-environment` | `raw-image` | its size |
+| `boot-loader` | `raw-image` | the pin's `BOOT_LOADER_PART_SIZE`; a larger file is refused |
+| `partition-layout` | `gpt-recipe` | its size |
+| `recovery` | `raw-image` | its size |
 
 Readers ignore the other keys: `target`, `build`, `trial` and `trial_reasons` (the
 build's, plus `boot:<commit12>`), `missing` (the roles this folder doesn't supply:
-`boot-loader`, `partition-layout`, `recovery`, and `ram-environment` without
-`--ramenv`), and per role where it came from (`base`, `received_uuid`,
-`kernel_release`, `layout_boot_commit`, `bootimg`, `ramenv`).
+`ram-environment` without `--ramenv`, `recovery` without `--recovery`, `boot-loader` and
+`partition-layout` for a target that doesn't pin them), and per role where it came from
+(`base`, `received_uuid`, `kernel_release`, `layout_boot_commit`, `bootimg`, `ramenv`,
+`recovery`, `url`).
 
-`scripts/test-pool-image.sh` tests it on fixtures: the folder and release.json, the
-image read-only (the base read-only with its received UUID, the modules, the marker),
+`scripts/test-pool-image.sh` tests it on fixtures: the folder and release.json with all
+six roles (the boot loader from `--boot-loader`, the layout fetched from a `file://`
+pin), wrong pinned bytes and an unpinned target's `--boot-loader` refused, the missing
+roles of a target without pins, the image read-only (the base read-only with its received UUID, the modules, the marker),
 and, on a copy grown to `min_partition_bytes`, a delta made by materialize (a base and
 its child) received onto the base inside the image.
