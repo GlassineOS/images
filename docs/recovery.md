@@ -16,10 +16,9 @@ and resets". So it is built here from the same sources:
 
 Status: built and tested in QEMU (below). It has not run on a device.
 
-**This slice has no screen.** FR-006 (e-ink, touch and the power key) is the next slice.
-There, the screen becomes a third client of the same core. Until then, a person reaches
-the recovery through the text menu on the USB serial function, and a computer reaches it
-over the vendor interface.
+A person reaches the recovery on its screen (e-ink, touch and the power key; FR-006,
+[below](#the-screen)) or through the text menu on the USB serial function; a computer
+reaches it over the vendor interface. The screen has run in QEMU only (no panel there).
 
     docker buildx build --platform linux/arm64 --target recovery-export \
         --build-arg DEVICE=onyx-noteair -o type=local,dest=out .
@@ -36,6 +35,7 @@ kernel-export + dtb-export + boot-src ──────────────
 | `ramenv/init` | the RAM environment's init; with `/etc/glassine/recovery.version` it also does the recovery's part (below) |
 | `ramenv/recovery/status`, `describe`, `deploy`, `diag` | the tools the core runs (busybox `sh`): glassine-deploy's state, what an action does, the action, the diagnostics |
 | `ramenv/recovery/menu`, `glassine-rcall.c` | the console: a text menu, and its client of the core |
+| `ramenv/recovery/screen/` | the screen: `glassine-rscreen.c` (its client), `font-gen.c` (its type, at build time), `start` (modules, waveform, programs) |
 | `ramenv/build.sh --recovery BOOT COMMIT` | the initramfs: the RAM environment's, plus the above, plus glassine-deploy |
 | `scripts/ramenv-bootimg.sh` (`ROLE=recovery`) | the boot image, packed like the RAM environment's, into `recovery/` |
 | `stages/recovery/packages`, `lock` | the locked build tools and the binaries copied in (e2fsprogs, btrfs-progs) |
@@ -52,14 +52,19 @@ one the system's boot was built with. The image holds:
 
 The manifest adds `role=recovery`, `boot_commit=` and `protocol=3`. The image has to fit
 the same limits as the RAM environment's: `RAMENV_IMAGE_MAX` and `RAMENV_RECOVERY_SIZE`.
-On the Note Air the initramfs is about 2.8 MB, against 0.7 MB for the RAM
-environment's, and the boot image is 15.6 MB, well inside the 64 MiB `recovery`
+On the Note Air the initramfs is about 3.4 MB with the screen (2.8 MB without), against
+0.7 MB for the RAM environment's; the boot image stays well inside the 64 MiB `recovery`
 partition.
 
-Like the RAM environment, it loads no module. The system kernel at the pinned commit
-has everything the recovery uses built in: USB gadget, FunctionFS and the ACM function,
-btrfs, ext4, overlayfs, the qcom watchdog, ramoops (checked in that kernel's
-`modules.builtin`).
+The system kernel at the pinned commit has everything the core uses built in: USB
+gadget, FunctionFS and the ACM function, btrfs, ext4, overlayfs, the qcom watchdog,
+ramoops (checked in that kernel's `modules.builtin`). Only the screen needs modules: the
+panel link and the touchscreen are modules in that kernel. `scripts/ramenv-bootimg.sh`
+packs the device's `RECOVERY_SCREEN_MODULES` and what they depend on (from the kernel
+export's `modules.dep`) into the image, under `/lib/modules/<release>/` with their load
+order in `recovery-screen.list`, and names them and their sha256 in the manifest
+(`screen_modules=`, `screen_modules_sha256=`). The screen's start script loads them; the
+core loads none. The RAM environment still loads no module.
 
 ## One image for install and recovery
 
@@ -259,7 +264,7 @@ All three clients send the core the same requests:
 
 - the computer over USB, the vendor interface, protocol version 3;
 - the console;
-- later, the screen.
+- the screen.
 
 The console is `menu`, a busybox `sh` script that sends each request through
 `glassine-rcall` on the local socket. `glassine-rcall` is built from the daemon's source.
@@ -273,6 +278,88 @@ there with status 2. Their bytes are read and dropped. Writes to disks are USB's
 
 The daemon serves one request at a time, whichever connection it came on. Each connection
 has its own thread, and one lock covers each request.
+
+## The screen
+
+The third client (FR-006), for a person at the device: `glassine-rscreen`, a static C
+program that draws its pages itself and sends each request to the core on the local
+socket, as the menu does through `glassine-rcall` (it is built from the daemon's source
+too). It offers exactly the menu's operations with the menu's confirmations (FR-004):
+
+| Page | What it does |
+|---|---|
+| home | the device's identity (machine, the recovery's boot commit and build), the deployment state (starts next, then, last good, failed), or glassine-deploy's own line when there is no deployment |
+| deployments | each deployment with its state (LAST GOOD and FAILED filled, STARTS NEXT, PREVIOUS, KEPT), roll back to the previous one, paged when they don't fit |
+| deployment | its state, base, date and size; start it next; delete it (when the core offers `remove`) |
+| reset | reset system and full reset |
+| confirm | the core's text, whole, under WHAT THIS DOES; Cancel first (and focused), then the button that names the action ("Start ID", "Roll back", "Reset system", "Full reset", "Delete ID"). A text that doesn't fit offers Cancel only |
+| hibernated | when glassine-deploy says userdata holds a hibernated session (exit 4): discard it and go on (the core describes it again, with its own confirmation) or cancel |
+| working, done, failed, refused, cancelled | the operation's result in glassine-deploy's words |
+| diagnostics | collected by the core (DIAG), its sha256 checked, the files listed; the person is told the file is in the recovery's memory and that a computer reads it over USB with the GlassineOS installer |
+| restart | the normal start or the boot loader, confirmed; REBOOT |
+| idle, restarting | before the core's idle restart: when, and that touching the screen or the power key keeps it up |
+| no core | the core doesn't answer; try again |
+
+The core decides. The client never makes a confirmation: on status 9 it shows the text of
+that answer and sends back the token from its first line, unchanged, only when the
+person chose the confirm button on that page. A tap or a power key press that started
+before a page took input (0.3 s after its frame) counts for nothing, so input can't
+carry from one page into the next and a confirmation can't be skipped.
+
+Input:
+
+- touch: a tap chooses the button it began and ended on;
+- the power key alone: a short press moves to the next button, a hold of 0.8 s chooses
+  it (the focused button has a second ring).
+
+The e-ink rules: black on white, IBM Plex (the GlassineOS shell's type, rasterized at build
+time by `font-gen` into the program: 64 px titles, 40 px text, 32 px notes, 28 px mono
+labels), no animation. Each page is one whole frame; moving the focus sends only the two
+buttons' rectangles. Whether the panel daemon refreshes in full or in part follows from
+the area (glassine-epdd does a full GC16 refresh when a frame changes more than half the
+panel); the protocol has no flag to ask for a full refresh.
+
+Idle: the core restarts the device `RECOVERY_IDLE` seconds after the last request, from
+any client. The screen sends no request on a timer: it keeps the time of its own last
+answer, shows the idle page a minute before the end (a third of the idle time when that
+is shorter), and the restarting page at the end. Input there sends one LIST, which keeps
+the recovery up, and brings the page back. When another client kept the core busy, the
+screen brings its page back 30 s after its estimate passed.
+
+The panel: the screen uses glassine-epdd, the system's panel daemon, from the
+`glassine-epdd` package, with the device package's adapter `/etc/glassine/epd.conf`
+(`RECOVERY_SCREEN_ADAPTER`, fetched at build time; its version and the file's sha256 go
+into the manifest). It hands the daemon one memfd frame buffer (BUF), sends FRAME and
+waits for DONE (5 s); when the daemon ends it connects again and sends the whole page.
+The adapter names the panel's geometry and rotation (the touch coordinates are turned
+back by it) and the touchscreen's evdev name.
+
+The waveform: the panel needs the device's own waveform file. It is not in the image
+(FR-014: no vendor firmware in the image). The start script reads it from the device data
+seed on the partition `RECOVERY_DEVICE_LABEL` (`vendor_b` on the Note Air; GlassineOS/boot
+`docs/kernel-artifacts.md`, "Device data") with debugfs, nothing mounted (FR-001): one
+partition by that name, no journal waiting for a replay, `glassine/manifest` in format 1,
+the file's sha256 as the manifest names it, and the shape of a waveform (its length at
+offset 4). It goes into RAM at the adapter's path under `/run/glassine/device/`. Without
+the seed (a stock partition table, while installing), a matching waveform or the modules
+there is no screen; the core, USB and the console go on.
+
+`ramenv/init` starts `/lib/glassine-recovery/screen` once the core serves, when the
+device's config sets `RECOVERY_SCREEN=epd`. It loads the modules, reads the waveform and
+runs glassine-epdd and glassine-rscreen, each again when it ends.
+
+The device config:
+
+| Key | Note Air |
+|---|---|
+| `RECOVERY_SCREEN` | `epd` |
+| `RECOVERY_SCREEN_ADAPTER` | `device-onyx-noteair` (the package with `etc/glassine/epd.conf`) |
+| `RECOVERY_SCREEN_MODULES` | `panel_onyx_na1_link cyttsp5` (cyttsp5 pulls in crc-itu-t) |
+| `RECOVERY_DEVICE_LABEL` | `vendor_b` (checked against the board's `DEVICE_PART`) |
+
+No board in GlassineOS/ui covers the recovery yet. The pages follow the shell's white
+e-ink voice (Plex, ink on white, outlined cards, mono labels, pill tags); each needs a
+board.
 
 ## Read-only, and the deploy partitions' window
 
@@ -384,8 +471,9 @@ These are the RAM environment's rules, with these additions:
 
 ## Tests
 
-    scripts/test-recovery.sh                 # unit, the stage build, the QEMU runs
+    scripts/test-recovery.sh                 # unit, the stage build, the screen, the QEMU runs
     scripts/test-recovery.sh --unit-only
+    UPDATE=1 scripts/test-recovery.sh        # the screen's pages written over its goldens
 
 - `ramenv/test/unit.c`, compiled for the recovery, passes unchanged. That covers
   versions 1 and 2, including the pinned bytes, all 65536 operation codes under each
@@ -470,8 +558,33 @@ These are the RAM environment's rules, with these additions:
     - reset: `reset --now` makes a new deployment, the candidate.
     - diagnostics.
     - The idle restart.
+  - `screen`: the pool as a virtio disk and a device data seed (a GPT with `vendor_b`:
+    ext4 with `glassine/manifest` and a made-up waveform). The production start script
+    and client; glassine-epdd replaced by `epd-sink`, which checks the waveform is in
+    place and answers FRAME with DONE. `screen-drive` makes a touchscreen and a power key
+    with uinput and goes through `ramenv/test/screen/qemu.events`, reading the page and
+    its buttons from the client's state file and tapping where they are drawn (the
+    adapter's rotation applied):
+    - select C cancelled; then three tries to skip its confirmation: taps on the confirm
+      button from before the page took input, a finger and the power key held from
+      before it until after it: the page stays;
+    - select C, rollback to B and reset system confirmed by touch;
+    - full reset with the power key alone (moved to, chosen, cancelled);
+    - diagnostics; restart cancelled;
+    - the idle page, the power key bringing the page back, then the idle restart.
+    The host checks: the waveform read from the seed, the whole script ran, exactly three
+    operations confirmed (`deploy: … confirmed (local connection)`), no reboot asked, the
+    idle restart, the seed disk and vda/vdb unchanged.
   - Every run checks the kernel's read-only state of every disk and partition, and that a
     write to each fails.
+- The screen, headless (`ramenv/test/screen-headless.sh`, arm64 Alpine with the
+  GlassineOS repository): glassine-rscreen built as the image builds it, its pages drawn
+  through `--events` scripts (`ramenv/test/screen/*.events`) against `screen-core.py`, a
+  stand-in core that speaks version 3 with describe's texts and checks that every
+  confirmed DEPLOY carried the token of its status-9 answer. Each page is compared pixel
+  for pixel with its golden image `ramenv/test/screen/NAME.png`: every page, the
+  hibernation question, the empty device, no core, the idle notice and the power key's
+  focus. The goldens depend on the FreeType and font package versions in that container.
 
 Not covered:
 
@@ -487,12 +600,16 @@ Not covered:
   idle reboot, at twice the idle time (a local write payload above 16 MiB ends its
   connection at once);
 - CI: `scripts/test-ramenv.sh` and `scripts/test-recovery.sh` run by hand, no workflow
-  runs them.
+  runs them;
+- the screen on the device: the panel, glassine-epdd with the real waveform, the panel
+  link and touchscreen modules loading in the recovery, the touch coordinates' rotation,
+  the power key's driver, how the pages look on e-ink, and the frontlight (not loaded:
+  the page is lit by the room);
+- a device data seed made by glassine-deploy (the QEMU seed is made by the test).
 
 ## Left for later
 
-- **The screen (FR-006).** An e-ink client of the same core: the deployment list, the
-  same confirmations, touch and the power key.
+- **The screen's boards.** Designs for its pages in GlassineOS/ui.
 - **Pin (FR-007).** glassine-deploy has no pin verb. `pin` is reserved in DEPLOY and
   answered "not offered" until boot defines it.
 - **Repair the boot (FR-009)** and **the hand-over to another system's recovery (Scenario 5)**.

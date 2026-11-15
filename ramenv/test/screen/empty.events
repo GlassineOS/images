@@ -1,0 +1,7 @@
+# the install case: no deployment (screen-core.py empty)
+await home
+shot home-empty
+tap Deployments
+await deployments
+shot deployments-empty
+quit
