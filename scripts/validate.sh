@@ -68,15 +68,18 @@ for s in udev udev-trigger; do
 	[ -e /etc/runlevels/sysinit/$s ] || no "the device manager isn't enabled: no $s in sysinit"
 done
 # what a deployment needs to come up and go down: the machine ID before dbus (the base's
-# is empty, and dbus refuses to start on an empty one), dbus, the accept step after a
+# is empty, and dbus refuses to start on an empty one), the first start (on the first
+# boot of an installed system it grows the pool, formats userdata and selects the first
+# deployment; without the install marker it does nothing), dbus, the accept step after a
 # healthy boot, and a shutdown that stops everything, runs the switch, then leaves the
 # file systems read-only (glassine-mount-ro: userdata and the system partition, which
 # the root's overlay keeps alive past mount-ro); developer mode, which does nothing
 # without glassine.devmode=usb on the command line; the reboot with a reason, last in
 # the shutdown (glassine-reboot-clean leaves the reason for it)
-for s in boot/bootmisc boot/machine-id default/dbus default/glassine-deploy-accept \
-	default/glassine-devmode shutdown/killprocs shutdown/glassine-switch shutdown/mount-ro \
-	shutdown/glassine-mount-ro shutdown/glassine-reboot-reason; do
+for s in boot/bootmisc boot/machine-id boot/glassine-first-start default/dbus \
+	default/glassine-deploy-accept default/glassine-devmode shutdown/killprocs \
+	shutdown/glassine-switch shutdown/mount-ro shutdown/glassine-mount-ro \
+	shutdown/glassine-reboot-reason; do
 	[ -e /etc/runlevels/$s ] || no "a service a deployment needs isn't enabled: ${s#*/} in ${s%/*}"
 done
 # no SSH server of its own: developer mode starts one, only with glassine.devmode=usb
