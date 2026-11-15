@@ -22,8 +22,15 @@
 #   console  the pool as vdc; the menu on a virtio console (client-recovery.py
 #            console): rollback with a wrong then the right confirmation, reset,
 #            diagnostics.
-# Each run ends by the recovery's idle restart (deploy, console) or the client's reboot
-# (usb). test/check.sh checks in the guest that every disk and partition is read-only.
+#   screen   the pool as vdc and a device data seed as vdd (a GPT, vendor_b: ext4 with
+#            glassine/manifest and a made-up waveform); the screen with the production
+#            start script and client, glassine-epdd replaced by epd-sink (no panel here),
+#            driven by screen-drive (uinput: a touchscreen and a power key) through
+#            screen/qemu.events: select, rollback and reset confirmed, cancels by touch
+#            and by the power key, taps and holds from before a confirmation (ignored),
+#            diagnostics, restart cancelled, the idle notice and the restart.
+# Each run ends by the recovery's idle restart (deploy, console, screen) or the client's
+# reboot (usb). test/check.sh checks in the guest that every disk and partition is read-only.
 # Prints ok/FAIL lines.
 set -eu
 trap 'mkdir -p /out/logs-recovery; cp $W/*.log $W/*.client /out/logs-recovery/ 2>/dev/null; [ -z "${OWNER:-}" ] || chown -R "$OWNER" /out/logs-recovery' EXIT
@@ -121,6 +128,8 @@ $B mkdir -p /proc /sys /dev /run
 $B mount -t proc proc /proc; $B mount -t sysfs sysfs /sys; $B mount -t devtmpfs devtmpfs /dev
 for m in $($B cat /lib/qtest/load-recovery.list); do $B insmod /lib/qtest/$m || echo "QTEST FAIL insmod $m"; done
 [ -x /lib/qtest/check.sh ] && /lib/qtest/check.sh > /dev/console 2>&1 &
+[ -x /lib/qtest/screen-drive ] && /lib/qtest/screen-drive /lib/qtest/screen.events /run/glassine-rscreen.state \
+	/etc/glassine/epd.conf > /dev/console 2>&1 &
 ( for i in $($B seq 60); do
 	for p in /sys/class/virtio-ports/*; do
 		[ "$($B cat $p/name 2>/dev/null)" = glassine.ramread ] && { $B ln -s ${p##*/} /dev/ramread-stream; exit 0; }
@@ -299,8 +308,58 @@ qtest console
 grep -aq 'glassine-ramread: no request for [0-9]* s: rebooting' $W/console.log && ok "console: the idle time restarted it" || bad "console: the idle time restarted it"
 grep -aq 'glassine-ramread: deploy: rollback [0-9a-f]\{8\} confirmed (local connection)' $W/console.log && ok "console: the rollback came over the local connection" || bad "console: the rollback came over the local connection"
 
+# --- screen: the touch client against the core -------------------------------------
+# the device data seed: the waveform is made up (its length at offset 4, as the start
+# script and epd-sink check); nothing on the device's own seed is used
+D=$W/seed; mkdir -p $D/glassine
+python3 -c 'import os, struct, sys; b = bytearray(os.urandom(8192)); b[4:8] = struct.pack("<I", len(b)); sys.stdout.buffer.write(b)' > $D/glassine/waveform.wbf
+printf 'format=1\nwaveform.wbf test %s\n' "$(sha $D/glassine/waveform.wbf)" > $D/glassine/manifest
+truncate -s 16M $W/seed-fs.img
+mke2fs -q -t ext4 -d $D $W/seed-fs.img
+truncate -s 32M $W/vdd.img
+sgdisk -o -n 1:2048:+16M -c 1:vendor_b $W/vdd.img > /dev/null
+dd if=$W/seed-fs.img of=$W/vdd.img bs=512 seek=2048 conv=notrunc status=none
+cp $W/pool.img $W/vds.img
+D0=$(sha $W/vdd.img)
+testcpio screen "$common
+RAMENV_TRANSPORT=stream
+RAMENV_STREAM=/dev/ramread-stream
+RECOVERY_IDLE=40
+RECOVERY_SCREEN=epd
+RECOVERY_DEVICE_LABEL=vendor_b
+RECOVERY_SCREEN_STATE=/run/glassine-rscreen.state"
+T=$W/t/screen; mkdir -p $T/sbin
+cp /out/epd-sink $T/sbin/glassine-epdd
+cp /out/screen-drive $T/lib/qtest/screen-drive
+cp /src/test/screen/qemu.events $T/lib/qtest/screen.events
+chmod 755 $T/sbin/glassine-epdd $T/lib/qtest/screen-drive
+(cd $T && find . | LC_ALL=C sort | cpio -o -H newc -R 0:0 --quiet | gzip -n) > $W/t/screen.cpio.gz
+cat /out/recovery.cpio.gz $W/t/screen.cpio.gz > $W/t/screen.initrd
+POOL=$W/vds.img
+t0=$(date +%s)
+if qemu screen -drive file=$W/vdd.img,format=raw,if=virtio -device virtio-serial-pci \
+	-chardev socket,id=rr,path=$W/rs.sock,server=on,wait=off -device virtserialport,chardev=rr,name=glassine.ramread
+then ok "screen: the guest ended by itself ($(($(date +%s) - t0)) s)"; else bad "screen: qemu exit (timeout or failure)"; fi
+qtest screen
+grep -aq 'glassine-screen: waveform waveform.wbf from the seed on /dev/vdd1 (8192 bytes)' $W/screen.log \
+	&& ok "screen: the start script read the waveform from the seed (debugfs, sha256 checked)" || bad "screen: the waveform from the seed"
+grep -aq 'QTEST info screen-drive: the script ended (0 failed)' $W/screen.log && ok "screen: screen-drive ran its whole script" \
+	|| bad "screen: screen-drive did not finish its script"
+n=$(grep -ac 'glassine-ramread: deploy: .* confirmed (local connection)' $W/screen.log || :)
+for a in select rollback reset; do
+	grep -aq "glassine-ramread: deploy: $a [^ ]* \?[0-9a-f]\{8\} confirmed (local connection)" $W/screen.log \
+		&& ok "screen: $a confirmed on the screen" || bad "screen: no confirmed $a"
+done
+[ "$n" = 3 ] && ok "screen: exactly 3 operations confirmed (cancels, early taps and holds confirmed nothing)" \
+	|| bad "screen: $n operations confirmed, 3 expected"
+grep -aq 'glassine-ramread: deploy: reset-full [0-9a-f]\{8\} confirmed' $W/screen.log && bad "screen: the cancelled full reset ran"
+grep -aq 'glassine-ramread: no request for [0-9]* s: rebooting' $W/screen.log && ok "screen: the idle time restarted it" || bad "screen: the idle time restarted it"
+grep -aq 'glassine-ramread: reboot (' $W/screen.log && bad "screen: a reboot was asked (the restart was cancelled)"
+[ "$(sha $W/vdd.img)" = "$D0" ] && ok "screen: the seed disk vdd unchanged" || bad "screen: the seed disk vdd changed"
+[ "$(sha $W/vda.img)" = "$A0" ] && [ "$(sha $W/vdb.img)" = "$B0" ] && ok "screen: vda.img and vdb.img unchanged" || bad "screen: vda.img or vdb.img changed"
+
 # --- nothing else changed -----------------------------------------------------------
 [ "$(sha $W/vda.img)" = "$A0" ] && [ "$(sha $W/vdb.img)" = "$B0" ] && ok "vda.img and vdb.img unchanged after all runs" || bad "vda.img or vdb.img changed"
-grep -aq 'Trying to write to read-only block-device' $W/usb.log $W/deploy.log $W/console.log && bad "a write reached a read-only block device" || ok "no write reached a read-only block device"
+grep -aq 'Trying to write to read-only block-device' $W/usb.log $W/deploy.log $W/console.log $W/screen.log && bad "a write reached a read-only block device" || ok "no write reached a read-only block device"
 echo "qemu-recovery: $fails failed"
 [ $fails = 0 ]

@@ -1,0 +1,99 @@
+# The screen's headless run (screen-headless.sh) against screen-core.py (full, hibernated):
+# every page, the menu's operations, cancel, the hibernation question, the power key.
+await home
+shot home
+tap Deployments
+await deployments
+shot deployments
+tap 20261101-0702
+await deployment
+shot deployment
+tap Start this one next
+await confirm-select
+shot confirm-select
+tap Cancel
+await cancelled
+shot cancelled
+tap Back to the start
+await home
+tap Deployments
+await deployments
+tap 20261101-0702
+await deployment
+tap Start this one next
+await confirm-select
+tap Start
+await done
+shot done
+tap Back to the start
+await home
+shot home-candidate
+tap Deployments
+await deployments
+tap Roll back
+await confirm-rollback
+shot confirm-rollback
+tap Roll back
+await hibernated
+shot hibernated
+tap Discard
+await confirm-rollback
+shot confirm-rollback-discard
+tap Roll back
+await done
+tap Back to the start
+await home
+tap Deployments
+await deployments
+tap 20261112-0930
+await deployment
+tap Delete
+await confirm-remove
+shot confirm-remove
+tap Delete
+await failed
+shot failed
+tap Back to the start
+await home
+tap Reset
+await reset
+shot reset
+tap Reset system
+await confirm-reset
+shot confirm-reset
+tap Cancel
+await cancelled
+tap Back to the start
+await home
+tap Reset
+await reset
+tap Full reset
+await confirm-reset-full
+shot confirm-reset-full
+tap Full reset
+await done
+shot done-reset
+tap Back to the start
+await home
+tap Diagnostics
+await diag
+shot diag
+tap Back to the start
+await home
+tap Restart
+await restart
+shot restart
+tap Normal start
+await confirm-restart
+shot confirm-restart
+tap Cancel
+await home
+# the power key alone: two presses move to Diagnostics, a hold chooses it
+short
+short
+shot home-focus
+long
+await diag
+tap Back to the start
+await home
+quit
