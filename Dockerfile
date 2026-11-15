@@ -41,7 +41,7 @@ ARG LINUX=https://github.com/GlassineOS/linux
 # Each git input's commit has the branch it follows on the line above it, as
 # "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
 # branch: glassine/sdm660-7.3
-ARG LINUX_SDM660=2c96773f26628379daed022c8b7dd1728d38e49c
+ARG LINUX_SDM660=c1e08bc321be63d389ce9897612f7ff284695ecc
 # the commit device trees build from: a fixed tree ships without a new kernel
 # branch: glassine/sdm660-7.3
 ARG DTB_COMMIT=${LINUX_SDM660}
