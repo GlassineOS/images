@@ -39,7 +39,7 @@ The image is not a boot update: the export has no `select/` record and nothing i
 On the Note Air the installer writes the image to the `recovery` partition with the
 stock boot loader's fastboot (`flash:recovery`), next to the GlassineOS boot loader in
 `abl`. The GlassineOS boot loader then starts it on its recovery path (`fastboot oem
-reboot-recovery`). That path boots an Android boot image of header version 0 with the
+reboot-recovery`; a closed cover at power-on enters fastboot, not recovery). That path boots an Android boot image of header version 0 with the
 device tree appended to the kernel, which is what `scripts/ramenv-bootimg.sh` makes
 (GlassineOS/boot's packer, with the header values of the target's `board.conf`; the
 same header the recovery images this boot loader starts carry). The image has to fit
@@ -257,8 +257,9 @@ directly: busybox's `reboot` drops it.
   - All check the kernel's read-only state of every disk and partition and that
     writes fail; the runs after usb leave the images as they were, and no write
     reached a read-only block device.
-- The unit test and the installer's tests share pinned bytes: a version 1 READ request
-  and its response header, and a version 2 WRITE request and its response header.
+- Pinned bytes tie the daemon to the installer: a version 1 READ request and its
+  response header (also in the installer's tests), and a version 2 WRITE request and
+  its response header (for the installer's writer to pin the same way).
 
 The QEMU guest runs Debian's arm64 kernel, because Alpine's kernels have no
 `dummy_hcd`; only the test downloads it, nothing ships it.
