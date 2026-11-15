@@ -13,6 +13,9 @@
 set -eu
 S=/run/stage
 C=/var/cache/apk
+# scratch files outside the tree's /tmp, gone when the stage ends (never in a layer)
+W=$(mktemp -d /run/apk-stage.XXXXXX)
+trap 'rm -rf "$W"' EXIT
 pk=$(sed 's/#.*//' "$S/packages" | tr -s ' \t\n' ' ')
 
 refresh() {
@@ -35,14 +38,14 @@ else
 	apk policy --cache-dir "$C" $(cut -d= -f1 "$S/lock") | awk '
 		/^[^ ].* policy:$/ { p = $1; next }
 		/^  [^ ].*:$/ { v = substr($1, 1, length($1) - 1); next }
-		/^    / { print p, v, $1 }' > /tmp/apk-stage.offered
-	missing=$(awk 'NR == FNR { ok[$1 "=" $2] = 1; next } !($0 in ok)' /tmp/apk-stage.offered "$S/lock")
+		/^    / { print p, v, $1 }' > "$W/offered"
+	missing=$(awk 'NR == FNR { ok[$1 "=" $2] = 1; next } !($0 in ok)' "$W/offered" "$S/lock")
 	if [ -n "$missing" ]; then
 		echo "apk-stage: lock lines that no repository offers any more:" >&2
 		for l in $missing; do
 			n=${l%%=*}
 			has=$(awk -v n="$n" '$1 == n { v[$2] = 1; s[$2] = s[$2] ? s[$2] : $3 }
-				END { for (x in v) { printf "%s%s (%s)", sep, x, s[x]; sep = ", " } }' /tmp/apk-stage.offered)
+				END { for (x in v) { printf "%s%s (%s)", sep, x, s[x]; sep = ", " } }' "$W/offered")
 			echo "  $l   offered: ${has:-nothing}" >&2
 		done
 		echo "apk-stage: Alpine's repositories keep only the newest version of a package," >&2
@@ -73,7 +76,7 @@ fi
 have=$(awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' /lib/apk/db/installed | LC_ALL=C sort)
 if [ "$have" != "$(cat "$S/lock")" ]; then
 	echo "apk-stage: installed packages differ from the lock (- lock, + installed):" >&2
-	printf '%s\n' "$have" > /tmp/have
-	diff "$S/lock" /tmp/have | grep '^[-+][^-+]' >&2 || :
+	printf '%s\n' "$have" > "$W/have"
+	diff "$S/lock" "$W/have" | grep '^[-+][^-+]' >&2 || :
 	refresh
 fi
