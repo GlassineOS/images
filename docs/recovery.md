@@ -83,11 +83,10 @@ The installer's install writes `abl`, then `recovery`, then starts `recovery` to
 partition table and write the system. Its `recovery` image can be this image. Its last step,
 write-recovery, then has nothing left to write: the recovery is already in place, and is
 what an installation is complete with (spec 008, Summary). The installer's
-`ram-environment` role and its `recovery` role become one artifact. That change is the
-installer's and the release's (`release.json` today names `ram-environment`, and
-`recovery` as missing). It isn't made here. `scripts/pool-image --ramenv DIR` reads
-`DIR/ramenv/`, the RAM environment's export; publishing the recovery under that role
-needs it to read `recovery-export`'s `DIR/recovery/` as well.
+`ram-environment` role and its `recovery` role can become one artifact.
+`scripts/pool-image --recovery DIR` takes `recovery-export`'s `DIR/recovery/` as the
+release's `recovery` role. Using the same image as `ram-environment` too is the
+installer's and the release's change; it isn't made here.
 
 ## The recovery's start
 
