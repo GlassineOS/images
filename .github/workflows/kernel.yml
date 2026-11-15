@@ -10,6 +10,11 @@
 #   publish  main only, after kernel passed: pushes each export built here whose second
 #            build gave the same bytes, under its key, unless that key is published, and
 #            the layer cache. The only job with write access to the packages.
+#   recovery-kernel  the recovery's kernel (recovery-kernel-export: everything built in, no
+#            modules, no firmware), built and checked with scripts/kernel-check --stage
+#            kernel-sdm660recovery; on main (and on request) built again from scratch and
+#            compared (scripts/kernel-repro.sh --recovery). Not in the registry: only the
+#            recovery's boot image reads it.
 #
 # Pull requests never reach publish and have no publishing credentials. GitHub's layer
 # cache keeps no cache mounts: a changed kernel input is a full compile here.
@@ -111,6 +116,24 @@ jobs:
           name: exports
           path: /tmp/exports.tar
           retention-days: 1
+
+  recovery-kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build
+        run: |
+          docker buildx build --progress=plain --platform linux/arm64 --target recovery-kernel-export \
+            --cache-from type=gha,scope=recovery-kernel --cache-to type=gha,mode=max,scope=recovery-kernel \
+            -o type=local,dest=/tmp/recovery-kernel .
+      - name: Check
+        run: scripts/kernel-check --stage kernel-sdm660recovery --partial /tmp/recovery-kernel
+      - name: Build again from scratch and compare
+        if: github.ref == 'refs/heads/main' || inputs.reproduce
+        run: scripts/kernel-repro.sh --recovery /tmp/recovery-repro
 
   publish:
     needs: kernel

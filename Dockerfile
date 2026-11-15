@@ -101,6 +101,27 @@ FROM kernel-${KERNEL} AS kernel
 FROM scratch AS kernel-export
 COPY --from=kernel /out/ /
 
+# The recovery's kernel (docs/recovery.md; GlassineOS/boot spec 008, FR-014): the same
+# source and commit, the system kernel's configuration with nothing as a module and what
+# the recovery needs built in (stages/kernel-<KERNEL>recovery), and no firmware. Its
+# export is modules/<release>/ with Image.gz, modules.builtin and kernel.manifest, read
+# only by the recovery's boot image. Its own cache mount (RKCACHE), so the two kernels
+# don't evict each other's objects.
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS kernel-sdm660recovery
+ARG KERNEL_BUILD_IMAGE KERNEL_BUILD_DIGEST LINUX LINUX_SDM660
+ARG RKCACHE=kernel-sdm660recovery
+ARG JOBS
+RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux \
+    --mount=type=bind,source=stages/kernel-sdm660recovery,target=/run/stage \
+    --mount=type=tmpfs,target=/run/firmware \
+    --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
+    --mount=type=cache,id=${RKCACHE}-${KERNEL_BUILD_DIGEST},target=/cache,sharing=locked \
+    REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=$KERNEL_BUILD_IMAGE@$KERNEL_BUILD_DIGEST JOBS=$JOBS sh /run/kernel.sh build
+
+FROM kernel-${KERNEL}recovery AS recovery-kernel
+FROM scratch AS recovery-kernel-export
+COPY --from=recovery-kernel /out/ /
+
 # One device's tree, from DTB_COMMIT: the kernel's source, moved to that commit if it
 # differs (a fixed tree ships without a new kernel).
 FROM linux-sdm660-src AS dtb-src
@@ -291,7 +312,7 @@ COPY --from=ramenv-boot /out/ /
 # Packed the same way, from the same device config, into recovery/.
 #
 #   alpine → recovery + boot-src ─────────────────────────────────┐
-#   kernel-export + dtb-export + boot-src ────────→ recovery-boot → recovery-export
+#   recovery-kernel-export + dtb-export + boot-src → recovery-boot → recovery-export
 #                                                                  recovery/<id>.img
 #
 #   docker buildx build --platform linux/arm64 --target recovery-export -o type=local,dest=out .
@@ -309,7 +330,7 @@ RUN --mount=type=bind,source=ramenv,target=/src/ramenv \
 
 FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS recovery-boot
 ARG DEVICE
-RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
+RUN --mount=type=bind,from=recovery-kernel-export,source=/modules,target=/run/modules \
     --mount=type=bind,from=dtb-export,source=/boot/dtb,target=/run/dtb \
     --mount=type=bind,from=recovery,source=/out/recovery,target=/run/ramenv \
     --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
