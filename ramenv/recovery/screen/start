@@ -1,0 +1,87 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The recovery's screen (docs/recovery.md, "The screen"), started by the init once the
+# core serves, when the device's ramenv.conf sets RECOVERY_SCREEN=epd:
+#   1. the kernel modules the panel and the touchscreen need: the device's
+#      RECOVERY_SCREEN_MODULES, which the boot image stage put in the image with their
+#      load order (/lib/modules/<release>/recovery-screen.list);
+#   2. the panel's waveform, from the device data seed on the partition
+#      RECOVERY_DEVICE_LABEL (GlassineOS/boot docs/kernel-artifacts.md, "Device data"),
+#      read with debugfs: nothing is mounted. It must match the seed manifest's sha256
+#      and look like a waveform. It goes into RAM, at the path the panel's adapter
+#      (/etc/glassine/epd.conf) names, which must be under /run/glassine/device/, the
+#      seed's place in a running system;
+#   3. glassine-epdd (the panel) and glassine-rscreen (the client), each started again
+#      when it ends.
+# Without a seed (a stock partition table, while installing), its waveform or its
+# modules there is no screen, and the core, USB and the console go on as they are.
+#   start           (from the init, in the background)
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+RAMENV_DISKS='' RECOVERY_IDLE=600 RECOVERY_DEVICE_LABEL='' RECOVERY_SCREEN_STATE=''
+. /etc/glassine/ramenv.conf
+CONF=/etc/glassine/epd.conf
+EPD=/run/glassine-epd.sock
+log() { echo "<5>glassine-screen: $*" > /dev/kmsg; }
+none() { log "$*: no screen"; exit 0; }
+[ -r $CONF ] || none "no $CONF"
+
+rel=$(uname -r)
+L=/lib/modules/$rel/recovery-screen.list
+if [ -r "$L" ]; then
+	while read -r m; do
+		[ -n "$m" ] || continue
+		n=$(basename "$m" .ko | tr - _)
+		grep -q "^$n " /proc/modules && continue
+		insmod "/lib/modules/$rel/$m" || log "insmod $m failed"
+	done < "$L"
+fi
+
+# the waveform: its name in the seed is its path under /run/glassine/device/
+w=$(sed -n 's/#.*//; s/^waveform=//p' $CONF | sed 's/[[:space:]]*$//' | tail -n 1)
+case $w in
+/run/glassine/device/*) name=${w#/run/glassine/device/} ;;
+*) none "the adapter's waveform $w is not under /run/glassine/device/" ;;
+esac
+if [ ! -f "$w" ]; then
+	[ -n "$RECOVERY_DEVICE_LABEL" ] || none "no RECOVERY_DEVICE_LABEL (the device data seed)"
+	dev='' k=0
+	for p in $RAMENV_DISKS; do
+		for u in /sys/block/$p/*/uevent; do
+			[ -e "${u%/uevent}/partition" ] && grep -qx "PARTNAME=$RECOVERY_DEVICE_LABEL" "$u" 2>/dev/null || continue
+			u=${u%/uevent}; dev=/dev/${u##*/} k=$((k + 1))
+		done
+	done
+	[ $k = 1 ] || none "$k partitions named $RECOVERY_DEVICE_LABEL"
+	dumpe2fs -h "$dev" 2>/dev/null | grep -q '^Filesystem features:.*needs_recovery' \
+		&& none "the device data seed's journal needs a replay ($dev)"
+	man=$(debugfs -R 'cat /glassine/manifest' "$dev" 2>/dev/null)
+	[ "$(printf '%s\n' "$man" | head -n 1)" = format=1 ] || none "no device data seed on $dev"
+	sum=$(printf '%s\n' "$man" | awk -v n="$name" 'NR > 1 && $1 == n { print $3; exit }')
+	[ -n "$sum" ] || none "the seed on $dev holds no $name"
+	mkdir -p "${w%/*}"
+	debugfs -R "dump /glassine/$name $w.tmp" "$dev" > /dev/null 2>&1
+	s=$(wc -c < "$w.tmp" 2>/dev/null || echo 0)
+	if [ "$(sha256sum < "$w.tmp" 2>/dev/null | cut -d' ' -f1)" != "$sum" ]; then
+		rm -f "$w.tmp"; none "$name from the seed on $dev doesn't match its sha256"
+	fi
+	[ "$s" -ge 256 ] && [ "$(od -A n -t u4 -j 4 -N 4 "$w.tmp" | tr -d ' ')" = "$s" ] \
+		|| { rm -f "$w.tmp"; none "$name from the seed on $dev is not a waveform"; }
+	mv "$w.tmp" "$w"
+	log "waveform $name from the seed on $dev ($s bytes)"
+fi
+
+( n=0
+while :; do
+	/sbin/glassine-epdd -c $CONF -s $EPD
+	rc=$?
+	n=$((n + 1))
+	log "glassine-epdd ended (exit $rc)"
+	if [ $n -lt 5 ]; then sleep 2; else sleep 60; fi
+done ) &
+set -- --core /run/glassine-recovery.sock --epd $EPD --conf $CONF --idle "$RECOVERY_IDLE"
+[ -n "$RECOVERY_SCREEN_STATE" ] && set -- "$@" --state "$RECOVERY_SCREEN_STATE"
+while :; do
+	/bin/glassine-rscreen "$@"
+	log "glassine-rscreen ended (exit $?)"
+	sleep 2
+done

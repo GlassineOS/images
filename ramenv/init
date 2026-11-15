@@ -25,6 +25,8 @@
 #   RECOVERY_TOOL_LIMIT     seconds a glassine-deploy run may take (default 900)
 #   RECOVERY_USB_SERIAL     yes: a USB serial function (ttyGS0) next to the vendor one
 #   RECOVERY_TTYS           terminals the menu runs on (/dev names; console = /dev/console)
+#   RECOVERY_SCREEN         epd: the screen (the panel through glassine-epdd, touch and the
+#                           power key; /lib/glassine-recovery/screen reads its own keys)
 /bin/busybox mkdir -p /bin /proc /sys /dev /run /tmp
 /bin/busybox --install -s /bin
 export PATH=/bin
@@ -41,7 +43,7 @@ RAMENV_WATCHDOG_TIMEOUT='' RAMENV_CONNECT_WAIT='' RAMENV_IDLE='' RAMENV_OP_LIMIT
 RECOVERY=''
 [ -r /etc/glassine/recovery.version ] && RECOVERY=1
 RECOVERY_SYSTEM_LABEL='' RECOVERY_USERDATA_LABEL='' RECOVERY_USERDATA_PREFIX=media/glassine
-RECOVERY_IDLE=600 RECOVERY_TOOL_LIMIT='' RECOVERY_USB_SERIAL='' RECOVERY_TTYS=''
+RECOVERY_IDLE=600 RECOVERY_TOOL_LIMIT='' RECOVERY_USB_SERIAL='' RECOVERY_TTYS='' RECOVERY_SCREEN=''
 [ -r /etc/glassine/ramenv.conf ] && . /etc/glassine/ramenv.conf
 log "starting ($(uname -r))${RECOVERY:+, the recovery}"
 [ -n "$RAMENV_DISKS" ] || leave "no RAMENV_DISKS in /etc/glassine/ramenv.conf"
@@ -174,6 +176,9 @@ if [ -n "$RECOVERY" ]; then
 			sleep 2
 		done ) &
 	done
+	# the screen, a client like the menu (it starts its programs again itself)
+	[ "$RECOVERY_SCREEN" = epd ] && [ -x /lib/glassine-recovery/screen ] \
+		&& setsid /lib/glassine-recovery/screen < /dev/null > /dev/console 2>&1 &
 fi
 
 wait $pid

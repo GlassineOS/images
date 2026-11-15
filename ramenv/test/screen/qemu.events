@@ -1,0 +1,103 @@
+# The screen's QEMU run (test/qemu-recovery.sh, "screen"): screen-drive's script, a
+# touchscreen and a power key against the real core over the pool disk (deployments
+# A current, B previous, C). The host counts the confirmed operations in the core's log:
+# exactly select, rollback and reset; everything else here is cancelled or ignored.
+wait home 600
+sh test -s /run/glassine/device/waveform.wbf
+# select C: cancelled first
+tap Deployments
+wait deployments
+tap C
+wait deployment
+tap Start this one next
+wait confirm-select 300
+remember Start C
+tap Cancel
+wait cancelled 300
+tap Back to the start
+wait home 300
+# a confirmation can't be skipped: taps on its button from before it is shown, a finger
+# and the power key held down from before it until after it took input
+tap Deployments
+wait deployments
+tap C
+wait deployment
+tap Start this one next
+tapearly confirm-select
+sleep 1500
+page confirm-select
+tap Cancel
+wait cancelled 300
+tap Back to the start
+wait home 300
+tap Deployments
+wait deployments
+tap C
+wait deployment
+tap Start this one next
+holdearly confirm-select 1000
+sleep 1500
+page confirm-select
+tap Cancel
+wait cancelled 300
+tap Back to the start
+wait home 300
+tap Deployments
+wait deployments
+tap C
+wait deployment
+tap Start this one next
+keyearly confirm-select 1500
+sleep 1500
+page confirm-select
+# now confirmed: select C
+tap Start C
+wait done 600
+tap Back to the start
+wait home 300
+# rollback to B
+tap Deployments
+wait deployments
+tap Roll back to B
+wait confirm-rollback 300
+tap Roll back
+wait done 600
+tap Back to the start
+wait home 300
+# reset system, confirmed
+tap Reset
+wait reset
+tap Reset system
+wait confirm-reset 300
+tap Reset system
+wait done 900
+tap Back to the start
+wait home 300
+# the full reset with the power key alone: moved to, chosen, cancelled (Cancel comes first)
+tap Reset
+wait reset
+focus Full reset
+long
+wait confirm-reset-full 300
+long
+wait cancelled 300
+tap Back to the start
+wait home 300
+# diagnostics
+tap Diagnostics
+wait diag 600
+tap Back to the start
+wait home 300
+# restart, cancelled
+tap Restart
+wait restart
+tap Normal start
+wait confirm-restart
+tap Cancel
+wait home 300
+# no input: the idle notice; the power key brings the page back; then the core restarts
+# it (the host checks; the restart page itself is in the headless run)
+wait idle 120
+short
+wait home 60
+wait idle 120

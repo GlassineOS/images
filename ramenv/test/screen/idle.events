@@ -1,0 +1,7 @@
+# no input: the idle notice, then the restart's page (screen-headless.sh, --idle 9)
+await home
+await idle
+shot idle
+await restarting
+shot restarting
+quit
