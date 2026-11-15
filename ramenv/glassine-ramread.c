@@ -1049,6 +1049,8 @@ static int deploy_parts_rw(int on)
 {
 	int bad = 0;
 	char parent[64];
+	/* every mount gone before any flag goes back */
+	if (!on) for (int i = 0; i < g_ndparts; i++) unmount_part(g_dpart[i]);
 	for (int i = 0; i < g_ndparts; i++) {
 		if (part_parent(g_dpart[i], parent, sizeof parent) < 0) { if (on) say("%s: not a partition", g_dpart[i]); bad = 1; continue; }
 		if (is_boot_area(parent)) { say("%s: on a boot area, never written", g_dpart[i]); bad = 1; continue; }
@@ -1058,7 +1060,6 @@ static int deploy_parts_rw(int on)
 				bad = 1;
 			}
 		} else {
-			unmount_part(g_dpart[i]);
 			if (part_ro(g_dpart[i], 1) < 0) { say("%s: cannot set read-only again: %s", g_dpart[i], strerror(errno)); bad = 1; }
 			if (part_ro(parent, 1) < 0) { say("%s: cannot set read-only again: %s", parent, strerror(errno)); bad = 1; }
 			if (set_force_ro(parent, 1) < 0) { say("%s: force_ro 1: %s", parent, strerror(errno)); bad = 1; }
@@ -1099,7 +1100,7 @@ static int deploy_parts_rw(int on)
 	return bad ? -1 : 0;
 }
 
-/* DEPLOY (v3): `length` bytes of text, lines `KEY VALUE`: `action A` (select, rollback,
+/* DEPLOY (v3), refused once ARM was taken in this start: `length` bytes of text, lines `KEY VALUE`: `action A` (select, rollback,
  * pin, remove, reset, reset-full), `id ID` (select, pin, remove), `discard-hibernation
  * yes` (optional), `confirm TOKEN`. The token is the action, its id and
  * `discard-hibernation` when asked, one space apart (`select 20261101-120000`); without
@@ -1171,7 +1172,10 @@ static int op_deploy(int in, int out, const struct request *r)
 		return rc;
 	}
 	free(o);
-	if (g_armed == ARM_ARMED) return reply(out, r, ST_ARMED, "ranges are armed for writing: DISARM first");
+	/* after ARM the partition table may be another (it is never re-read here): the
+	 * deploy partitions named at start may not be what is on the disk now */
+	if (g_armed != ARM_NEVER) return reply(out, r, ST_ARMED, g_armed == ARM_ARMED ? "ranges are armed for writing in this start"
+								  : "ranges were armed in this start: the partition table may have changed; restart first");
 	say("deploy: %s confirmed (%s connection)", token, t_local ? "local" : "computer");
 	phase(PH_DISK);
 	if (deploy_parts_rw(1) < 0) {

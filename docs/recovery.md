@@ -85,7 +85,9 @@ write-recovery, then has nothing left to write: the recovery is already in place
 what an installation is complete with (spec 008, Summary). The installer's
 `ram-environment` role and its `recovery` role become one artifact. That change is the
 installer's and the release's (`release.json` today names `ram-environment`, and
-`recovery` as missing). It isn't made here.
+`recovery` as missing). It isn't made here. `scripts/pool-image --ramenv DIR` reads
+`DIR/ramenv/`, the RAM environment's export; publishing the recovery under that role
+needs it to read `recovery-export`'s `DIR/recovery/` as well.
 
 ## The recovery's start
 
@@ -93,8 +95,11 @@ installer's and the release's (`release.json` today names `ram-environment`, and
 `/etc/glassine/recovery.version`, it also:
 
 1. finds the partitions named by `RECOVERY_SYSTEM_LABEL` and `RECOVERY_USERDATA_LABEL`.
-   There is no udev, so it reads `PARTNAME=` in `/sys/class/block/*/uevent`, and waits up
-   to `RAMENV_DISK_WAIT` for them;
+   There is no udev, so it reads `PARTNAME=` in `/sys/class/block/*/uevent`. It waits up
+   to `RAMENV_DISK_WAIT` for a disk to appear, then 5 s more for the labels. A disk
+   without them (the stock table, during an install) doesn't hold the start up: the
+   recovery serves without `--deploy-part`, STATUS says there is no deployment, and a
+   DEPLOY is refused by the tools before any partition is made writable;
 2. writes `/etc/glassine/deploy.conf` for glassine-deploy. It names the devices
    themselves (`SYSTEM_DEV=/dev/mmcblk0p50`), `USERDATA_PREFIX` and the mount points under
    `/run/glassine`;
@@ -214,7 +219,7 @@ With the token, `deploy` runs glassine-deploy's own verb with `--yes`:
 | `rollback` | `rollback --yes` |
 | `reset` | `reset --now --yes` |
 | `reset-full` | `reset --full --now --yes` |
-| `remove ID` | `remove ID --yes` (offered once boot's pinned glassine-deploy has it) |
+| `remove ID` | `remove ID --yes` (it refuses the current, the previous and the candidate) |
 | `pin ID` | none: glassine-deploy has no pin verb, so it is never offered |
 
 `--discard-hibernation` is added with `discard-hibernation yes`. The answer is status 0 for
@@ -295,8 +300,11 @@ When it ends, or is stopped:
 STATUS, `describe` and DIAG open no window: glassine-deploy reads the system partition
 through its own `ro,rescue=nologreplay` mount, and userdata with `debugfs`.
 
-DEPLOY is refused while ranges are armed, and ARM can't come while a DEPLOY runs because
-requests are serialized. So the two kinds of writes never overlap.
+DEPLOY is refused (status 8) once ARM was taken in this start, armed or disarmed: after
+an install's writes the partition table may have changed, and the deploy partitions found
+at the start may not be what is on the disk now. A restart finds them again. ARM can't
+come while a DEPLOY runs because requests are serialized. So the two kinds of writes
+never overlap.
 
 ## Idle, watchdog, limits
 
@@ -334,34 +342,41 @@ These are the RAM environment's rules, with these additions:
   - pin not offered;
   - each confirmed action reaching `deploy` with exactly its arguments, once;
   - a failing tool (status 10, its exit code);
-  - DEPLOY refused while armed;
+  - DEPLOY refused while armed and after DISARM (an unconfirmed one still says what it
+    does);
   - DIAG and its sha256;
   - on the local connection: ARM, WRITE (versions 2 and 3) and DISARM refused and kept in
     step, while STATUS, DEPLOY, READ and REBOOT work;
   - a tool stopped at the limit.
 - QEMU (`ramenv/test/qemu-recovery.sh`, arm64 virt, the RAM environment test's Debian
-  kernel). A third disk holds a pool made without privileges: a GPT with `system_b`
+  kernel). A pool disk is made without privileges: a GPT with `system_b`
   (btrfs from `mkfs.btrfs --rootdir`, `bases/base1` a read-only subvolume, `state/` naming
   A current and B previous) and `userdata` (ext4 from `mke2fs -d`, deployments A, B and C,
   with a log in A). It is driven by the real glassine-deploy at the pinned boot commit.
-  - `usb`: the composite gadget on `dummy_hcd`.
+  - `usb`: the install case, without the pool (no `system_b`, no `userdata`); the
+    composite gadget on `dummy_hcd`.
+    - The recovery says there are no such partitions and serves at once.
     - The vendor interface is interface 0.
-    - The menu answers over the host's `/dev/ttyACM0`.
+    - The menu answers over the host's `/dev/ttyACM0` and lists no deployment.
+    - A confirmed rollback through `glassine-rcall` is refused (status 10).
     - `client-usb` runs the RAM environment test's whole plan: every disk read whole and
       compared, then the version 2 writes, including a new partition table. The images
-      must be the originals plus exactly those bytes, and the pool disk unchanged.
-  - `deploy`: version 3 over virtio-serial.
+      must be the originals plus exactly those bytes.
+  - `deploy`: the pool on QEMU's emulated eMMC (`mmcblk0`, with two boot areas), so the
+    write window goes through the eMMC's `force_ro` too; version 3 over virtio-serial.
     - STATUS: A current, B previous, C kept, base present.
     - select C: status 9 without the confirmation and with another id's token, then
       done, and STATUS shows C as the candidate with 2 tries.
     - rollback: B is the candidate. select A: no candidate.
     - pin: not offered. select of a missing deployment: status 10.
-    - DIAG: sha256, SHA256SUMS, A's log read from userdata, and every `vd*` device
+    - DIAG: sha256, SHA256SUMS, A's log read from userdata, and every disk and partition
       read-only in the kernel after the operations.
-    - HASH before and after: vda and vdb unchanged, and the pool disk unchanged outside
-      its system partition.
+    - HASH before and after: vda, vdb and the boot areas unchanged, and the pool disk
+      unchanged outside its system partition.
+    - remove: A (current) refused by the tool (status 10); C: status 9 without the
+      confirmation, then done, and the list holds A and B.
     - The idle restart.
-  - `console`: the menu on a virtio console.
+  - `console`: the pool as a virtio disk; the menu on a virtio console.
     - rollback: a wrong token cancels, the right one does it.
     - reset: `reset --now` makes a new deployment, the candidate.
     - diagnostics.
@@ -369,9 +384,19 @@ These are the RAM environment's rules, with these additions:
   - Every run checks the kernel's read-only state of every disk and partition, and that a
     write to each fails.
 
-Not covered: the device's kernel, its UDC, eMMC host and watchdog, the boot loader's
-recovery path, a device's real pool and logs, Windows' binding of the composite device,
-and the installer's client against version 3 (only the pinned bytes tie them).
+Not covered:
+
+- the device's kernel, its UDC, eMMC host and watchdog, the boot loader's recovery
+  path, a device's real pool and logs, Windows' binding of the composite device;
+- the installer's client against version 3 (only the pinned bytes tie them);
+- `reset-full` and `discard-hibernation` against the real glassine-deploy (the unit test
+  checks their arguments only), and a hibernated pool;
+- pstore contents in DIAG (QEMU has no ramoops);
+- the real glassine-deploy stopped at the tool limit (the unit test stops a stand-in);
+- a client that stalls mid-request: a request holds the lock while it reads its payload and answers,
+  so a stalled client holds up the other connection until its operation limit;
+- CI: `scripts/test-ramenv.sh` and `scripts/test-recovery.sh` run by hand, no workflow
+  runs them.
 
 ## Left for later
 
@@ -379,8 +404,6 @@ and the installer's client against version 3 (only the pinned bytes tie them).
   same confirmations, touch and the power key.
 - **Pin (FR-007).** glassine-deploy has no pin verb. `pin` is reserved in DEPLOY and
   answered "not offered" until boot defines it.
-- **remove** is offered as soon as the pinned glassine-deploy has it. The pin used here
-  doesn't.
 - **Repair the boot (FR-009)** and **the hand-over to another system's recovery (Scenario 5)**.
 - **Starting it (FR-002)**:
   - `reboot recovery` from the running system;

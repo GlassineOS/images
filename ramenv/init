@@ -65,12 +65,21 @@ if [ -n "$RECOVERY" ]; then
 			grep -qx "PARTNAME=$1" "$u" 2>/dev/null && { u=${u%/uevent}; echo "${u##*/}"; return; }
 		done
 	}
-	w=${RAMENV_DISK_WAIT:-60} t=0 sysp='' udp=''
+	# a served disk there (any match of RAMENV_DISKS)
+	disk_here() {
+		for p in $RAMENV_DISKS; do for d in /sys/block/$p; do [ -e "$d" ] && return 0; done; done
+		return 1
+	}
+	# the labels: up to RAMENV_DISK_WAIT for a first disk, then 5 s more for its
+	# partitions; a disk without them (a stock table, while installing) goes on
+	# without them, and DEPLOY has nothing to work on
+	w=${RAMENV_DISK_WAIT:-60} t=0 settle=0 sysp='' udp=''
 	while :; do
 		[ -z "$RECOVERY_SYSTEM_LABEL" ] || sysp=$(part "$RECOVERY_SYSTEM_LABEL")
 		[ -z "$RECOVERY_USERDATA_LABEL" ] || udp=$(part "$RECOVERY_USERDATA_LABEL")
 		{ [ -n "$sysp" ] || [ -z "$RECOVERY_SYSTEM_LABEL" ]; } && { [ -n "$udp" ] || [ -z "$RECOVERY_USERDATA_LABEL" ]; } && break
 		[ $t -lt "$w" ] || break
+		if disk_here; then settle=$((settle + 1)); [ $settle -le 5 ] || break; fi
 		sleep 1; t=$((t + 1))
 	done
 	log "system partition: ${sysp:-none} ($RECOVERY_SYSTEM_LABEL), userdata: ${udp:-none} ($RECOVERY_USERDATA_LABEL)"

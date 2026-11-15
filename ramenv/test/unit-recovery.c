@@ -15,7 +15,8 @@
  *     the token and what describe said, and deploy never runs; pin (describe exit 64)
  *     is not offered; the right token runs deploy with exactly the action's arguments,
  *     discard-hibernation is its own confirmation; a failing tool is status 10 with its
- *     exit code; DEPLOY while armed is refused (8);
+ *     exit code; DEPLOY is refused (8) once ARM was taken in this start, also after
+ *     DISARM (the partition table may have changed);
  *   - DIAG: the file the tool wrote, with its sha256 in the header;
  *   - the local connection: ARM, WRITE, DISARM refused, their bytes read and dropped,
  *     the next request in step; STATUS, DEPLOY, DIAG served there too;
@@ -259,7 +260,11 @@ int main(void)
 	send_req(3, OP_DISARM, 343, 0, 0, 0);
 	r = get_rsp();
 	CHECK(r.status == 0, "DISARM");
-	CHECK(!strcmp(slurp(logf), "select 20261101-120000\nrollback\nreset-full\nrollback discard-hibernation\nremove A\n"), "deploy did not run while armed");
+	r = deploy(344, "action rollback\nconfirm rollback\n");
+	CHECK(r.status == ST_ARMED, "DEPLOY after DISARM: refused (8): the partition table may have changed");
+	r = deploy(345, "action rollback\n");
+	CHECK(r.status == ST_CONFIRM, "after ARM, an unconfirmed DEPLOY still says what it does");
+	CHECK(!strcmp(slurp(logf), "select 20261101-120000\nrollback\nreset-full\nrollback discard-hibernation\nremove A\n"), "deploy did not run once ARM was taken");
 
 	/* DIAG */
 	send_req(3, OP_DIAG, 350, 0, 0, 0);
@@ -297,7 +302,7 @@ int main(void)
 	r = deploy(405, "action rollback\n");
 	CHECK(r.status == ST_CONFIRM, "local: DEPLOY needs the same confirmation");
 	r = deploy(406, "action rollback\nconfirm rollback\n");
-	CHECK(r.status == 0, "local: DEPLOY confirmed");
+	CHECK(r.status == ST_ARMED, "local: DEPLOY refused too once ARM was taken (on the other connection)");
 	send_req(3, OP_READ, 407, 0, 0, 512);
 	r = get_rsp();
 	CHECK(r.status == 0 && r.length == 512, "local: READ served");
