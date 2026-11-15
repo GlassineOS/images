@@ -8,7 +8,8 @@
 # by plain name (no pin there: a live `apk upgrade` moves them on), then fails if the
 # installed set differs from the lock. A lock line that no repository offers any more
 # fails before anything is installed, naming the line.
-# LOCK=refresh installs the newest versions instead and skips the comparison
+# LOCK=refresh upgrades what is installed and installs the newest versions instead, and
+# skips the comparison
 # (scripts/lock.sh writes the locks from that).
 set -eu
 S=/run/stage
@@ -27,8 +28,12 @@ refresh() {
 # and apk would reuse an index younger than its cache age, so a just-published version
 # the lock asks for would be missing
 if [ "${LOCK:-check}" = refresh ]; then
+	# what the stage starts from (the Alpine image's packages, an earlier stage's) moves
+	# to the newest too: apk add alone upgrades nothing, so the lock would keep an
+	# outdated, possibly vulnerable version that the base image happens to carry
+	apk upgrade -q -U --cache-dir "$C"
 	# shellcheck disable=SC2086
-	[ -z "${pk# }" ] || apk add -q -U --cache-dir "$C" $pk
+	[ -z "${pk# }" ] || apk add -q --cache-dir "$C" $pk
 else
 	[ -f "$S/lock" ] || { echo "apk-stage: no lock for this stage: run scripts/lock.sh" >&2; exit 1; }
 	apk update -q --cache-dir "$C"
