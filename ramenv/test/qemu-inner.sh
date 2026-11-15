@@ -6,7 +6,7 @@
 #
 # Two disk images stand in for the eMMC's user area (vda, 64 MiB with a GPT and two
 # partitions) and a boot area (vdb, 4 MiB). The usb run adds QEMU's emulated eMMC
-# (emmc.img: two 1 MiB boot areas, then a 30 MiB user area with a GPT and one
+# (emmc.img: two 1 MiB boot areas, then a 32 MiB user area (QEMU wants a power of 2) with a GPT and one
 # partition) on sdhci-pci: the kernel's own mmcblk0, mmcblk0boot0/1 and force_ro. The
 # guest boots the production initramfs with a test archive appended: a shim that loads
 # the test kernel's modules and then runs the production init, and a ramenv.conf for
@@ -42,7 +42,7 @@ sgdisk -o -n 1:2048:+16M -n 2:0:+16M $W/vda.img > /dev/null
 head -c 4M /dev/urandom > $W/vdb.img
 A0=$(sha256sum $W/vda.img | cut -c1-64) B0=$(sha256sum $W/vdb.img | cut -c1-64)
 head -c 2M /dev/urandom > $W/mmcb.img
-head -c 30M /dev/urandom > $W/mmcu.img
+head -c 32M /dev/urandom > $W/mmcu.img
 sgdisk -o -n 1:2048:+8M $W/mmcu.img > /dev/null
 cat $W/mmcb.img $W/mmcu.img > $W/emmc.img
 sha() { sha256sum "$1" | cut -c1-64; }
@@ -158,7 +158,7 @@ cmp -s $W/emmc.img $W/emmc.want && ok "usb: emmc.img = the original plus exactly
 [ "$(sha $W/vdb.img)" = "$B0" ] && ok "usb: vdb.img unchanged" || bad "usb: vdb.img changed"
 sgdisk -v $W/vda.img 2>&1 | grep -q 'No problems found' && [ "$(sgdisk -p $W/vda.img | grep -c '^ *[123] ')" = 3 ] \
 	&& ok "usb: vda's new partition table is valid, 3 partitions (sgdisk -v)" || bad "usb: vda's new partition table (sgdisk -v: $(sgdisk -v $W/vda.img 2>&1 | tr '\n' ' '))"
-grep -aq 'glassine-ramread: disarmed: every disk read-only again$' $W/usb.log && ok "usb: the reader logged the disarm" || bad "usb: the reader logged the disarm"
+grep -aq 'glassine-ramread: disarmed: every disk read-only again.\?$' $W/usb.log && ok "usb: the reader logged the disarm" || bad "usb: the reader logged the disarm"
 # the later runs must leave the images as the usb run did
 A0=$(sha $W/vda.img)
 

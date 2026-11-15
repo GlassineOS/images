@@ -208,7 +208,7 @@ static void writes(const char *plan, uint8_t *buf)
 	for (int i = 0; i < n; i++) {
 		if (fnmatch("mmcblk*boot*", name[i], 0)) continue;
 		char t[128];
-		snprintf(t, sizeof t, "range %s 0 512\n", name[i]);
+		snprintf(t, sizeof t, "range %.63s 0 512\n", name[i]);
 		r = arm_op(buf, 2002, t);
 		QT(r.status == ST_RANGE, "ARM of the boot area %s refused (status %u: %s)", name[i], r.status, (char *)buf);
 		boots++;
@@ -278,7 +278,7 @@ static void writes(const char *plan, uint8_t *buf)
 	QT(bad == 0, "after DISARM every disk and partition is read-only again (%s)", states);
 	for (int i = 0; i < n; i++) {
 		char p[128], v[8] = "";
-		snprintf(p, sizeof p, "/sys/block/%s/force_ro", name[i]);
+		snprintf(p, sizeof p, "/sys/block/%.63s/force_ro", name[i]);
 		int f = open(p, O_RDONLY);
 		if (f < 0) continue;
 		ssize_t k = read(f, v, sizeof v - 1);
