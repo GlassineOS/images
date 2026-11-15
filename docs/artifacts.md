@@ -36,6 +36,7 @@ and are never artifacts.
 ├── modules/
 │   ├── <release>.btrfs.zst                the modules subvolume's full stream
 │   └── <release>.manifest                 its content manifest (owner 0:0)
+│   └── releases/<build-id>/               a release for the installer (below), on request
 ├── bootimg/<id>.img, <id>.manifest        boot images and their boot records
 └── boot/
     ├── dtb/<device>@<id>.dtb, .manifest
@@ -199,3 +200,67 @@ adds it is the promotion. A build is promoted at a commit of this repository onl
 A promoted record never changes: promoting the same build again finds the same bytes.
 Readers find the build's other files (the base, its streams, the modules stream, the
 boot image) by the names this record holds, in an artifacts folder that has them.
+
+## Releases
+
+`scripts/pool-image ARTIFACTS TARGET [--build ID] [--ramenv DIR]` turns one build into
+what GlassineOS/installer reads (its spec 002, FR-019a): a folder with `release.json`
+and the files it names. Default place: `<artifacts>/<target>/releases/<build-id>/`
+(`--out DIR` for another); it is written under a `.`-name ending in `.tmp` and renamed
+when complete, and an existing one is never replaced.
+
+```
+releases/<build-id>/
+├── release.json
+├── base/<base-id>.pool.img          the system partition's first contents (btrfs)
+├── kernel/<bootimg-id>.img          the build's boot image, for boot_b
+└── ram-environment/<id>.img         with --ramenv: the RAM environment, for recovery
+```
+
+**The pool image** (role `base`, kind `btrfs-pool-image`) is a whole btrfs file system
+that the installer writes as bytes to the start of the system partition (the RAM
+environment only writes armed ranges; nothing on the device runs `mkfs` or `receive`
+during an install). It is made in a privileged container
+(`scripts/pool-image-container.sh`, a loop device on a tmpfs, like materialize):
+
+1. `mkfs.btrfs` on a sparse file about the size of what it will hold (the streams'
+   uncompressed size + 256 MiB, doubled until it fits): btrfs sizes its chunks by the
+   file system's size and a shrink can't make a chunk smaller. No mixed block groups.
+2. GlassineOS/boot's `glassine-deploy init POOL --install-marker` on the empty, mounted
+   pool: `bases/`, `modules/`, `state/` as boot's `docs/deployments.md` defines it, and
+   the install marker `state/install`. The layout is boot's; this repository never
+   writes it by hand.
+3. The base's full stream received into `bases/<base-id>` (read-only, the received UUID
+   of its base record, so every later base arrives as a delta), and the build's modules
+   stream into `modules/<release>`: the release of the boot image in `kernel`.
+4. Shrunk to what it allocates + 64 MiB (`--margin`), a whole MiB, at least 256 MiB (the
+   kernel refuses a smaller btrfs); `btrfs check`, then mounted read-only once more and
+   checked. The image is not partition-sized: the first start grows the file system to
+   the partition (GlassineOS/boot). Every unit installed from one image has the same
+   btrfs fsid.
+
+The boot that lays the pool out is the build's `boot_commit` (fetched from the
+Dockerfile's `BOOT`), so the layout and the initramfs that reads it come from one
+commit. `--boot DIR` (a clean checkout) or `--boot-commit SHA` takes another one; the
+release is then a trial (`boot:<commit12>`). A boot without the `init` verb fails the
+command and leaves nothing.
+
+**release.json**, `release_format` 1. Per role the installer reads `file` (relative to
+the folder), `sha256`, `size`, `kind` and `min_partition_bytes`:
+
+| Role | kind | min_partition_bytes |
+|---|---|---|
+| `base` | `btrfs-pool-image` | spec 002's rule: the base's used bytes as received + 4 × 64 MiB + the modules' used bytes, × 1.25, at least 1 GiB, a whole MiB; never below the image |
+| `kernel` | `raw-image` | the target's `board.conf` `PART_SIZE` (every later boot image is packed to that limit) |
+| `ram-environment` | `raw-image` | its size |
+
+Readers ignore the other keys: `target`, `build`, `trial` and `trial_reasons` (the
+build's, plus `boot:<commit12>`), `missing` (the roles this folder doesn't supply:
+`boot-loader`, `partition-layout`, `recovery`, and `ram-environment` without
+`--ramenv`), and per role where it came from (`base`, `received_uuid`,
+`kernel_release`, `layout_boot_commit`, `bootimg`, `ramenv`).
+
+`scripts/test-pool-image.sh` tests it on fixtures: the folder and release.json, the
+image read-only (the base read-only with its received UUID, the modules, the marker),
+and, on a copy grown to `min_partition_bytes`, a delta made by materialize (a base and
+its child) received onto the base inside the image.
