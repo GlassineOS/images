@@ -1,0 +1,24 @@
+# long names (screen-core.py long): a deployment id longer than a line, wrapped
+# everywhere it is shown and kept clear of the tags
+await home
+tap Deployments
+await deployments
+shot deployments-long
+tap 20261113-0800
+await deployment
+shot deployment-long
+tap Start this one next
+await confirm-select
+shot confirm-select-long
+tap Cancel
+await cancelled
+tap Back to the start
+await home
+tap Deployments
+await deployments
+tap 20261113-0800
+await deployment
+tap Delete
+await confirm-remove
+shot confirm-remove-long
+quit
