@@ -130,7 +130,8 @@ the pulled ones too, and compares them with what is published.
 
 What the key does not hold, and what keeps it honest anyway:
 - `ALPINE` is a tag, not a digest. The initramfs's packages are pinned by
-  `stages/alpine/lock` and `stages/initramfs/lock`: a moved tag either installs the same
+  `stages/alpine/lock` and `stages/initramfs/lock` (`lock.x86_64` on x86-64): a moved
+  tag either installs the same
   packages or fails the lock check.
 - Packages are named by version in the locks, not by checksum: the repository serving
   other bytes under a version a lock names would go unnoticed until the next

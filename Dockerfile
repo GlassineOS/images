@@ -13,7 +13,10 @@
 #
 #   docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
 #
-# builds the default device's tree. DEVICE picks another device-<name> stage. The kernel
+# builds the default device's tree. DEVICE picks another device-<name> stage, and
+# --platform the architecture: the Note Air's stages are arm64's, the generic UEFI PC's
+# (DEVICE=uefi-pc, --platform linux/amd64) x86-64's; a stage locks each architecture it
+# builds for apart (lock for arm64, lock.x86_64). The kernel
 # and device-tree stages come first and build only when a --target asks for them; base-export
 # stays the last stage, so it is what a build without --target makes.
 ARG ALPINE=alpine:3.24
@@ -96,6 +99,23 @@ RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux 
     --mount=type=bind,source=scripts/kernel.sh,target=/run/kernel.sh \
     --mount=type=cache,id=${KCACHE}-${KERNEL_BUILD_DIGEST},target=/cache,sharing=locked \
     REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=$KERNEL_BUILD_IMAGE@$KERNEL_BUILD_DIGEST JOBS=$JOBS sh /run/kernel.sh build
+
+# The kernel of a generic x86-64 PC (KERNEL=lts, --platform linux/amd64): Alpine's
+# linux-lts, installed as a package at the version stages/kernel-lts/lock.x86_64 names,
+# not compiled here. Its tree is the shape kernel-export's contract gives a device's
+# modules subvolume (modules/<release>/: the modules and depmod's files, an empty
+# firmware/, kernel.manifest), with the EFI-stub image as vmlinuz. linux-lts needs one
+# provider of linux-firmware-any: linux-firmware-none, so no firmware is installed.
+# From the Alpine image itself (the kernel is Alpine's; the alpine stage, with our
+# repository, comes later in this file).
+FROM ${ALPINE} AS kernel-lts
+ARG LOCK=check
+RUN --mount=type=bind,source=stages/kernel-lts,target=/run/stage \
+    --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    LOCK=$LOCK sh /run/apk-stage.sh
+RUN --mount=type=bind,source=scripts/kernel-package.sh,target=/run/kernel-package.sh \
+    sh /run/kernel-package.sh linux-lts /boot/vmlinuz-lts
 
 FROM kernel-${KERNEL} AS kernel
 FROM scratch AS kernel-export
@@ -204,6 +224,16 @@ RUN --mount=type=bind,source=stages/device-example,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-example/rootfs/ /
+
+# A generic x86-64 PC that boots by UEFI (--platform linux/amd64): what every such PC
+# needs and nothing of a display, a panel or a vendor. On glassine-common, not on eink.
+FROM glassine-common AS device-uefi-pc
+ARG LOCK=check
+RUN --mount=type=bind,source=stages/device-uefi-pc,target=/run/stage \
+    --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    LOCK=$LOCK sh /run/apk-stage.sh
+COPY stages/device-uefi-pc/rootfs/ /
 
 # ---------------------------------------------------------------------------------------
 # The initramfs and the boot image (GlassineOS/boot's docs/kernel-artifacts.md):

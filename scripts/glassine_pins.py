@@ -10,8 +10,9 @@ holds them):
     platforms(dockerfile)              the constant platforms of FROM --platform=...
     stages(dockerfile)                 every FROM ... AS stage: its parent and the stages it reads
     chain(dockerfile, target, over)    the stage chain of a target's base, in build order
-    locked(names, stages_dir)          the stages of names that have stages/<stage>/lock
-    locks_digest(names, stages_dir)    the base manifest's locks value
+    lock_file(arch)                    a stage's lock file for an architecture: lock, lock.x86_64
+    locked(names, stages_dir, arch)    the stages of names that have that lock file
+    locks_digest(names, stages_dir, arch)   the base manifest's locks value
     export_keys(dockerfile, repo, over, arch)   each registry export's key (docs/registry.md)
 
 Used by kernel-check, materialize, build and registry. Imported from the scripts
@@ -253,17 +254,29 @@ def reachable(dockerfile, roots, over=None, stop=()):
     return [n for n in st if n in seen]
 
 
-def locked(names, stages_dir):
-    """The stages of names (order kept) that have a lock file."""
-    return [n for n in names if os.path.isfile(os.path.join(stages_dir, n, 'lock'))]
+# a target's arch (targets/<target>/target) -> its stages' lock file (scripts/apk-stage.sh:
+# lock for aarch64, lock.<apk arch> for any other)
+LOCK_FILES = {'arm64': 'lock', 'aarch64': 'lock', 'x86_64': 'lock.x86_64', 'amd64': 'lock.x86_64'}
 
 
-def locks_digest(names, stages_dir):
+def lock_file(arch='arm64'):
+    """The name of a stage's lock file for arch (a target's arch=)."""
+    if arch not in LOCK_FILES:
+        raise ValueError(f'no lock file for the architecture {arch!r}')
+    return LOCK_FILES[arch]
+
+
+def locked(names, stages_dir, arch='arm64'):
+    """The stages of names (order kept) that have arch's lock file."""
+    return [n for n in names if os.path.isfile(os.path.join(stages_dir, n, lock_file(arch)))]
+
+
+def locks_digest(names, stages_dir, arch='arm64'):
     """GlassineOS/boot's base manifest locks: sha256 of, for each stage in names (build
-    order), the stage's name, a newline and its lock file's bytes."""
+    order), the stage's name, a newline and its lock file's bytes (arch's)."""
     h = hashlib.sha256()
     for n in names:
-        h.update(n.encode() + b'\n' + read(os.path.join(stages_dir, n, 'lock')))
+        h.update(n.encode() + b'\n' + read(os.path.join(stages_dir, n, lock_file(arch))))
     return h.hexdigest()
 
 

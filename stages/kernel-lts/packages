@@ -1,0 +1,6 @@
+# The kernel of a generic x86-64 PC: Alpine's long-term-support kernel, for real PCs
+# (their storage, USB and graphics drivers as modules) and virtual machines alike.
+# linux-firmware-none provides linux-firmware-any, which linux-lts needs, without any
+# firmware file: firmware for a PC's devices is not chosen here.
+linux-lts
+linux-firmware-none
