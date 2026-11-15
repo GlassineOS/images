@@ -74,7 +74,8 @@ fill() {
 	rm -f $W/pool.img
 	truncate -s "$1" $W/pool.img
 	mkfs.btrfs -q $W/pool.img || die "mkfs.btrfs failed"
-	mount -o loop,noatime,compress=zstd $W/pool.img $P
+	mount -o loop,noatime,compress=zstd $W/pool.img $P || die "mounting the pool failed"
+	mountpoint -q $P || die "the pool is not mounted"
 
 	# the layout: boot's own verb, on the empty, mounted pool (docs/artifacts.md, Releases)
 	rc=0
@@ -84,11 +85,12 @@ fill() {
 	for d in bases modules state; do [ -d $P/$d ] || die "init made no $d/"; done
 	[ -f $P/state/format ] || die "init wrote no state/format"
 	[ -e $P/state/install ] || die "init wrote no install marker state/install"
-	U0=$(used)
+	U0=$(used); [ -n "$U0" ] || die "no used bytes from btrfs filesystem usage"
 
 	# the base and the modules, received as glassine-deploy receive keeps them
 	receive "/a/$STREAM" $P/bases "$BASE" || return 1; U1=$(used)
 	receive "/a/$MSTREAM" $P/modules "$RELEASE" || return 1; U2=$(used)
+	[ -n "$U1" ] && [ -n "$U2" ] || die "no used bytes from btrfs filesystem usage"
 }
 
 tick

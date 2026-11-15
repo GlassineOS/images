@@ -283,6 +283,7 @@ def main(argv):
             f.write('\n')
         shutil.rmtree(os.path.join(stage, 'o'))
         shutil.rmtree(work, ignore_errors=True)
+        os.chmod(stage, 0o755)
         os.rename(stage, out)
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
