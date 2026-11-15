@@ -1,5 +1,8 @@
 # The RAM environment
 
+(The [recovery](recovery.md) is built from the same daemon, init and device config, with
+protocol version 3 on top; nothing below changes for the RAM environment.)
+
 A small system that runs from RAM and serves a device's whole internal storage to a
 computer over USB. It is read-only until the computer arms ranges for writing. It does
 two jobs of an install from stock (installer spec 001): the full backup before the

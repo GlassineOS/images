@@ -8,7 +8,7 @@
 set -eu
 O=/out
 apt-get update -qq >/dev/null
-apt-get install -y -qq --no-install-recommends kmod xz-utils >/dev/null
+apt-get install -y -qq --no-install-recommends kmod xz-utils zstd >/dev/null
 pkg=$(apt-cache depends linux-image-arm64 | sed -n 's/.*Depends: \(linux-image-[0-9][^ ]*\).*/\1/p' | head -n 1)
 [ -n "$pkg" ] || { echo "kit.sh: no linux-image package for linux-image-arm64" >&2; exit 1; }
 cd /tmp
@@ -20,13 +20,22 @@ rel=$(ls /tmp/k/lib/modules)
 depmod -b /tmp/k "$rel"
 cp /tmp/k/boot/vmlinuz-"$rel" $O/Image
 rm -rf $O/mods; mkdir -p $O/mods
-: > $O/mods/load.list
-for m in virtio_blk configfs usbcore udc_core libcomposite dummy_hcd usb_f_fs i6300esb sdhci_pci mmc_block; do
-	modprobe -d /tmp/k -S "$rel" --show-depends $m | sed -n 's/^insmod \([^ ]*\).*/\1/p'
-done | awk '!seen[$0]++' | while read -r k; do
-	b=${k##*/}; b=${b%.xz}; b=${b%.zst}; b=${b%.gz}
-	case $k in *.xz) xz -dc "$k" ;; *.zst) zstd -qdc "$k" ;; *.gz) gzip -dc "$k" ;; *) cat "$k" ;; esac > $O/mods/$b
-	echo "$b" >> $O/mods/load.list
-done
+# load.list: the RAM environment's runs; load-recovery.list: the recovery's, which also
+# need the file systems glassine-deploy mounts, the USB serial function (and the host's
+# cdc_acm, to read it inside the guest) and a virtio console for the menu
+mods() {	# mods LIST MODULE...: the modules and what they depend on, in load order
+	l=$1; shift
+	: > $O/mods/$l
+	for m in "$@"; do
+		modprobe -d /tmp/k -S "$rel" --show-depends $m | sed -n 's/^insmod \([^ ]*\).*/\1/p'
+	done | awk '!seen[$0]++' | while read -r k; do
+		b=${k##*/}; b=${b%.xz}; b=${b%.zst}; b=${b%.gz}
+		[ -f $O/mods/$b ] || case $k in *.xz) xz -dc "$k" ;; *.zst) zstd -qdc "$k" ;; *.gz) gzip -dc "$k" ;; *) cat "$k" ;; esac > $O/mods/$b
+		echo "$b" >> $O/mods/$l
+	done
+}
+base="virtio_blk configfs usbcore udc_core libcomposite dummy_hcd usb_f_fs i6300esb sdhci_pci mmc_block"
+mods load.list $base
+mods load-recovery.list $base ext4 btrfs overlay usb_f_acm cdc_acm virtio_console
 [ -z "${OWNER:-}" ] || chown -R "$OWNER" $O/Image $O/mods
-echo "kit.sh: $pkg ($rel), modules: $(tr '\n' ' ' < $O/mods/load.list)"
+echo "kit.sh: $pkg ($rel), modules: $(tr '\n' ' ' < $O/mods/load.list); recovery: $(tr '\n' ' ' < $O/mods/load-recovery.list)"

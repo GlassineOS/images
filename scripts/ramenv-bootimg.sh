@@ -12,12 +12,15 @@
 # boots), so it must fit RAMENV_RECOVERY_SIZE as well as the download limit.
 # Mounts: /run/modules, /run/dtb, /run/ramenv (the ramenv initramfs), /run/target,
 # /run/ramenv.conf,
-# /src/boot. Writes /out/ramenv/<id>.img and <id>.manifest.
+# /src/boot. Writes /out/ramenv/<id>.img and <id>.manifest. ROLE=recovery packs the
+# recovery's initramfs (docs/recovery.md) the same way, into /out/recovery/.
 set -eu
 die() { echo "ramenv-bootimg.sh: $*" >&2; exit 1; }
 one() { set -- $1; [ $# = 1 ] && [ -e "$1" ] || die "expected one file, found: $*"; echo "$1"; }
 val() { sed -n "s/^$1=//p" "$2" | tail -n 1; }
 T=/run/target
+ROLE=${ROLE:-ramenv}
+case $ROLE in ramenv|recovery) ;; *) die "ROLE is ramenv or recovery" ;; esac
 rel=$(basename "$(one "$(echo /run/modules/*)")")
 dtb=$(one "$(echo /run/dtb/"$DEVICE"@*.dtb)")
 ird=$(one "$(echo /run/ramenv/"$DEVICE"@*.cpio.gz)")
@@ -45,11 +48,13 @@ echo "$ID" | grep -qx '[0-9a-f]\{16\}' || die "the packer printed no ID: $r"
 [ "$SIZE" = "$(stat -c %s /tmp/ramenv.img)" ] || die "the packer's SIZE isn't the file's"
 [ "$SIZE" -le "$max" ] || die "the image is $SIZE bytes, above RAMENV_IMAGE_MAX $max"
 [ "$SIZE" -le "$rec" ] || die "the image is $SIZE bytes, above RAMENV_RECOVERY_SIZE $rec (the recovery partition)"
-mkdir -p /out/ramenv
-mv /tmp/ramenv.img "/out/ramenv/$ID.img"
+O=/out/$ROLE
+mkdir -p $O
+mv /tmp/ramenv.img "$O/$ID.img"
 printf 'format=1\nid=%s\ndevice=%s\nkernel=%s\ndtb=%s\nramenv=%s\ncmdline=%s\nboard=%s\nramenv_conf=%s\nsize=%s\nsha256=%s\n' \
 	"$ID" "$DEVICE" "$rel" "$(basename "$dtb" .dtb)" "$(basename "$ird" .cpio.gz)" "$cmd" \
-	"$(sha256sum $B | cut -c1-64)" "$(sha256sum $C | cut -c1-64)" "$SIZE" "$SHA" > "/out/ramenv/$ID.manifest"
-cp "/run/ramenv/$(basename "$ird" .cpio.gz).manifest" "/out/ramenv/$(basename "$ird" .cpio.gz).initramfs.manifest"
-chmod 644 /out/ramenv/*; find /out -exec touch -h -d @0 {} +
-cat "/out/ramenv/$ID.manifest"
+	"$(sha256sum $B | cut -c1-64)" "$(sha256sum $C | cut -c1-64)" "$SIZE" "$SHA" > "$O/$ID.manifest"
+[ "$ROLE" = ramenv ] || printf 'role=%s\n' "$ROLE" >> "$O/$ID.manifest"
+cp "/run/ramenv/$(basename "$ird" .cpio.gz).manifest" "$O/$(basename "$ird" .cpio.gz).initramfs.manifest"
+chmod 644 $O/*; find /out -exec touch -h -d @0 {} +
+cat "$O/$ID.manifest"

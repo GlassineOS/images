@@ -1,0 +1,107 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The recovery's console (docs/recovery.md): a text menu on a terminal (the USB serial
+# function, ttyGS0, or a local console). A client of the core, like the computer over
+# USB: every operation is a request on the local socket (glassine-rcall), and a
+# DEPLOY action runs only after the person typed the confirmation the core names.
+# Nothing is asked of the core before the first key, so a terminal nobody uses doesn't
+# keep the recovery from its idle restart.
+#   menu            (stdin and stdout are the terminal)
+SOCK=/run/glassine-recovery.sock
+RC="/bin/glassine-rcall $SOCK"
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+field() { printf '%s\n' "$2" | tr '\t' '\n' | sed -n "s/^$1=//p" | head -n 1; }
+ask() { printf '%s' "$1"; read -r REPLY || exit 0; }
+
+# run a DEPLOY action: ask the core, show what it does, ask for the confirmation
+deploy() {	# deploy ACTION [ID]
+	t=$(mktemp); printf 'action %s\n' "$1" > "$t"
+	[ -n "${2:-}" ] && printf 'id %s\n' "$2" >> "$t"
+	while :; do
+		ans=$($RC deploy "$t"); st=$?
+		case $st in
+		9)
+			tok=$(printf '%s\n' "$ans" | sed -n '1s/^confirm //p')
+			echo; printf '%s\n' "$ans" | sed 1d
+			echo
+			ask "Type \"$tok\" to do this, anything else to cancel: "
+			[ "$REPLY" = "$tok" ] || { echo "Cancelled. Nothing changed."; break; }
+			printf 'confirm %s\n' "$tok" >> "$t"
+			echo "Working..." ;;
+		10)
+			echo; printf '%s\n' "$ans"
+			if printf '%s\n' "$ans" | head -n 1 | grep -qx 'exit 4' && ! grep -q '^discard-hibernation' "$t"; then
+				echo "Userdata holds a hibernated session."
+				ask "Discard it and go on? [y/N] "
+				case $REPLY in y|Y|yes) sed -i '/^confirm /d' "$t"; echo 'discard-hibernation yes' >> "$t"; continue ;; esac
+			fi
+			break ;;
+		0) echo; printf '%s\n' "$ans" | sed 1d; echo "Done."; break ;;
+		*) echo; printf '%s\n' "$ans"; echo "(refused, status $st)"; break ;;
+		esac
+	done
+	rm -f "$t"
+	ask "Enter: back to the menu "
+}
+
+echo
+echo "GlassineOS recovery. Press Enter."
+read -r REPLY || exit 0
+while :; do
+	s=$($RC status); st=$?
+	echo
+	if [ $st != 0 ]; then echo "The recovery's core does not answer (status $st):"; printf '%s\n' "$s"; fi
+	rec=$(printf '%s\n' "$s" | sed -n 's/^recovery //p')
+	echo "== GlassineOS recovery ($rec)"
+	echo "   $(printf '%s\n' "$s" | sed -n 's/^machine //p'), kernel $(printf '%s\n' "$s" | sed -n 's/^kernel //p')"
+	stat=$(printf '%s\n' "$s" | grep '^type=status')
+	acts=" $(printf '%s\n' "$s" | sed -n 's/^actions //p') "
+	echo
+	echo "Deployments:"
+	ids=''
+	n=0
+	while IFS= read -r r; do
+		[ -n "$r" ] || continue
+		n=$((n + 1)); id=$(field id "$r"); ids="$ids $id"
+		printf '  %d) %-24s %-10s base %s\n' "$n" "$id" "$(field state "$r")" "$(field base "$r")"
+	done <<EOT
+$(printf '%s\n' "$s" | grep '^type=deployment')
+EOT
+	[ $n = 0 ] && echo "  (none)"
+	f=$(field failed "$stat"); [ -n "$f" ] && echo "  last failed: $f"
+	echo
+	echo "  s) start another deployment next      r) roll back to the previous one"
+	echo "  x) reset system (home stays)          f) full reset (home stays)"
+	case $acts in *" remove "*) echo "  d) delete a deployment" ;; esac
+	echo "  g) collect diagnostics                n) restart now (normal start)"
+	echo "  b) restart to the boot loader         q) refresh"
+	ask "> "
+	c=$REPLY
+	case $c in
+	s|d)
+		case $c in d) case $acts in *" remove "*) ;; *) continue ;; esac ;; esac
+		ask "Number of the deployment: "
+		id=''
+		case $REPLY in ''|*[!0-9]*) ;; *) id=$(echo $ids | cut -d' ' -f"$REPLY") ;; esac
+		[ -n "$id" ] || { echo "No such number."; continue; }
+		a=select; [ "$c" = d ] && a=remove
+		deploy "$a" "$id" ;;
+	r) deploy rollback ;;
+	x) deploy reset ;;
+	f) deploy reset-full ;;
+	g)
+		out=/tmp/diag.tar.gz
+		if r=$($RC diag "$out"); then
+			echo "Diagnostics: $r (bytes, sha256), in the recovery's memory only."
+			echo "A computer reads them over USB (the installer); they contain:"
+			tar -tzf "$out" | sed 's/^/  /'
+		else echo "Diagnostics failed:"; printf '%s\n' "$r"; fi
+		rm -f "$out"
+		ask "Enter: back to the menu " ;;
+	n) ask "Restart now into the normal start? [y/N] "
+		case $REPLY in y|Y|yes) $RC reboot 0; sleep 30 ;; esac ;;
+	b) ask "Restart to the boot loader? [y/N] "
+		case $REPLY in y|Y|yes) $RC reboot 1; sleep 30 ;; esac ;;
+	*) ;;
+	esac
+done

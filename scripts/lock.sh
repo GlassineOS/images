@@ -33,3 +33,9 @@ b --no-cache-filter ramenv --target ramenv -o "type=tar,dest=$tmp/ramenv.tar"
 tar -xOf "$tmp/ramenv.tar" lib/apk/db/installed \
 	| awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' | LC_ALL=C sort > stages/ramenv/lock
 echo "lock.sh: ramenv: $(wc -l < stages/ramenv/lock) packages" >&2
+# the recovery's tools (docs/recovery.md): on alpine, apart from the device chain, like
+# the RAM environment's
+b --no-cache-filter recovery --target recovery -o "type=tar,dest=$tmp/recovery.tar"
+tar -xOf "$tmp/recovery.tar" lib/apk/db/installed \
+	| awk -F: '/^P:/{p=$2} /^V:/{print p "=" $2}' | LC_ALL=C sort > stages/recovery/lock
+echo "lock.sh: recovery: $(wc -l < stages/recovery/lock) packages" >&2
