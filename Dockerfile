@@ -343,9 +343,13 @@ RUN --mount=type=bind,source=scripts/device-files.c,target=/src/device-files.c \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add build-base && cc -O2 -static -o /device-files /src/device-files.c
 
+# The device's stage directory is mounted for its expectations (stages/device-<name>/expect,
+# when it has one: values its finished tree must hold).
 FROM finish AS validation
+ARG DEVICE
 RUN --mount=type=bind,source=scripts/validate.sh,target=/run/validate.sh \
     --mount=type=bind,from=device-files,source=/device-files,target=/run/device-files \
+    --mount=type=bind,source=stages/device-${DEVICE},target=/run/device-stage \
     sh /run/validate.sh
 
 # The tree a base is made from.
