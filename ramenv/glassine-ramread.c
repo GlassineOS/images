@@ -31,6 +31,18 @@
  * and a WRITE must lie inside one armed range. The mmc boot areas (mmcblk*boot*) are
  * never armed. DISARM (and a reboot) makes every disk read-only again. Exit status:
  * 0 never (it serves until it reboots), 1 setup failed, 2 usage.
+ *
+ * Built with -DGLASSINE_RECOVERY (the recovery, docs/recovery.md), it also speaks
+ * protocol version 3: version 2 plus STATUS, DEPLOY and DIAG, which run the programs in
+ * a tools directory (glassine-deploy's status and operations, the diagnostics), and it
+ * serves a local socket too, for the console's menu (the same operations, without
+ * ARM, WRITE and DISARM). Requests of versions 1 and 2 are answered exactly as without
+ * it. Its extra options:
+ *     --tools DIR         the recovery's programs: status, describe, deploy, diag
+ *     --socket PATH       the local socket (a unix stream socket) the console uses
+ *     --deploy-part NAME  a partition (a /sys/block name) DEPLOY's operations may
+ *                         write through the file systems on it; repeatable
+ *     --tool-limit S      a tool running longer is stopped (default 900)
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -57,18 +69,33 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/functionfs.h>
 #include <linux/watchdog.h>
+#ifdef GLASSINE_RECOVERY
+#include <poll.h>
+#include <sys/mount.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#endif
 
 /* ---- the protocol (docs/ramenv.md) ------------------------------------------------ */
 
 #define PROTO_V1 1
 #define PROTO_V2 2
+#define PROTO_V3 3
+#ifdef GLASSINE_RECOVERY
+#define PROTO_MAX PROTO_V3
+#else
+#define PROTO_MAX PROTO_V2
+#endif
 #define REQ_SIZE 32
 #define RSP_SIZE 64
 #define REQ_MAGIC "GRRQ"
 #define RSP_MAGIC "GRRS"
 
-/* version 1: LIST, READ, HASH, REBOOT; version 2 adds ARM, WRITE, DISARM */
-enum { OP_LIST = 1, OP_READ = 2, OP_HASH = 3, OP_REBOOT = 4, OP_ARM = 5, OP_WRITE = 6, OP_DISARM = 7 };
+/* version 1: LIST, READ, HASH, REBOOT; version 2 adds ARM, WRITE, DISARM; version 3
+ * (the recovery only) adds STATUS, DEPLOY, DIAG */
+enum { OP_LIST = 1, OP_READ = 2, OP_HASH = 3, OP_REBOOT = 4, OP_ARM = 5, OP_WRITE = 6, OP_DISARM = 7,
+       OP_STATUS = 8, OP_DEPLOY = 9, OP_DIAG = 10 };
 enum {
 	ST_OK = 0,
 	ST_BAD_REQUEST = 1, /* wrong magic, version or fields; ARM text that doesn't parse */
@@ -78,7 +105,10 @@ enum {
 	ST_IO = 5,          /* the disk returned an error */
 	ST_NOT_ARMED = 6,   /* (v2) WRITE without ARM, or after DISARM */
 	ST_BAD_DATA = 7,    /* (v2) the WRITE's bytes don't have the sha256 sent with them */
-	ST_ARMED = 8,       /* (v2) ARM a second time in this start */
+	ST_ARMED = 8,       /* (v2) ARM a second time in this start; (v3) DEPLOY while armed */
+	ST_CONFIRM = 9,     /* (v3) DEPLOY without the confirmation it needs: the payload
+			     * names it and what the operation does */
+	ST_TOOL = 10,       /* (v3) the tool failed: the payload is its exit code and output */
 };
 enum { REBOOT_NORMAL = 0, REBOOT_BOOTLOADER = 1 };
 
@@ -121,7 +151,7 @@ static int parse_request(const uint8_t b[REQ_SIZE], struct request *r)
 	r->index = ld32(b + 12);
 	r->offset = ld64(b + 16);
 	r->length = ld64(b + 24);
-	return r->version == PROTO_V1 || r->version == PROTO_V2 ? 0 : -1;
+	return r->version >= PROTO_V1 && r->version <= PROTO_MAX ? 0 : -1;
 }
 
 /* the response carries the request's version (1 for a request that didn't parse) */
@@ -363,7 +393,7 @@ static int match_disks(char **pat, int npat, char names[MAX_DISKS][64])
 /* ---- I/O ------------------------------------------------------------------------- */
 
 /* the watchdog's view of what the server does */
-enum { PH_WAIT = 0, PH_DISK = 1, PH_SEND = 2 };
+enum { PH_WAIT = 0, PH_DISK = 1, PH_SEND = 2, PH_TOOL = 3 /* (recovery) a tool runs, with its own limit */ };
 static atomic_int g_phase;
 static atomic_long g_phase_since;
 static atomic_long g_last_request;
@@ -817,6 +847,392 @@ static int op_disarm(int out, const struct request *r)
 		   : reply(out, r, ST_OK, NULL);
 }
 
+#ifdef GLASSINE_RECOVERY
+/* ---- the recovery (protocol version 3, docs/recovery.md) ---------------------------- */
+
+#define MAX_DEPLOY_TEXT 4096u
+#define MAX_TOOL_OUTPUT (256u << 10)
+#define MAX_DIAG MAX_READ
+#define MAX_DEPLOY_PARTS 8
+#define TOOL_NOT_OFFERED 64 /* describe/deploy: the action isn't offered (glassine-deploy has no such verb) */
+
+static const char *g_tools;              /* --tools DIR */
+static long g_tool_limit = 900;
+static char g_dpart[MAX_DEPLOY_PARTS][64]; /* --deploy-part */
+static int g_ndparts;
+static atomic_int g_wd_stop;             /* a tool that can't be stopped: no more petting */
+static __thread int t_local;             /* this thread serves the local socket */
+
+/* Runs TOOLS/argv[0] with argv, stdin /dev/null, stdout and stderr into *out (at most
+ * MAX_TOOL_OUTPUT bytes kept; more is cut, and the cut is said). Its own process
+ * group; past --tool-limit it gets SIGTERM, 20 s later SIGKILL; one that doesn't end
+ * 30 s after that stops the watchdog's petting (a process stuck in the kernel).
+ * Returns its exit status (0-255), 124 timed out, -1 not started. */
+static int run_tool(char *const argv[], char **out, size_t *outn)
+{
+	char path[PATH_MAX];
+	int p[2];
+	*out = NULL; *outn = 0;
+	snprintf(path, sizeof path, "%s/%s", g_tools ? g_tools : "", argv[0]);
+	if (pipe2(p, O_CLOEXEC) < 0) return -1;
+	pid_t pid = fork();
+	if (pid < 0) { close(p[0]); close(p[1]); return -1; }
+	if (pid == 0) {
+		setpgid(0, 0);
+		int nul = open("/dev/null", O_RDONLY);
+		if (nul >= 0) dup2(nul, 0);
+		dup2(p[1], 1);
+		dup2(p[1], 2);
+		setenv("RECOVERY_TRANSPORT", t_local ? "local" : "usb", 1);
+		execv(path, argv);
+		dprintf(2, "cannot run %s: %s\n", path, strerror(errno));
+		_exit(127);
+	}
+	close(p[1]);
+	size_t cap = 4096, n = 0;
+	char *b = malloc(cap + 64);
+	int cut = 0, timed = 0;
+	long t0 = now_s();
+	for (;;) {
+		long left = g_tool_limit - (now_s() - t0);
+		if (left <= 0) { timed = 1; break; }
+		struct pollfd pf = { .fd = p[0], .events = POLLIN };
+		int r = poll(&pf, 1, (int)(left > 1 ? 1000 : left * 1000));
+		if (r < 0 && errno == EINTR) continue;
+		if (r <= 0) continue;
+		char tmp[4096];
+		ssize_t k = read(p[0], tmp, sizeof tmp);
+		if (k < 0 && errno == EINTR) continue;
+		if (k <= 0) break;
+		if (b && n + (size_t)k > cap && cap < MAX_TOOL_OUTPUT) {
+			while (cap < n + (size_t)k && cap < MAX_TOOL_OUTPUT) cap *= 2;
+			if (cap > MAX_TOOL_OUTPUT) cap = MAX_TOOL_OUTPUT;
+			char *nb = realloc(b, cap + 64);
+			if (nb) b = nb;
+		}
+		size_t keep = b && n < cap ? (cap - n < (size_t)k ? cap - n : (size_t)k) : 0;
+		if (keep) { memcpy(b + n, tmp, keep); n += keep; }
+		if (keep < (size_t)k) cut = 1;
+	}
+	close(p[0]);
+	int st = 0, done = 0;
+	if (timed) {
+		say("%s: still running after %ld s: stopping it", argv[0], g_tool_limit);
+		kill(-pid, SIGTERM);
+		for (int i = 0; i < 20 && !done; i++) { if (waitpid(pid, &st, WNOHANG) == pid) done = 1; else sleep(1); }
+		if (!done) kill(-pid, SIGKILL);
+		for (int i = 0; i < 30 && !done; i++) { if (waitpid(pid, &st, WNOHANG) == pid) done = 1; else sleep(1); }
+		if (!done) {
+			say("%s does not end: no more petting, the watchdog resets the device", argv[0]);
+			atomic_store(&g_wd_stop, 1);
+		}
+	} else {
+		while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+		done = 1;
+	}
+	if (b && cut) n += (size_t)snprintf(b + n, 64, "\n[output cut at %u bytes]\n", MAX_TOOL_OUTPUT);
+	*out = b; *outn = b ? n : 0;
+	if (timed) return 124;
+	return WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
+}
+
+/* the header, then the text: a text payload (sha256 zero), as every text answer */
+static int reply_text(int out, const struct request *r, uint16_t status, const char *a, size_t an,
+		      const char *b, size_t bn)
+{
+	uint8_t h[RSP_SIZE];
+	put_response(h, r->version, r->op, r->tag, status, an + bn, r->offset, NULL);
+	phase(PH_SEND);
+	int rc = write_full(out, h, RSP_SIZE) < 0 || (an && write_full(out, (const uint8_t *)a, an) < 0)
+		 || (bn && write_full(out, (const uint8_t *)b, bn) < 0) ? -1 : 0;
+	phase(PH_WAIT);
+	return rc;
+}
+
+/* STATUS (v3): the recovery's identity and glassine-deploy's state, as the status tool
+ * prints them (docs/recovery.md); nothing is written */
+static int op_status(int out, const struct request *r)
+{
+	char *argv[] = { "status", NULL }, *o;
+	size_t on;
+	char head[256];
+	phase(PH_TOOL);
+	int x = run_tool(argv, &o, &on);
+	phase(PH_WAIT);
+	int hn = snprintf(head, sizeof head, "glassine-recovery %d\nconnection %s\n%s", PROTO_V3, t_local ? "local" : "usb",
+			  g_armed == ARM_ARMED ? "writes armed\n" : "");
+	int rc;
+	if (x != 0) {
+		char e[64];
+		int en = snprintf(e, sizeof e, "exit %d\n", x);
+		rc = reply_text(out, r, ST_TOOL, e, (size_t)en, o, on);
+	} else rc = reply_text(out, r, ST_OK, head, (size_t)hn, o, on);
+	free(o);
+	return rc;
+}
+
+/* a deployment id: [A-Za-z0-9._-]+, not starting with a dot (docs/deployments.md) */
+static int valid_id(const char *s)
+{
+	if (!*s || *s == '.' || strlen(s) > 128) return 0;
+	for (; *s; s++)
+		if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') || (*s >= '0' && *s <= '9') || *s == '.' || *s == '_' || *s == '-')) return 0;
+	return 1;
+}
+
+/* the actions DEPLOY knows, and whether each names a deployment */
+static const struct { const char *name; int id; } g_actions[] = {
+	{ "select", 1 }, { "rollback", 0 }, { "pin", 1 }, { "remove", 1 }, { "reset", 0 }, { "reset-full", 0 },
+};
+
+/* the parent disk (a /sys/block name) of the partition NAME, or -1 */
+static int part_parent(const char *name, char *parent, size_t n)
+{
+	char p[PATH_MAX], l[PATH_MAX];
+	snprintf(p, sizeof p, "/sys/class/block/%s", name);
+	ssize_t k = readlink(p, l, sizeof l - 1);
+	if (k <= 0) return -1;
+	l[k] = 0;
+	char *e = strrchr(l, '/');
+	if (!e) return -1;
+	*e = 0;
+	e = strrchr(l, '/');
+	if (!e) return -1;
+	snprintf(parent, n, "%s", e + 1);
+	snprintf(p, sizeof p, "/sys/class/block/%s/partition", name);
+	return access(p, F_OK) ? -1 : 0;
+}
+
+/* /dev/NAME BLKROSET v, then BLKROGET must say v */
+static int part_ro(const char *name, int v)
+{
+	char p[PATH_MAX];
+	int ro = !v;
+	snprintf(p, sizeof p, "/dev/%s", name);
+	int fd = open(p, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return -1;
+	int rc = ioctl(fd, BLKROSET, &v) < 0 || ioctl(fd, BLKROGET, &ro) < 0 || ro != v ? -1 : 0;
+	close(fd);
+	return rc;
+}
+
+/* every mount of /dev/NAME, unmounted (a tool that died with one left) */
+static void unmount_part(const char *name)
+{
+	char dev[PATH_MAX], line[2048];
+	snprintf(dev, sizeof dev, "/dev/%s", name);
+	for (int pass = 0; pass < 4; pass++) {
+		FILE *f = fopen("/proc/self/mounts", "r");
+		if (!f) return;
+		char mp[1024] = "";
+		while (fgets(line, sizeof line, f)) {
+			char src[1024], at[1024];
+			if (sscanf(line, "%1023s %1023s", src, at) == 2 && !strcmp(src, dev)) snprintf(mp, sizeof mp, "%s", at);
+		}
+		fclose(f);
+		if (!*mp) return;
+		say("%s still mounted on %s after the tool: unmounting", name, mp);
+		if (umount2(mp, 0) < 0) umount2(mp, MNT_DETACH);
+	}
+}
+
+/* The partitions DEPLOY writes through (--deploy-part), writable for one operation:
+ * force_ro 0 on their disk and BLKROSET 0 on each, while the whole-disk devices and
+ * every other partition stay read-only (checked). on = 0: back, every mount of them
+ * gone first, each disk's cache dropped (the whole-disk device has its own cache, and
+ * READ and HASH go through it), every served disk and partition read-only again
+ * (checked). 0 = done. */
+static int deploy_parts_rw(int on)
+{
+	int bad = 0;
+	char parent[64];
+	for (int i = 0; i < g_ndparts; i++) {
+		if (part_parent(g_dpart[i], parent, sizeof parent) < 0) { if (on) say("%s: not a partition", g_dpart[i]); bad = 1; continue; }
+		if (is_boot_area(parent)) { say("%s: on a boot area, never written", g_dpart[i]); bad = 1; continue; }
+		if (on) {
+			if (set_force_ro(parent, 0) < 0 || part_ro(g_dpart[i], 0) < 0) {
+				say("%s: cannot be made writable: %s", g_dpart[i], strerror(errno));
+				bad = 1;
+			}
+		} else {
+			unmount_part(g_dpart[i]);
+			if (part_ro(g_dpart[i], 1) < 0) { say("%s: cannot set read-only again: %s", g_dpart[i], strerror(errno)); bad = 1; }
+			if (set_force_ro(parent, 1) < 0) { say("%s: force_ro 1: %s", parent, strerror(errno)); bad = 1; }
+		}
+	}
+	/* the served disks: whole-disk devices read-only; on: every partition but the
+	 * deploy ones read-only; off: every partition read-only */
+	for (int i = 0; i < g_ndisks; i++) {
+		struct disk *d = &g_disk[i];
+		if (!d->block) continue;
+		int ro = 0;
+		if (!on && ioctl(d->fd, BLKFLSBUF, 0) < 0) bad = 1;
+		if (ioctl(d->fd, BLKROGET, &ro) < 0 || !ro) { say("%s: not read-only", d->name); bad = 1; }
+		if (!on) { if (partitions_ro(d->name) < 0) bad = 1; continue; }
+		char path[PATH_MAX];
+		snprintf(path, sizeof path, "/sys/block/%.63s", d->name);
+		DIR *dir = opendir(path);
+		if (!dir) { bad = 1; continue; }
+		struct dirent *e;
+		while ((e = readdir(dir))) {
+			struct stat st;
+			int pro = 0, mine = 0;
+			if (e->d_name[0] == '.') continue;
+			snprintf(path, sizeof path, "/sys/block/%.63s/%.255s/partition", d->name, e->d_name);
+			if (stat(path, &st) < 0) continue;
+			for (int k = 0; k < g_ndparts; k++) if (!strcmp(g_dpart[k], e->d_name)) mine = 1;
+			if (mine) continue;
+			snprintf(path, sizeof path, "/dev/%s", e->d_name);
+			int fd = open(path, O_RDONLY | O_CLOEXEC);
+			if (fd < 0 || ioctl(fd, BLKROGET, &pro) < 0 || !pro) { say("%s: not read-only while deploying", e->d_name); bad = 1; }
+			if (fd >= 0) close(fd);
+		}
+		closedir(dir);
+	}
+	if (!on) say("deploy: every disk read-only again%s", bad ? " (FAILED for one)" : "");
+	return bad ? -1 : 0;
+}
+
+/* DEPLOY (v3): `length` bytes of text, lines `KEY VALUE`: `action A` (select, rollback,
+ * pin, remove, reset, reset-full), `id ID` (select, pin, remove), `discard-hibernation
+ * yes` (optional), `confirm TOKEN`. The token is the action, its id and
+ * `discard-hibernation` when asked, one space apart (`select 20261101-120000`); without
+ * it the answer is ST_CONFIRM, the token's line and what the operation does. With it,
+ * the deploy partitions are writable for the run of the tool, then read-only again. */
+static int op_deploy(int in, int out, const struct request *r)
+{
+	static char t[MAX_DEPLOY_TEXT + 1];
+	if (r->length > MAX_DEPLOY_TEXT) {
+		if (recv_bytes(in, NULL, r->length) < 0) return -1;
+		return reply(out, r, ST_BAD_REQUEST, "DEPLOY text above 4096 bytes");
+	}
+	if (recv_bytes(in, (uint8_t *)t, r->length) < 0) return -1;
+	t[r->length] = 0;
+	if (memchr(t, 0, (size_t)r->length)) return reply(out, r, ST_BAD_REQUEST, "the DEPLOY text has a NUL byte");
+	char action[32] = "", id[160] = "", confirm[256] = "", discard[8] = "";
+	int seen_a = 0, seen_i = 0, seen_c = 0, seen_d = 0;
+	for (char *l = t, *e; *l; l = e + 1) {
+		e = strchr(l, '\n');
+		if (!e) e = l + strlen(l);
+		char save = *e;
+		*e = 0;
+		if (*l) {
+			char *v = strchr(l, ' ');
+			if (!v) return reply(out, r, ST_BAD_REQUEST, "a line is not `KEY VALUE`");
+			*v++ = 0;
+			if (!strcmp(l, "action") && !seen_a++ && strlen(v) < sizeof action) strcpy(action, v);
+			else if (!strcmp(l, "id") && !seen_i++ && strlen(v) < sizeof id) strcpy(id, v);
+			else if (!strcmp(l, "confirm") && !seen_c++ && strlen(v) < sizeof confirm) strcpy(confirm, v);
+			else if (!strcmp(l, "discard-hibernation") && !seen_d++ && !strcmp(v, "yes")) strcpy(discard, v);
+			else return reply(out, r, ST_BAD_REQUEST, "an unknown, repeated or too long line (keys: action, id, confirm, discard-hibernation yes)");
+		}
+		if (!save) break;
+	}
+	int a = -1;
+	for (size_t i = 0; i < sizeof g_actions / sizeof g_actions[0]; i++) if (!strcmp(action, g_actions[i].name)) a = (int)i;
+	if (a < 0) return reply(out, r, ST_BAD_REQUEST, "no action, or not one of select, rollback, pin, remove, reset, reset-full");
+	if (g_actions[a].id ? !valid_id(id) : seen_i) return reply(out, r, ST_BAD_REQUEST, g_actions[a].id ? "the action needs `id ID` ([A-Za-z0-9._-], not starting with a dot)" : "the action takes no id");
+	char token[256];
+	snprintf(token, sizeof token, "%s%s%s%s", action, *id ? " " : "", id, *discard ? " discard-hibernation" : "");
+	char *argv[6] = { "describe", action, NULL, NULL, NULL, NULL };
+	int k = 2;
+	if (*id) argv[k++] = id;
+	if (*discard) argv[k++] = "discard-hibernation";
+	char *o;
+	size_t on;
+	phase(PH_TOOL);
+	int x = run_tool(argv, &o, &on);
+	phase(PH_WAIT);
+	int rc;
+	char head[400];
+	int hn;
+	if (x == TOOL_NOT_OFFERED) {
+		hn = snprintf(head, sizeof head, "not offered: ");
+		rc = reply_text(out, r, ST_BAD_REQUEST, head, (size_t)hn, o, on);
+		free(o);
+		return rc;
+	}
+	if (x != 0) {
+		hn = snprintf(head, sizeof head, "exit %d\n", x);
+		rc = reply_text(out, r, ST_TOOL, head, (size_t)hn, o, on);
+		free(o);
+		return rc;
+	}
+	if (!seen_c || strcmp(confirm, token)) {
+		hn = snprintf(head, sizeof head, "confirm %s\n", token);
+		rc = reply_text(out, r, ST_CONFIRM, head, (size_t)hn, o, on);
+		free(o);
+		return rc;
+	}
+	free(o);
+	if (g_armed == ARM_ARMED) return reply(out, r, ST_ARMED, "ranges are armed for writing: DISARM first");
+	say("deploy: %s confirmed (%s connection)", token, t_local ? "local" : "usb");
+	phase(PH_DISK);
+	if (deploy_parts_rw(1) < 0) {
+		int still = deploy_parts_rw(0) < 0;
+		phase(PH_WAIT);
+		return reply(out, r, ST_IO, still ? "a partition could not be made writable, and not read-only again either"
+						  : "a partition could not be made writable; every disk is read-only");
+	}
+	argv[0] = "deploy";
+	phase(PH_TOOL);
+	x = run_tool(argv, &o, &on);
+	phase(PH_DISK);
+	int still = deploy_parts_rw(0) < 0;
+	phase(PH_WAIT);
+	say("deploy: %s ended, exit %d", token, x);
+	hn = snprintf(head, sizeof head, "exit %d\n%s", x, still ? "WARNING: a disk could not be made read-only again\n" : "");
+	rc = reply_text(out, r, x == 0 && !still ? ST_OK : x == 0 ? ST_IO : ST_TOOL, head, (size_t)hn, o, on);
+	free(o);
+	return rc;
+}
+
+/* DIAG (v3): the diagnostics file the diag tool writes (a gzip'ed tar, at most
+ * MAX_DIAG bytes), as the payload with its sha256 */
+static int op_diag(int out, const struct request *r)
+{
+	char file[] = "/tmp/glassine-diag.XXXXXX";
+	int fd = mkstemp(file);
+	if (fd < 0) return reply(out, r, ST_IO, "no temporary file");
+	close(fd);
+	char *argv[] = { "diag", file, NULL }, *o;
+	size_t on;
+	phase(PH_TOOL);
+	int x = run_tool(argv, &o, &on);
+	phase(PH_WAIT);
+	if (x != 0) {
+		char head[64];
+		int hn = snprintf(head, sizeof head, "exit %d\n", x);
+		unlink(file);
+		int rc = reply_text(out, r, ST_TOOL, head, (size_t)hn, o, on);
+		free(o);
+		return rc;
+	}
+	free(o);
+	fd = open(file, O_RDONLY | O_CLOEXEC);
+	unlink(file);
+	struct stat st;
+	if (fd < 0 || fstat(fd, &st) < 0 || st.st_size <= 0 || (uint64_t)st.st_size > MAX_DIAG) {
+		if (fd >= 0) close(fd);
+		return reply(out, r, ST_IO, "the diagnostics file is missing, empty or above 16 MiB");
+	}
+	size_t n = (size_t)st.st_size;
+	int bad = pread_full(fd, g_buf, n, 0) < 0;
+	close(fd);
+	if (bad) return reply(out, r, ST_IO, "cannot read the diagnostics file");
+	struct sha256 s;
+	uint8_t sum[32], h[RSP_SIZE];
+	sha256_init(&s);
+	sha256_update(&s, g_buf, n);
+	sha256_final(&s, sum);
+	put_response(h, r->version, r->op, r->tag, ST_OK, n, r->offset, sum);
+	phase(PH_SEND);
+	int rc = write_full(out, h, RSP_SIZE) < 0 || write_full(out, g_buf, n) < 0 ? -1 : 0;
+	phase(PH_WAIT);
+	return rc;
+}
+#endif
+
 /* One request. Returns 1 to go on, 0 when the request was a reboot (already answered),
  * -1 when the connection failed. */
 static int handle(int in, int out, const uint8_t b[REQ_SIZE])
@@ -831,10 +1247,30 @@ static int handle(int in, int out, const uint8_t b[REQ_SIZE])
 		r.tag = ld32(b + 8);
 		r.offset = 0;
 		return reply(out, &r, ST_BAD_REQUEST, v <= PROTO_V1 ? "not a request of protocol version 1"
+#ifdef GLASSINE_RECOVERY
+							      : "not a request of protocol version 1, 2 or 3") < 0 ? -1 : 1;
+#else
 							      : "not a request of protocol version 1 or 2") < 0 ? -1 : 1;
+#endif
 	}
 	/* a version 1 request knows only the four operations */
 	int op = r.version == PROTO_V1 && r.op > OP_REBOOT ? 0 : r.op;
+#ifdef GLASSINE_RECOVERY
+	/* version 2 knows only the seven; the local socket never writes to a disk (its
+	 * payload is read and dropped, so the next request stays in step) */
+	if (r.version < PROTO_V3 && op > OP_DISARM) op = 0;
+	if (t_local && (op == OP_ARM || op == OP_WRITE || op == OP_DISARM)) {
+		if ((op == OP_ARM && recv_bytes(in, NULL, r.length) < 0)
+		    || (op == OP_WRITE && (recv_bytes(in, NULL, r.length) < 0 || recv_bytes(in, NULL, 32) < 0))) return -1;
+		return reply(out, &r, ST_UNKNOWN_OP, "not offered on the local connection: writes are USB's") < 0 ? -1 : 1;
+	}
+	switch (op) {
+	case OP_STATUS: return op_status(out, &r) < 0 ? -1 : 1;
+	case OP_DEPLOY: return op_deploy(in, out, &r) < 0 ? -1 : 1;
+	case OP_DIAG: return op_diag(out, &r) < 0 ? -1 : 1;
+	default: break;
+	}
+#endif
 	switch (op) {
 	case OP_LIST: return op_list(out, &r) < 0 ? -1 : 1;
 	case OP_READ: return op_read(out, &r) < 0 ? -1 : 1;
@@ -857,18 +1293,51 @@ static int handle(int in, int out, const uint8_t b[REQ_SIZE])
 	}
 }
 
+/* one request at a time, whichever connection it came on (the recovery serves two) */
+static pthread_mutex_t g_op_lock = PTHREAD_MUTEX_INITIALIZER;
+
 /* Serves requests from in until it ends (0: end of stream, -1: error, 2: reboot) */
 static int serve(int in, int out)
 {
 	uint8_t b[REQ_SIZE];
 	for (;;) {
+		/* under the lock: another connection's operation keeps its phase */
+		pthread_mutex_lock(&g_op_lock);
 		phase(PH_WAIT);
+		pthread_mutex_unlock(&g_op_lock);
 		int r = read_full(in, b, REQ_SIZE);
 		if (r <= 0) return r;
+		pthread_mutex_lock(&g_op_lock);
 		r = handle(in, out, b);
+		pthread_mutex_unlock(&g_op_lock);
 		if (r <= 0) return r < 0 ? -1 : 2;
 	}
 }
+
+#ifdef GLASSINE_RECOVERY
+/* the local socket: one thread per connection (each console's menu holds one) */
+static void *local_conn(void *arg)
+{
+	int fd = (int)(intptr_t)arg;
+	t_local = 1;
+	if (serve(fd, fd) == 2) pause(); /* rebooting */
+	close(fd);
+	return NULL;
+}
+
+static void *local_thread(void *arg)
+{
+	int ls = (int)(intptr_t)arg;
+	for (;;) {
+		int fd = accept4(ls, NULL, NULL, SOCK_CLOEXEC);
+		if (fd < 0) { if (errno != EINTR) sleep(1); continue; }
+		pthread_t t;
+		if (pthread_create(&t, NULL, local_conn, (void *)(intptr_t)fd)) close(fd);
+		else pthread_detach(t);
+	}
+	return NULL;
+}
+#endif
 
 /* ---- the watchdog ----------------------------------------------------------------- */
 
@@ -891,8 +1360,14 @@ static void *watchdog_thread(void *arg)
 			if (!stopped) say("a disk operation has run %ld s: no more petting, the watchdog resets the device", since);
 			stopped = 1;
 		}
+#ifdef GLASSINE_RECOVERY
+		if (atomic_load(&g_wd_stop)) stopped = 1;
+		if (stopped) continue;
+		if (ph != PH_DISK && ph != PH_TOOL && quiet > limit) {
+#else
 		if (stopped) continue;
 		if (ph != PH_DISK && quiet > limit) {
+#endif
 			say("no request for %ld s: rebooting into the previous system", quiet);
 			g_reboot(REBOOT_NORMAL);
 		}
@@ -1027,6 +1502,9 @@ static void usage(void)
 {
 	fprintf(stderr, "usage: glassine-ramread (--ffs DIR | --stream DEV) --disk PATTERN... [--ready FILE] [--watchdog DEV]\n"
 			"         [--watchdog-timeout S] [--connect-wait S] [--idle S] [--op-limit S] [--disk-wait S]\n");
+#ifdef GLASSINE_RECOVERY
+	fprintf(stderr, "         --tools DIR [--socket PATH] [--deploy-part NAME]... [--tool-limit S]\n");
+#endif
 	exit(2);
 }
 
@@ -1044,10 +1522,20 @@ int main(int argc, char **argv)
 	int npat = 0;
 	const char *ffs = NULL, *stream = NULL, *ready = NULL, *wd = NULL;
 	long disk_wait = 60;
+#ifdef GLASSINE_RECOVERY
+	const char *sock = NULL;
+#endif
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
 		if (!v) usage();
 		if (!strcmp(a, "--disk") && npat < MAX_DISKS) pat[npat++] = argv[++i];
+#ifdef GLASSINE_RECOVERY
+		else if (!strcmp(a, "--tools")) g_tools = argv[++i];
+		else if (!strcmp(a, "--socket")) sock = argv[++i];
+		else if (!strcmp(a, "--tool-limit")) g_tool_limit = num(argv[++i]);
+		else if (!strcmp(a, "--deploy-part") && g_ndparts < MAX_DEPLOY_PARTS && strlen(v) < 64 && !strchr(v, '/'))
+			snprintf(g_dpart[g_ndparts++], 64, "%s", argv[++i]);
+#endif
 		else if (!strcmp(a, "--ffs")) ffs = argv[++i];
 		else if (!strcmp(a, "--stream")) stream = argv[++i];
 		else if (!strcmp(a, "--ready")) ready = argv[++i];
@@ -1060,6 +1548,9 @@ int main(int argc, char **argv)
 		else usage();
 	}
 	if (!npat || !!ffs == !!stream) usage();
+#ifdef GLASSINE_RECOVERY
+	if (!g_tools) usage();
+#endif
 	g_kmsg = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
 	signal(SIGPIPE, SIG_IGN);
 	g_reboot = do_reboot;
@@ -1100,6 +1591,22 @@ int main(int argc, char **argv)
 		if (in < 0) { say("%s: %s", stream, strerror(errno)); return 1; }
 		out = in;
 	}
+#ifdef GLASSINE_RECOVERY
+	if (sock) {
+		struct sockaddr_un sa = { .sun_family = AF_UNIX };
+		int ls = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+		snprintf(sa.sun_path, sizeof sa.sun_path, "%s", sock);
+		unlink(sock);
+		pthread_t lt;
+		if (ls < 0 || bind(ls, (struct sockaddr *)&sa, sizeof sa) < 0 || chmod(sock, 0600) < 0 || listen(ls, 4) < 0
+		    || pthread_create(&lt, NULL, local_thread, (void *)(intptr_t)ls)) {
+			say("%s: %s", sock, strerror(errno));
+			return 1;
+		}
+		say("the local socket %s is open (version 3, no writes to disks)", sock);
+	}
+	for (int i = 0; i < g_ndparts; i++) say("deploy partition %s (writable only while a confirmed DEPLOY runs)", g_dpart[i]);
+#endif
 	if (ready) { int fd = open(ready, O_WRONLY | O_CREAT | O_CLOEXEC, 0644); if (fd >= 0) close(fd); }
 	say("serving %d disk%s on %s", g_ndisks, g_ndisks == 1 ? "" : "s", ffs ? ffs : stream);
 	for (;;) {

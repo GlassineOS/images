@@ -25,6 +25,9 @@
  */
 #define RAMREAD_NO_MAIN
 #include "../glassine-ramread.c"
+/* the first version the build doesn't speak: 3, or 4 when built for the recovery
+ * (-DGLASSINE_RECOVERY, which runs this test too: versions 1 and 2 must not change) */
+#define V_NEXT (PROTO_MAX + 1)
 
 #include <sys/socket.h>
 
@@ -68,7 +71,7 @@ static struct rsp get_rsp(void)
 {
 	uint8_t h[RSP_SIZE];
 	struct rsp r = { 0 };
-	if (read_full(c, h, RSP_SIZE) != 1 || memcmp(h, RSP_MAGIC, 4) || (ld16(h + 4) != PROTO_V1 && ld16(h + 4) != PROTO_V2)) {
+	if (read_full(c, h, RSP_SIZE) != 1 || memcmp(h, RSP_MAGIC, 4) || ld16(h + 4) < PROTO_V1 || ld16(h + 4) > PROTO_MAX) {
 		printf("FAIL a response header\n"); exit(1);
 	}
 	r.version = ld16(h + 4);
@@ -145,8 +148,8 @@ int main(void)
 		char h[2 * RSP_SIZE + 1];
 		for (int i = 0; i < RSP_SIZE; i++) sprintf(h + 2 * i, "%02x", o[i]);
 		CHECK(!strcmp(h, rs), "the v2 WRITE response header is the pinned bytes");
-		b[4] = 3;
-		CHECK(parse_request(b, &r) < 0, "a version 3 request doesn't parse");
+		b[4] = V_NEXT;
+		CHECK(parse_request(b, &r) < 0, "a version %d request doesn't parse", V_NEXT);
 	}
 
 	/* three disk images: disk 0 "file" (3 MiB + 512 bytes of a pattern, the one armed),
@@ -230,7 +233,7 @@ int main(void)
 	CHECK(r.status == ST_OK && r.version == 2 && r.length == 1024 && !memcmp(r.data, img + 512, 1024), "a version 2 READ, answered as version 2");
 
 	struct { const char *what; uint16_t ver, op; uint32_t index; uint64_t off, len; uint16_t want; } bad[] = {
-		{ "protocol version 3", 3, OP_READ, 0, 0, 512, ST_BAD_REQUEST },
+		{ "protocol version 3 (4 in the recovery build)", V_NEXT, OP_READ, 0, 0, 512, ST_BAD_REQUEST },
 		{ "protocol version 0", 0, OP_READ, 0, 0, 512, ST_BAD_REQUEST },
 		{ "no such disk", 1, OP_READ, 3, 0, 512, ST_NO_DISK },
 		{ "past the end", 1, OP_READ, 0, size, 512, ST_RANGE },
