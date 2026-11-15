@@ -3,11 +3,12 @@
 # A confirmed DEPLOY action (docs/recovery.md): glassine-deploy's own operation, with
 # --yes because the client has confirmed it. The daemon makes the deploy partitions
 # writable for this run only. Exits with glassine-deploy's exit code.
-#   deploy ACTION [ID] [discard-hibernation]
+#   deploy ACTION ID|- yes|no       (as describe)
 . /lib/glassine-recovery/common.sh
-act=$1; shift
-id=''; d=''
-for x in "$@"; do [ "$x" = discard-hibernation ] && d=--discard-hibernation || id=$x; done
+[ $# = 3 ] || { echo "usage: deploy ACTION ID|- yes|no"; exit 2; }
+act=$1 id=$2 d=''
+[ "$id" != - ] || id=''
+[ "$3" != yes ] || d=--discard-hibernation
 offered "$act" || { echo "glassine-deploy has no $act operation"; exit 64; }
 case $act in
 select) set -- select "$id" --yes ;;
