@@ -14,6 +14,17 @@
 #   RAMENV_WATCHDOG         the hardware watchdog (default /dev/watchdog0)
 #   RAMENV_WATCHDOG_TIMEOUT, RAMENV_CONNECT_WAIT, RAMENV_IDLE, RAMENV_OP_LIMIT,
 #   RAMENV_DISK_WAIT        seconds, passed to glassine-ramread (its defaults when empty)
+# The recovery (docs/recovery.md) is this init in an image that also holds
+# /etc/glassine/recovery.version, glassine-deploy and the recovery's tools; there it
+# also reads (the same file):
+#   RECOVERY_SYSTEM_LABEL, RECOVERY_USERDATA_LABEL   the partitions (GPT names) that
+#                           glassine-deploy works on; DEPLOY may write through them
+#   RECOVERY_USERDATA_PREFIX   glassine-deploy's USERDATA_PREFIX (default media/glassine)
+#   RECOVERY_IDLE           seconds without a request from any client before it
+#                           restarts into the normal start (default 600)
+#   RECOVERY_TOOL_LIMIT     seconds a glassine-deploy run may take (default 900)
+#   RECOVERY_USB_SERIAL     yes: a USB serial function (ttyGS0) next to the vendor one
+#   RECOVERY_TTYS           terminals the menu runs on (/dev names; console = /dev/console)
 /bin/busybox mkdir -p /bin /proc /sys /dev /run /tmp
 /bin/busybox --install -s /bin
 export PATH=/bin
@@ -27,8 +38,12 @@ leave() { log "$*; rebooting in 5 s"; sleep 5; reboot -f; sleep 30; echo b > /pr
 RAMENV_DISKS='' RAMENV_TRANSPORT=usb RAMENV_STREAM='' RAMENV_UDC='' RAMENV_UDC_WAIT=120
 RAMENV_USB_VENDOR=0x1d6b RAMENV_USB_PRODUCT=0x0104 RAMENV_WATCHDOG=/dev/watchdog0
 RAMENV_WATCHDOG_TIMEOUT='' RAMENV_CONNECT_WAIT='' RAMENV_IDLE='' RAMENV_OP_LIMIT='' RAMENV_DISK_WAIT=''
+RECOVERY=''
+[ -r /etc/glassine/recovery.version ] && RECOVERY=1
+RECOVERY_SYSTEM_LABEL='' RECOVERY_USERDATA_LABEL='' RECOVERY_USERDATA_PREFIX=media/glassine
+RECOVERY_IDLE=600 RECOVERY_TOOL_LIMIT='' RECOVERY_USB_SERIAL='' RECOVERY_TTYS=''
 [ -r /etc/glassine/ramenv.conf ] && . /etc/glassine/ramenv.conf
-log "starting ($(uname -r))"
+log "starting ($(uname -r))${RECOVERY:+, the recovery}"
 [ -n "$RAMENV_DISKS" ] || leave "no RAMENV_DISKS in /etc/glassine/ramenv.conf"
 
 set -f
@@ -41,6 +56,52 @@ set +f
 [ -n "$RAMENV_IDLE" ] && set -- "$@" --idle "$RAMENV_IDLE"
 [ -n "$RAMENV_OP_LIMIT" ] && set -- "$@" --op-limit "$RAMENV_OP_LIMIT"
 [ -n "$RAMENV_DISK_WAIT" ] && set -- "$@" --disk-wait "$RAMENV_DISK_WAIT"
+
+if [ -n "$RECOVERY" ]; then
+	# no udev: partitions by their GPT names from sysfs; glassine-deploy gets a
+	# configuration naming the devices themselves
+	part() {	# part LABEL: the partition named LABEL on a served disk (RAMENV_DISKS);
+		# none when two have that name (another system's disk, a USB stick)
+		f='' n=0
+		for p in $RAMENV_DISKS; do for u in /sys/block/$p/*/uevent; do
+			[ -e "${u%/uevent}/partition" ] && grep -qx "PARTNAME=$1" "$u" 2>/dev/null || continue
+			u=${u%/uevent}; f=${u##*/} n=$((n + 1))
+		done; done
+		[ $n -le 1 ] || { log "$n partitions named $1: none used" >&2; f=''; }
+		echo "$f"
+	}
+	# a served disk there (any match of RAMENV_DISKS)
+	disk_here() {
+		for p in $RAMENV_DISKS; do for d in /sys/block/$p; do [ -e "$d" ] && return 0; done; done
+		return 1
+	}
+	# the labels: up to RAMENV_DISK_WAIT for a first disk, then 5 s more for its
+	# partitions; a disk without them (a stock table, while installing) goes on
+	# without them, and DEPLOY has nothing to work on
+	w=${RAMENV_DISK_WAIT:-60} t=0 settle=0 sysp='' udp=''
+	while :; do
+		[ -z "$RECOVERY_SYSTEM_LABEL" ] || sysp=$(part "$RECOVERY_SYSTEM_LABEL")
+		[ -z "$RECOVERY_USERDATA_LABEL" ] || udp=$(part "$RECOVERY_USERDATA_LABEL")
+		{ [ -n "$sysp" ] || [ -z "$RECOVERY_SYSTEM_LABEL" ]; } && { [ -n "$udp" ] || [ -z "$RECOVERY_USERDATA_LABEL" ]; } && break
+		[ $t -lt "$w" ] || break
+		if disk_here; then settle=$((settle + 1)); [ $settle -le 5 ] || break; fi
+		sleep 1; t=$((t + 1))
+	done
+	log "system partition: ${sysp:-none} ($RECOVERY_SYSTEM_LABEL), userdata: ${udp:-none} ($RECOVERY_USERDATA_LABEL)"
+	mkdir -p /etc/glassine /run/glassine
+	{
+		echo "SYSTEM_DEV=${sysp:+/dev/$sysp}"
+		echo "SYSTEM_MNT=/run/glassine/system"
+		echo "USERDATA_DEV=${udp:+/dev/$udp}"
+		echo "USERDATA_MNT=/run/glassine/userdata"
+		echo "USERDATA_PREFIX=$RECOVERY_USERDATA_PREFIX"
+		echo "RUN_DIR=/run/glassine"
+	} > /etc/glassine/deploy.conf
+	set -- "$@" --tools /lib/glassine-recovery --socket /run/glassine-recovery.sock \
+		--idle "$RECOVERY_IDLE" --connect-wait "$RECOVERY_IDLE"
+	[ -n "$RECOVERY_TOOL_LIMIT" ] && set -- "$@" --tool-limit "$RECOVERY_TOOL_LIMIT"
+	for p in $sysp $udp; do set -- "$@" --deploy-part "$p"; done
+fi
 
 G=/sys/kernel/config/usb_gadget/glassine-ramenv
 case $RAMENV_TRANSPORT in
@@ -63,6 +124,13 @@ usb)
 		ln -s $G/configs/c.1 $G/os_desc/ 2>/dev/null
 	fi
 	ln -s $G/functions/ffs.ramread $G/configs/c.1/
+	# the recovery's USB serial: linked after the vendor function, which stays
+	# interface 0 (its Microsoft OS descriptor names interface 0)
+	if [ -n "$RECOVERY" ] && [ "$RECOVERY_USB_SERIAL" = yes ]; then
+		mkdir -p $G/functions/acm.usb0 && ln -s $G/functions/acm.usb0 $G/configs/c.1/ \
+			|| log "no USB serial function (acm); the menu is not on USB"
+		echo "GlassineOS recovery" > $G/strings/0x409/product
+	fi
 	mkdir -p /dev/ffs-ramread
 	mount -t functionfs ramread /dev/ffs-ramread || leave "cannot mount the FunctionFS instance"
 	set -- --ffs /dev/ffs-ramread "$@"
@@ -95,6 +163,17 @@ if [ "$RAMENV_TRANSPORT" = usb ]; then
 	done
 	echo "$udc" > $G/UDC || leave "cannot bind the gadget to $udc"
 	log "USB gadget on $udc ($RAMENV_USB_VENDOR:$RAMENV_USB_PRODUCT)"
+fi
+
+# the recovery's menu on each terminal, started again when it ends
+if [ -n "$RECOVERY" ]; then
+	for tty in $RECOVERY_TTYS; do
+		case $tty in console) tty=/dev/console ;; *) tty=/dev/$tty ;; esac
+		( while kill -0 $pid 2>/dev/null; do
+			[ -c "$tty" ] && setsid sh -c "exec /lib/glassine-recovery/menu < $tty > $tty 2>&1"
+			sleep 2
+		done ) &
+	done
 fi
 
 wait $pid
