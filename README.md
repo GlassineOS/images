@@ -74,8 +74,10 @@ request (branch `lock-refresh`) with the changed packages: on Mondays for any ch
 on any day when a change brings a fix from Alpine's security database or when a version
 the current locks name is no longer offered (the build is broken until it merges). It
 can also be started by hand. `scripts/lock-diff.sh` writes the pull request's
-description. The workflow's token starts no workflow by pushing, so it starts `build`,
-`boot-qemu` and `safety` on the branch itself; they show on the pull request.
+description. Runs started by the workflow's own push and pull request don't execute, so
+it starts `build`, `boot-qemu` and `safety` on the branch itself: their results show on
+the branch's commit and in Actions, not in the pull request's checks (closing and
+reopening the pull request starts those).
 
 `scripts/test-apk-stage.sh` tests the install and the comparison in an Alpine container
 on a made-up repository.

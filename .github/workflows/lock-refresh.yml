@@ -63,6 +63,7 @@ jobs:
             gh pr create --head lock-refresh --base main --title "$title" --body-file /tmp/locks/body.md
           fi
           # a push or pull request by this token starts no workflow run that executes, so
-          # the checks the pull request would get are started by hand; they run on the
-          # branch's head commit and show on the pull request
+          # the checks the pull request would get are started by hand on the branch. They
+          # show on the commit and in Actions, not in the pull request's checks (that
+          # needs a GitHub App or personal token instead of this one)
           for w in build.yml boot-qemu.yml safety.yml; do gh workflow run "$w" --ref lock-refresh; done
