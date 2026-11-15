@@ -1,0 +1,10 @@
+# What this device's finished tree must say (scripts/validate.sh, the validation stage).
+# One line per value: FILE KEY=VALUE. FILE is a shell-style configuration of the tree,
+# read the way its programs read it (sourced in a subshell), and KEY must come out as
+# VALUE. The values the installed system's first start depends on: the system partition,
+# the person's data partition, and the room the first start leaves free at the end of
+# userdata (stock Android's crypto footer, 16 KiB). scripts/test-first-start-qemu.sh
+# runs the first start with these same values.
+/etc/glassine/deploy.conf SYSTEM_DEV=/dev/disk/by-partlabel/system_b
+/etc/glassine/deploy.conf USERDATA_DEV=/dev/disk/by-partlabel/userdata
+/etc/glassine/deploy.conf USERDATA_RESERVE_KIB=16
