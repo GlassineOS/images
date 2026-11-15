@@ -77,10 +77,12 @@ request (branch `lock-refresh`) with the changed packages: on Mondays for any ch
 on any day when a change brings a fix from Alpine's security database or when a version
 the current locks name is no longer offered (the build is broken until it merges). It
 can also be started by hand. `scripts/lock-diff.sh` writes the pull request's
-description. Runs started by the workflow's own push and pull request don't execute, so
-it starts `build`, `boot-qemu` and `safety` on the branch itself: their results show on
-the branch's commit and in Actions, not in the pull request's checks (closing and
-reopening the pull request starts those).
+description. It pushes and opens the pull request with the token of the
+`glassine-lock-refresh` GitHub App (variable `LOCK_REFRESH_APP_CLIENT_ID`, secret
+`LOCK_REFRESH_APP_KEY`), so the pull request gets its checks. Without the app it falls
+back to the workflow's own token, whose push and pull request start no checks; it then
+starts `build`, `boot-qemu` and `safety` on the branch itself (their results show on the
+commit and in Actions; closing and reopening the pull request puts them in its checks).
 
 `scripts/test-apk-stage.sh` tests the install and the comparison in an Alpine container
 on a made-up repository.
