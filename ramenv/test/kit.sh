@@ -22,7 +22,8 @@ cp /tmp/k/boot/vmlinuz-"$rel" $O/Image
 rm -rf $O/mods; mkdir -p $O/mods
 # load.list: the RAM environment's runs; load-recovery.list: the recovery's, which also
 # need the file systems glassine-deploy mounts, the USB serial function (and the host's
-# cdc_acm, to read it inside the guest) and a virtio console for the menu
+# cdc_acm, to read it inside the guest), a virtio console for the menu, and evdev and
+# uinput for the screen run (screen-drive's touchscreen and power key)
 mods() {	# mods LIST MODULE...: the modules and what they depend on, in load order
 	l=$1; shift
 	: > $O/mods/$l
@@ -36,6 +37,6 @@ mods() {	# mods LIST MODULE...: the modules and what they depend on, in load ord
 }
 base="virtio_blk configfs usbcore udc_core libcomposite dummy_hcd usb_f_fs i6300esb sdhci_pci mmc_block"
 mods load.list $base
-mods load-recovery.list $base ext4 btrfs overlay usb_f_acm cdc_acm virtio_console
+mods load-recovery.list $base ext4 btrfs overlay usb_f_acm cdc_acm virtio_console evdev uinput
 [ -z "${OWNER:-}" ] || chown -R "$OWNER" $O/Image $O/mods
 echo "kit.sh: $pkg ($rel), modules: $(tr '\n' ' ' < $O/mods/load.list); recovery: $(tr '\n' ' ' < $O/mods/load-recovery.list)"
