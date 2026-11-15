@@ -1,0 +1,11 @@
+# What ramenv/build.sh --recovery puts in the recovery (busybox; e2fsprogs and
+# btrfs-progs for glassine-deploy) and builds it with
+busybox-static
+e2fsprogs
+e2fsprogs-extra
+btrfs-progs
+gcc
+musl-dev
+linux-headers
+cpio
+gzip

@@ -225,6 +225,16 @@ USB: read-only for the backup before an install, and writable only in the ranges
 installer arms (the partition table and the system's partitions). Built only with
 `--target ramenv-export`; [docs/ramenv.md](docs/ramenv.md).
 
+## Recovery
+
+The GlassineOS recovery (GlassineOS/boot spec 008) is the RAM environment plus
+glassine-deploy (boot's, at `BOOT_COMMIT`), diagnostics and a text menu on a USB serial
+function. It speaks the RAM environment's protocol (versions 1 and 2 unchanged), so it
+can stand in for it in an install. Protocol version 3 adds STATUS, DEPLOY (select, roll
+back, reset, each confirmed by a token) and DIAG. It has no screen yet. Built only with
+`--target recovery-export`; tested by `scripts/test-recovery.sh`;
+[docs/recovery.md](docs/recovery.md).
+
 ## License
 
 GPL-2.0-or-later (`LICENSE`). Images contain software under many licenses; each
