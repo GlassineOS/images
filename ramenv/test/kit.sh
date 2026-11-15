@@ -21,7 +21,7 @@ depmod -b /tmp/k "$rel"
 cp /tmp/k/boot/vmlinuz-"$rel" $O/Image
 rm -rf $O/mods; mkdir -p $O/mods
 : > $O/mods/load.list
-for m in virtio_blk configfs usbcore udc_core libcomposite dummy_hcd usb_f_fs i6300esb; do
+for m in virtio_blk configfs usbcore udc_core libcomposite dummy_hcd usb_f_fs i6300esb sdhci_pci mmc_block; do
 	modprobe -d /tmp/k -S "$rel" --show-depends $m | sed -n 's/^insmod \([^ ]*\).*/\1/p'
 done | awk '!seen[$0]++' | while read -r k; do
 	b=${k##*/}; b=${b%.xz}; b=${b%.zst}; b=${b%.gz}

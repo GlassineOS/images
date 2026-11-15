@@ -205,8 +205,9 @@ initramfs.
 
 ## RAM environment
 
-A boot image that runs from RAM and reads the device's whole storage, read-only, to a
-computer over USB, for the backup before an install. Built only with
+A boot image that runs from RAM and serves the device's whole storage to a computer over
+USB: read-only for the backup before an install, and writable only in the ranges the
+installer arms (the partition table and the system's partitions). Built only with
 `--target ramenv-export`; [docs/ramenv.md](docs/ramenv.md).
 
 ## License
