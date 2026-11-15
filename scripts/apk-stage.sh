@@ -10,7 +10,10 @@ set -eu
 S=/run/stage
 pk=$(sed 's/#.*//' "$S/packages" | tr -s ' \t\n' ' ')
 # shellcheck disable=SC2086
-[ -z "${pk# }" ] || apk add -q --cache-dir /var/cache/apk $pk
+# -U: the index fresh every time. The cache mount keeps it between builds, and apk
+# would reuse an index younger than its cache age, so a just-published version the
+# lock asks for is missing and a pruned older one is fetched (HTTP 404)
+[ -z "${pk# }" ] || apk add -q -U --cache-dir /var/cache/apk $pk
 
 # a copied file must not belong to a package
 if [ -d "$S/rootfs" ]; then
