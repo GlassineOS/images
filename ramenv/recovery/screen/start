@@ -2,19 +2,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # The recovery's screen (docs/recovery.md, "The screen"), started by the init once the
 # core serves, when the device's ramenv.conf sets RECOVERY_SCREEN=epd:
-#   1. the kernel modules the panel and the touchscreen need: the device's
-#      RECOVERY_SCREEN_MODULES, which the boot image stage put in the image with their
-#      load order (/lib/modules/<release>/recovery-screen.list);
-#   2. the panel's waveform, from the device data seed on the partition
+#   1. the panel's waveform, from the device data seed on the partition
 #      RECOVERY_DEVICE_LABEL (GlassineOS/boot docs/kernel-artifacts.md, "Device data"),
 #      read with debugfs: nothing is mounted. It must match the seed manifest's sha256
 #      and look like a waveform. It goes into RAM, at the path the panel's adapter
 #      (/etc/glassine/epd.conf) names, which must be under /run/glassine/device/, the
 #      seed's place in a running system;
-#   3. glassine-epdd (the panel) and glassine-rscreen (the client), each started again
+#   2. glassine-epdd (the panel) and glassine-rscreen (the client), each started again
 #      when it ends.
-# Without a seed (a stock partition table, while installing), its waveform or its
-# modules there is no screen, and the core, USB and the console go on as they are.
+# The panel link, the touchscreen and the power key are built into the recovery's kernel.
+# Without a seed (a stock partition table, while installing) or its waveform there is no
+# screen, and the core, USB and the console go on as they are.
 #   start           (from the init, in the background)
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 RAMENV_DISKS='' RECOVERY_IDLE=600 RECOVERY_DEVICE_LABEL='' RECOVERY_SCREEN_STATE=''
@@ -24,17 +22,6 @@ EPD=/run/glassine-epd.sock
 log() { echo "<5>glassine-screen: $*" > /dev/kmsg; }
 none() { log "$*: no screen"; exit 0; }
 [ -r $CONF ] || none "no $CONF"
-
-rel=$(uname -r)
-L=/lib/modules/$rel/recovery-screen.list
-if [ -r "$L" ]; then
-	while read -r m; do
-		[ -n "$m" ] || continue
-		n=$(basename "$m" .ko | tr - _)
-		grep -q "^$n " /proc/modules && continue
-		insmod "/lib/modules/$rel/$m" || log "insmod $m failed"
-	done < "$L"
-fi
 
 # the waveform: its name in the seed is its path under /run/glassine/device/
 w=$(sed -n 's/#.*//; s/^waveform=//p' $CONF | sed 's/[[:space:]]*$//' | tail -n 1)

@@ -1,0 +1,15 @@
+# The recovery's kernel for SoCs of the sdm660 family (GlassineOS/boot spec 008, FR-014):
+# the system kernel's configuration with nothing as a module. Read by scripts/kernel.sh,
+# from the same source commit as kernel-sdm660 (LINUX_SDM660 in the Dockerfile).
+#   flavor     the release's flavor: the SoC's, and that it is the recovery's
+#   defconfig  the base configuration, from the source's arch/arm64/configs
+#   fragments  merged over it in this order, as for the system kernel (kernel-sdm660)
+#   modules    no: every option the defconfig and the fragments make a module is left
+#              out before build.config is merged, MODULES goes off, and the build makes
+#              Image.gz alone. What the recovery needs as a driver build.config builds
+#              in, by name; it carries no firmware
+flavor=sdm660recovery
+defconfig=sdm660_defconfig
+fragments=glassine.config onyx-noteair.config
+modules=no
+format=1

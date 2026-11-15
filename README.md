@@ -173,6 +173,7 @@ dtb-src → dtb → dtb-export                                         boot/dtb/
 | `kernel-export` | `modules/<release>/`, the tree a device receives as its modules subvolume |
 | `dtb-src`, `dtb` | one device's tree (`DEVICE`), from `DTB_COMMIT` (the kernel's commit unless set), so a fixed tree ships without a new kernel |
 | `dtb-export` | `boot/dtb/<device>@<sha256-16>.dtb` and its `.manifest` |
+| `kernel-<soc>recovery`, `recovery-kernel-export` | the recovery's kernel: the same source, the system kernel's configuration with nothing as a module and what the recovery needs built in, no firmware; only the recovery's boot image reads it (docs/recovery.md, "The kernel") |
 
 The release is `<KERNELVERSION>-<flavor>.<cfg6>-g<commit12>`, with `cfg6` the first six
 hex digits of sha256 over the final `.config` followed by the lines `builder=<image>@sha256:…`,
@@ -186,6 +187,7 @@ device's `select` record.
 |---|---|
 | `stages/kernel-<soc>/kernel` | the flavor, the source's defconfig and its config fragments (from `kernel/configs/` or `arch/arm64/configs/`, where kbuild finds them) |
 | `stages/kernel-<soc>/build.config` | options this build sets over the source's configuration |
+| `stages/kernel-<soc>recovery/` | the same for the recovery's kernel; `modules=no` in its `kernel` leaves out every module before its `build.config` is merged |
 | `targets/<device>/target` | the device's target description: architecture, SoC, kernel stage, device tree |
 
 Every option the fragments and `build.config` ask for must be in the final configuration,
@@ -259,7 +261,8 @@ The GlassineOS recovery (GlassineOS/boot spec 008) is the RAM environment plus
 glassine-deploy (boot's, at `BOOT_COMMIT`), diagnostics and a text menu on a USB serial
 function. It speaks the RAM environment's protocol (versions 1 and 2 unchanged), so it
 can stand in for it in an install. Protocol version 3 adds STATUS, DEPLOY (select, roll
-back, reset, each confirmed by a token) and DIAG. It has no screen yet. Built only with
+back, reset, each confirmed by a token) and DIAG. It boots its own kernel, with everything built
+in and no modules (`--target recovery-kernel-export`). It has no screen yet. Built only with
 `--target recovery-export`; tested by `scripts/test-recovery.sh`;
 [docs/recovery.md](docs/recovery.md).
 
