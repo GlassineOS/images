@@ -1576,8 +1576,15 @@ static void *watchdog_thread(void *arg)
 #ifdef GLASSINE_RECOVERY
 		if (atomic_load(&g_wd_stop)) stopped = 1;
 		if (stopped) continue;
-		/* not while a request runs (its lock held): the idle reboot never cuts one */
-		if (ph != PH_DISK && ph != PH_TOOL && quiet > limit && !pthread_mutex_trylock(&g_op_lock)) {
+		/* Not while a request runs (its lock held): the idle reboot doesn't cut into
+		 * one. But a request that waits for its client (a payload that stops coming,
+		 * an answer nobody reads: phase wait or send, never disk or tool) can't keep
+		 * the recovery up: past twice the idle time it reboots anyway. Nothing is
+		 * written from a payload that didn't arrive whole. */
+		int held = 0;
+		if (ph != PH_DISK && ph != PH_TOOL && quiet > limit
+		    && (!(held = pthread_mutex_trylock(&g_op_lock)) || quiet > 2 * limit)) {
+			if (held) say("a request has waited %ld s for its client: rebooting anyway", quiet);
 #else
 		if (stopped) continue;
 		if (ph != PH_DISK && quiet > limit) {
@@ -1585,7 +1592,7 @@ static void *watchdog_thread(void *arg)
 			say("no request for %ld s: rebooting into the previous system", quiet);
 			g_reboot(REBOOT_NORMAL);
 #ifdef GLASSINE_RECOVERY
-			pthread_mutex_unlock(&g_op_lock);
+			if (!held) pthread_mutex_unlock(&g_op_lock);
 #endif
 		}
 		if (g_wd >= 0) {
