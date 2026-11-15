@@ -111,6 +111,20 @@ amd64 computer, arm64 runs through QEMU (`docker run --privileged --rm
 tonistiigi/binfmt --install arm64` once). Keep to the tar export: image exports drop
 `user.*` extended attributes.
 
+## A release for the installer
+
+    scripts/pool-image artifacts onyx-noteair --ramenv out-ramenv
+
+makes `artifacts/onyx-noteair/releases/<build-id>/`: `release.json` and the files it
+names, the format GlassineOS/installer reads. The base goes as a **pool image**: a small
+btrfs file system laid out by GlassineOS/boot's `glassine-deploy init` with the install
+marker, the base received (read-only, with its received UUID, so updates arrive as
+deltas) and the kernel's modules, which the installer writes to the system partition as
+bytes and the first start grows to the partition. The boot image and the RAM
+environment go as they are. The boot loader, the partition layout and the recovery
+aren't made here. Details: `docs/artifacts.md`, "Releases";
+`scripts/test-pool-image.sh` tests it.
+
 ## Kernel and device trees
 
 Built apart from the root file system, to the contract in GlassineOS/boot's
