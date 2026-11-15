@@ -9,6 +9,13 @@ the pins in the Dockerfile. Runs on the build computer, after an export:
     scripts/kernel-check --compare out1 out2 # two exports: the same tree, byte for byte
     scripts/kernel-check --arg LINUX_SDM660=<commit> out   # built with that --build-arg
     scripts/kernel-check --partial out       # only one of the two exports is in out/
+    scripts/kernel-check --stage kernel-sdm660recovery out   # the recovery's kernel
+
+--stage names the kernel stage the kernel in out/ was built from (stages/<stage>/;
+default kernel-<KERNEL>): its flavor, whether it has modules, and its build.config, each
+line of which must be in the configuration the kernel carries. A stage with modules=no
+(the recovery's) must give a kernel without modules: no CONFIG_MODULES, no option =m,
+no .ko file, modules.builtin instead of depmod's files, and no firmware.
 
 Without --partial both exports must be there (modules/ with one release, boot/dtb/ with at
 least one device tree); with it, one of them may be missing, never both.
@@ -121,7 +128,27 @@ def ikconfig(image):
     return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(image[i + 8:])
 
 
-def check_kernel(out, args, fw_pins):
+def stage_info(stage):
+    """(flavor, modules, build.config lines) of stages/<stage>/."""
+    d = os.path.join(HERE, '..', 'stages', stage)
+    kv = {}
+    for line in read(os.path.join(d, 'kernel')).decode().splitlines():
+        k, sep, v = line.partition('=')
+        if sep and not k.startswith('#'):
+            kv[k.strip()] = v.strip()
+    want = [x for x in read(os.path.join(d, 'build.config')).decode().splitlines()
+            if re.match(r'(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set$)', x)]
+    return kv.get('flavor', ''), kv.get('modules', 'yes'), want
+
+
+def check_kernel(out, args, fw_pins, stage=None):
+    stage = stage or f'kernel-{args.get("KERNEL")}'
+    s_flavor, s_modules, s_want = stage_info(stage)
+    if s_modules not in ('yes', 'no'):
+        err(f'stages/{stage}/kernel: modules={s_modules}, not yes or no')
+    nomod = s_modules == 'no'
+    if nomod:
+        fw_pins = {}
     mods = os.path.join(out, 'modules')
     rels = sorted(os.listdir(mods)) if os.path.isdir(mods) else []
     if len(rels) != 1:
@@ -136,7 +163,7 @@ def check_kernel(out, args, fw_pins):
         return None
     kv, flavor, cfg6, c12 = m.groups()
     (ok if c12 == commit[:12] else err)(f'release {rel}: commit12 {c12} vs pin {commit[:12]}')
-    (ok if flavor == args.get('KERNEL') else err)(f'release {rel}: flavor {flavor}')
+    (ok if flavor == s_flavor else err)(f'release {rel}: flavor {flavor} (stages/{stage}: {s_flavor})')
 
     km = record(os.path.join(d, 'kernel.manifest'), KM_KEYS)
     unknown = sorted(set(km) - set(KM_KEYS))
@@ -179,9 +206,27 @@ def check_kernel(out, args, fw_pins):
         lines = set(cfg.decode().splitlines())
         for need in ['CONFIG_LOCALVERSION=""', '# CONFIG_LOCALVERSION_AUTO is not set']:
             (ok if need in lines else err)(f'configuration has {need}')
-        for need in ['CONFIG_MODULE_SIG_KEY=""', '# CONFIG_MODULE_SIG_ALL is not set']:
-            (ok if need in lines else err)(f'no build-time signing key: {need}')
-        (err if 'CONFIG_MODULE_SIG_FORCE=y' in lines else ok)('signatures not enforced (CONFIG_MODULE_SIG_FORCE)')
+        if nomod:
+            (err if 'CONFIG_MODULES=y' in lines else ok)('no modules (CONFIG_MODULES not set)')
+            mods_on = sorted(x for x in lines if x.endswith('=m'))
+            (err if mods_on else ok)('no option is a module' + (f' ({mods_on[:5]})' if mods_on else ''))
+        else:
+            for need in ['CONFIG_MODULE_SIG_KEY=""', '# CONFIG_MODULE_SIG_ALL is not set']:
+                (ok if need in lines else err)(f'no build-time signing key: {need}')
+            (err if 'CONFIG_MODULE_SIG_FORCE=y' in lines else ok)('signatures not enforced (CONFIG_MODULE_SIG_FORCE)')
+        # stages/<stage>/build.config: the last line for an option counts
+        last = {}
+        for x in s_want:
+            last[re.search(r'CONFIG_[A-Za-z0-9_]+', x).group(0)] = x
+        missed = []
+        for sym, x in last.items():
+            if x.startswith('# '):
+                if any(y.startswith(sym + '=') for y in lines):
+                    missed.append(x)
+            elif x not in lines:
+                missed.append(x)
+        (err if missed else ok)(f'every option of stages/{stage}/build.config ({len(last)})'
+                                + (f', not: {missed[:5]}' if missed else ''))
 
     # the modules tree
     for link in ('build', 'source'):
@@ -190,9 +235,13 @@ def check_kernel(out, args, fw_pins):
     for rel_p, typ, _, _ in tree_entries(d):
         if typ not in ('file', 'dir'):
             err(f'modules/{rel}/{rel_p}: {typ}, not a regular file or directory')
-    for need in ('modules.dep', 'modules.alias', 'modules.order', 'modules.builtin'):
+    for need in (('modules.builtin',) if nomod else ('modules.dep', 'modules.alias', 'modules.order', 'modules.builtin')):
         if not os.path.isfile(os.path.join(d, need)):
-            err(f'modules/{rel}/{need} missing (depmod at build)')
+            err(f'modules/{rel}/{need} missing' + ('' if nomod else ' (depmod at build)'))
+    if nomod:
+        for need in ('modules.dep', 'modules.order'):
+            if os.path.exists(os.path.join(d, need)):
+                err(f'modules/{rel}/{need}: a kernel without modules has no depmod files')
     lines, kos, bad_vm, signed = [], 0, [], []
     for dirpath, dirs, files in os.walk(d):
         dirs[:] = sorted(x for x in dirs if os.path.join(dirpath, x) != os.path.join(d, 'firmware'))
@@ -213,6 +262,8 @@ def check_kernel(out, args, fw_pins):
                     signed.append(r)
     ms = sha(''.join(sorted(lines, key=lambda s: s.split(' ')[0].encode())).encode())
     (ok if km.get('modules_sha256') == ms else err)(f'kernel.manifest modules_sha256 matches {kos} modules + depmod files')
+    if nomod:
+        (err if kos else ok)(f'no module file ({kos} .ko)')
     (err if bad_vm else ok)(f'vermagic {rel} in every module' + (f' (not: {bad_vm[:5]})' if bad_vm else ''))
     (err if signed else ok)('no module carries a signature' + (f' ({signed[:5]})' if signed else ''))
 
@@ -270,9 +321,13 @@ def check_dtbs(out):
 def main(argv):
     over = {}
     partial = False
-    while argv and argv[0] in ('--arg', '--partial'):
+    stage = None
+    while argv and argv[0] in ('--arg', '--partial', '--stage'):
         if argv[0] == '--partial':
             partial, argv = True, argv[1:]
+            continue
+        if argv[0] == '--stage' and len(argv) >= 2:
+            stage, argv = argv[1], argv[2:]
             continue
         if len(argv) < 2:
             break
@@ -291,7 +346,7 @@ def main(argv):
         elif not (has_k or has_d):
             err(f'{out}: neither modules/ nor boot/ (no export)')
         elif has_k or not partial:
-            check_kernel(out, args, fw)
+            check_kernel(out, args, fw, stage)
         else:
             print(f'note: --partial: no modules/ in {out}, kernel not checked')
         if not (has_k or has_d):
