@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Host test of scripts/apk-stage.sh in an Alpine container without network, on a made-up
 # signed repository (apk mkpkg + mkndx) that holds two versions of one package:
-# the locked older version installs although a newer one is offered, the world names the
+# the locked older version installs although a newer one is offered (as a dependency and
+# as a package the stage names), nothing is left in /tmp, the world names the
 # packages without a pin and matches a refresh build's, LOCK=refresh installs the
 # newest; refused with "refresh the locks": a lock line no repository offers (nothing
 # installed), a lock that misses a package the stage pulls in, a lock line nothing needs.
@@ -35,7 +36,7 @@ reset() { apk del -q app lib extra .glassine-lock >/dev/null 2>&1 || :
 # a stage directory: packages $1, lock = the base set + $2
 stage() { rm -rf /run/stage; mkdir -p /run/stage; echo "$1" > /run/stage/packages
 	printf "%s\n" $base $2 | LC_ALL=C sort > /run/stage/lock; }
-run() { reset; sh /s/apk-stage.sh > /tmp/out 2>&1; }
+run() { reset; sh /s/apk-stage.sh > /root/out 2>&1; }
 inst() { awk -F: "/^P:/{p=\$2} /^V:/{print p \"=\" \$2}" /lib/apk/db/installed | grep -qx "$1"; }
 
 stage app "app=1-r0 lib=1-r0"
@@ -43,30 +44,35 @@ run && rc=0 || rc=$?
 check "the locked older version installs beside a newer one" "[ $rc = 0 ] && inst lib=1-r0 && inst app=1-r0"
 check "the world names the packages without a pin" "! grep -q = /etc/apk/world && grep -qx app /etc/apk/world"
 check "no lock virtual is left" "! grep -q glassine-lock /etc/apk/world && ! inst .glassine-lock=.*"
-cp /etc/apk/world /tmp/world.check
+check "a passing run leaves no scratch files" "[ -z \"\$(ls /tmp)\" ] && ! ls -d /run/apk-stage.* >/dev/null 2>&1"
+cp /etc/apk/world /root/world.check
 LOCK=refresh run
 check "LOCK=refresh installs the newest" "inst lib=2-r0"
-check "the world matches the refresh build" "cmp -s /etc/apk/world /tmp/world.check"
+check "the world matches the refresh build" "cmp -s /etc/apk/world /root/world.check"
 reset
 check "an upgrade moves the locked version on" "LOCK=check sh /s/apk-stage.sh >/dev/null 2>&1 && apk upgrade -q >/dev/null && inst lib=2-r0"
 
+stage lib "lib=1-r0"
+run && rc=0 || rc=$?
+check "a stage package itself stays at its locked older version" "[ $rc = 0 ] && inst lib=1-r0 && grep -qx lib /etc/apk/world"
+
 stage app "app=1-r0 lib=0.9-r0"
 run && rc=0 || rc=$?
-check "a lock line no repository offers: refused" "[ $rc != 0 ] && grep -q \"lib=0.9-r0 .*offered: \" /tmp/out && grep -q \"refresh the locks\" /tmp/out"
-check "... naming what is offered" "grep -q \"1-r0 (/repo)\" /tmp/out && grep -q \"2-r0 (/repo)\" /tmp/out"
+check "a lock line no repository offers: refused" "[ $rc != 0 ] && grep -q \"lib=0.9-r0 .*offered: \" /root/out && grep -q \"refresh the locks\" /root/out"
+check "... naming what is offered" "grep -q \"1-r0 (/repo)\" /root/out && grep -q \"2-r0 (/repo)\" /root/out"
 check "... before anything is installed" "! inst app=1-r0"
 
 stage app "app=1-r0"
 run && rc=0 || rc=$?
-check "a lock that misses a pulled-in package: refused" "[ $rc != 0 ] && grep -q \"^+lib=\" /tmp/out && grep -q \"refresh the locks\" /tmp/out"
+check "a lock that misses a pulled-in package: refused" "[ $rc != 0 ] && grep -q \"^+lib=\" /root/out && grep -q \"refresh the locks\" /root/out"
 
 stage app "app=1-r0 lib=1-r0 extra=1-r0"
 run && rc=0 || rc=$?
-check "a lock line nothing needs: refused" "[ $rc != 0 ] && grep -q \"^-extra=1-r0\" /tmp/out"
+check "a lock line nothing needs: refused" "[ $rc != 0 ] && grep -q \"^-extra=1-r0\" /root/out"
 
 stage "" "lib=1-r0"
 run && rc=0 || rc=$?
-check "a package dropped from the stage but still locked: refused" "[ $rc != 0 ] && grep -q \"^-lib=1-r0\" /tmp/out"
+check "a package dropped from the stage but still locked: refused" "[ $rc != 0 ] && grep -q \"^-lib=1-r0\" /root/out"
 
 [ "$fails" = 0 ] && echo "all checks pass" || { echo "$fails failed"; exit 1; }
 '
