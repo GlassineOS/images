@@ -175,7 +175,7 @@ int main(void)
 	send_req(3, OP_STATUS, 2, 0, 0, 0);
 	r = get_rsp();
 	CHECK(r.status == 0 && r.version == 3 && r.op == OP_STATUS
-	      && !strcmp(r.data, "glassine-recovery 3\nconnection usb\nmachine test\nglassine-deploy 1\ntype=status\tcurrent=A\n"),
+	      && !strcmp(r.data, "glassine-recovery 3\nconnection computer\nmachine test\nglassine-deploy 1\ntype=status\tcurrent=A\n"),
 	      "STATUS: identity, connection, the status tool's output");
 
 	/* DEPLOY refusals: nothing runs */

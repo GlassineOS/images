@@ -283,6 +283,42 @@ RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
 
 FROM scratch AS ramenv-export
 COPY --from=ramenv-boot /out/ /
+
+# The recovery (docs/recovery.md): the RAM environment plus glassine-deploy (boot at
+# BOOT_COMMIT, the commit the boot initramfs is built from), its tools and the console's
+# menu; its reader speaks protocol version 3 (versions 1 and 2 as the RAM environment).
+# Packed the same way, from the same device config, into recovery/.
+#
+#   alpine → recovery + boot-src ─────────────────────────────────┐
+#   kernel-export + dtb-export + boot-src ────────→ recovery-boot → recovery-export
+#                                                                  recovery/<id>.img
+#
+#   docker buildx build --platform linux/arm64 --target recovery-export -o type=local,dest=out .
+FROM alpine AS recovery
+ARG LOCK=check
+RUN --mount=type=bind,source=stages/recovery,target=/run/stage \
+    --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    LOCK=$LOCK sh /run/apk-stage.sh
+ARG DEVICE BOOT_COMMIT
+RUN --mount=type=bind,source=ramenv,target=/src/ramenv \
+    --mount=type=bind,source=ramenv/targets/${DEVICE}.conf,target=/run/ramenv.conf \
+    --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
+    sh /src/ramenv/build.sh --recovery /src/boot "$BOOT_COMMIT" /src/ramenv /run/ramenv.conf "$DEVICE" /out/recovery
+
+FROM --platform=linux/amd64 ${KERNEL_BUILD_IMAGE}@${KERNEL_BUILD_DIGEST} AS recovery-boot
+ARG DEVICE
+RUN --mount=type=bind,from=kernel-export,source=/modules,target=/run/modules \
+    --mount=type=bind,from=dtb-export,source=/boot/dtb,target=/run/dtb \
+    --mount=type=bind,from=recovery,source=/out/recovery,target=/run/ramenv \
+    --mount=type=bind,from=boot-src,source=/src/boot,target=/src/boot \
+    --mount=type=bind,source=targets/${DEVICE},target=/run/target \
+    --mount=type=bind,source=ramenv/targets/${DEVICE}.conf,target=/run/ramenv.conf \
+    --mount=type=bind,source=scripts/ramenv-bootimg.sh,target=/run/ramenv-bootimg.sh \
+    DEVICE=$DEVICE ROLE=recovery sh /run/ramenv-bootimg.sh
+
+FROM scratch AS recovery-export
+COPY --from=recovery-boot /out/ /
 # ---------------------------------------------------------------------------------------
 
 # Build leftovers out, so two builds of the same inputs give the same tree: the machine

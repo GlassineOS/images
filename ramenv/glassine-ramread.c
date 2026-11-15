@@ -883,7 +883,7 @@ static int run_tool(char *const argv[], char **out, size_t *outn)
 		if (nul >= 0) dup2(nul, 0);
 		dup2(p[1], 1);
 		dup2(p[1], 2);
-		setenv("RECOVERY_TRANSPORT", t_local ? "local" : "usb", 1);
+		setenv("RECOVERY_CONNECTION", t_local ? "local" : "computer", 1);
 		execv(path, argv);
 		dprintf(2, "cannot run %s: %s\n", path, strerror(errno));
 		_exit(127);
@@ -959,7 +959,7 @@ static int op_status(int out, const struct request *r)
 	phase(PH_TOOL);
 	int x = run_tool(argv, &o, &on);
 	phase(PH_WAIT);
-	int hn = snprintf(head, sizeof head, "glassine-recovery %d\nconnection %s\n%s", PROTO_V3, t_local ? "local" : "usb",
+	int hn = snprintf(head, sizeof head, "glassine-recovery %d\nconnection %s\n%s", PROTO_V3, t_local ? "local" : "computer",
 			  g_armed == ARM_ARMED ? "writes armed\n" : "");
 	int rc;
 	if (x != 0) {
@@ -1036,12 +1036,15 @@ static void unmount_part(const char *name)
 	}
 }
 
-/* The partitions DEPLOY writes through (--deploy-part), writable for one operation:
- * force_ro 0 on their disk and BLKROSET 0 on each, while the whole-disk devices and
- * every other partition stay read-only (checked). on = 0: back, every mount of them
- * gone first, each disk's cache dropped (the whole-disk device has its own cache, and
- * READ and HASH go through it), every served disk and partition read-only again
- * (checked). 0 = done. */
+/* The partitions DEPLOY writes through (--deploy-part), writable for one operation.
+ * The kernel counts a partition read-only while its disk is (force_ro, or BLKROSET on
+ * the whole-disk device: get_disk_ro), so their disk is made writable too (force_ro 0,
+ * BLKROSET 0 on the whole-disk device), then each of them (BLKROSET 0); every other
+ * partition keeps its own flag and every other disk stays read-only (checked). Nothing
+ * in the recovery opens a whole-disk device for writing. on = 0: back, every mount of
+ * them gone first, BLKROSET 1 and force_ro 1 again, each disk's cache dropped (the
+ * whole-disk device has its own cache, and READ and HASH go through it), every served
+ * disk and partition read-only again (checked). 0 = done. */
 static int deploy_parts_rw(int on)
 {
 	int bad = 0;
@@ -1050,13 +1053,14 @@ static int deploy_parts_rw(int on)
 		if (part_parent(g_dpart[i], parent, sizeof parent) < 0) { if (on) say("%s: not a partition", g_dpart[i]); bad = 1; continue; }
 		if (is_boot_area(parent)) { say("%s: on a boot area, never written", g_dpart[i]); bad = 1; continue; }
 		if (on) {
-			if (set_force_ro(parent, 0) < 0 || part_ro(g_dpart[i], 0) < 0) {
+			if (set_force_ro(parent, 0) < 0 || part_ro(parent, 0) < 0 || part_ro(g_dpart[i], 0) < 0) {
 				say("%s: cannot be made writable: %s", g_dpart[i], strerror(errno));
 				bad = 1;
 			}
 		} else {
 			unmount_part(g_dpart[i]);
 			if (part_ro(g_dpart[i], 1) < 0) { say("%s: cannot set read-only again: %s", g_dpart[i], strerror(errno)); bad = 1; }
+			if (part_ro(parent, 1) < 0) { say("%s: cannot set read-only again: %s", parent, strerror(errno)); bad = 1; }
 			if (set_force_ro(parent, 1) < 0) { say("%s: force_ro 1: %s", parent, strerror(errno)); bad = 1; }
 		}
 	}
@@ -1065,9 +1069,11 @@ static int deploy_parts_rw(int on)
 	for (int i = 0; i < g_ndisks; i++) {
 		struct disk *d = &g_disk[i];
 		if (!d->block) continue;
-		int ro = 0;
+		int ro = 0, holds = 0;
+		for (int k = 0; k < g_ndparts; k++)
+			if (part_parent(g_dpart[k], parent, sizeof parent) == 0 && !strcmp(parent, d->name)) holds = 1;
 		if (!on && ioctl(d->fd, BLKFLSBUF, 0) < 0) bad = 1;
-		if (ioctl(d->fd, BLKROGET, &ro) < 0 || !ro) { say("%s: not read-only", d->name); bad = 1; }
+		if ((!on || !holds) && (ioctl(d->fd, BLKROGET, &ro) < 0 || !ro)) { say("%s: not read-only", d->name); bad = 1; }
 		if (!on) { if (partitions_ro(d->name) < 0) bad = 1; continue; }
 		char path[PATH_MAX];
 		snprintf(path, sizeof path, "/sys/block/%.63s", d->name);
@@ -1166,7 +1172,7 @@ static int op_deploy(int in, int out, const struct request *r)
 	}
 	free(o);
 	if (g_armed == ARM_ARMED) return reply(out, r, ST_ARMED, "ranges are armed for writing: DISARM first");
-	say("deploy: %s confirmed (%s connection)", token, t_local ? "local" : "usb");
+	say("deploy: %s confirmed (%s connection)", token, t_local ? "local" : "computer");
 	phase(PH_DISK);
 	if (deploy_parts_rw(1) < 0) {
 		int still = deploy_parts_rw(0) < 0;

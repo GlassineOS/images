@@ -1,0 +1,57 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# DIAG (docs/recovery.md): one gzip'ed tar with what went wrong, written to OUT (in the
+# recovery's RAM). Writes nothing to the device's disks: pstore is mounted read-only,
+# userdata is read with debugfs (no mount), the system partition by glassine-deploy's
+# read-only mount.
+#   identity.txt     STATUS's text (the recovery, the machine, glassine-deploy's state)
+#   dmesg.txt        this start's kernel log
+#   pstore/          the kernel's crash log of the last start (ramoops), if any
+#   logs/<id>/       /var/log of the current, candidate, failed and previous deployments
+#   system.txt       command line, partitions, mounts
+#   SHA256SUMS       the sha256 of every file above
+# Each file is cut to its last LIMIT bytes (1 MiB), so the whole stays far below the
+# 16 MiB a DIAG answer may carry.
+#   diag OUT
+. /lib/glassine-recovery/common.sh
+OUT=$1
+LIMIT=1048576
+D=$(mktemp -d /tmp/diag.XXXXXX) || exit 1
+trap 'rm -rf "$D"' EXIT
+/lib/glassine-recovery/status > "$D/identity.txt" 2>&1
+dmesg > "$D/dmesg.txt" 2>&1
+mkdir -p "$D/pstore" /sys/fs/pstore
+grep -q ' /sys/fs/pstore ' /proc/mounts || mount -t pstore -o ro pstore /sys/fs/pstore 2>/dev/null
+for f in /sys/fs/pstore/*; do [ -f "$f" ] && cp "$f" "$D/pstore/"; done
+{
+	echo "cmdline: $(cat /proc/cmdline)"
+	echo; echo "partitions:"; cat /proc/partitions
+	echo; echo "partition names:"
+	for u in /sys/class/block/*/uevent; do
+		n=$(sed -n 's/^PARTNAME=//p' "$u"); [ -n "$n" ] && echo "${u%/uevent} $n" | sed 's#.*/block/##'
+	done
+	echo; echo "read-only (the kernel's flag of every disk and partition; 1 = read-only):"
+	for r in /sys/class/block/*/ro; do r=${r%/ro}; echo "${r##*/} $(cat "$r/ro")"; done
+	echo; echo "mounts:"; cat /proc/mounts
+} > "$D/system.txt" 2>&1
+deploy_state
+for k in current candidate failed previous; do
+	id=$(field "$k" "$S_STATUS")
+	[ -n "$id" ] && [ ! -d "$D/logs/$id" ] || continue
+	mkdir -p "$D/logs/$id"
+	src=${USERDATA_PREFIX:-media/glassine}/deployments/$id/switch/var/log
+	if mounted=$(awk -v d="$USERDATA_DEV" '$1 == d { print $2; exit }' /proc/mounts) && [ -n "$mounted" ]; then
+		cp -r "$mounted/$src/." "$D/logs/$id/" 2>/dev/null
+	elif [ -n "${USERDATA_DEV:-}" ] && [ -e "$USERDATA_DEV" ]; then
+		debugfs -R "rdump /$src $D/logs/$id" "$USERDATA_DEV" > /dev/null 2>&1
+	fi
+	echo "$k" > "$D/logs/$id/.role"
+done
+# the last LIMIT bytes of each file
+find "$D" -type f | while read -r f; do
+	[ "$(stat -c %s "$f")" -le $LIMIT ] && continue
+	tail -c $LIMIT "$f" > "$f.cut" && mv "$f.cut" "$f" && echo "$f" >> "$D/.cut"
+done
+[ -f "$D/.cut" ] && sed "s#^$D/##" "$D/.cut" > "$D/cut.txt"; rm -f "$D/.cut"
+(cd "$D" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+tar -C "$D" -czf "$OUT" .

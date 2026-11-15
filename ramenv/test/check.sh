@@ -20,7 +20,9 @@ for x in $($B awk 'NR > 2 && $4 ~ /^(vd|mmcblk)/ { print $4 }' /proc/partitions)
 done
 mmc=
 [ -b /dev/mmcblk0 ] && mmc="mmcblk0 mmcblk0p1 mmcblk0boot0 mmcblk0boot1"
-for x in vda vda1 vda2 vdb $mmc; do
+pool=
+[ -b /dev/vdc ] && pool="vdc vdc1 vdc2"
+for x in vda vda1 vda2 vdb $pool $mmc; do
 	[ -b /dev/$x ] || { echo "QTEST FAIL no block device /dev/$x"; continue; }
 	if $B dd if=/dev/zero of=/dev/$x bs=512 count=1 seek=40 conv=notrunc,fsync 2>/tmp/dd; then
 		echo "QTEST FAIL a write to /dev/$x succeeded"
@@ -42,6 +44,27 @@ done
 dev=${itf%:*}
 node=/dev/bus/usb/$($B printf %03d "$($B cat $dev/busnum)")/$($B printf %03d "$($B cat $dev/devnum)")
 echo "QTEST ok   the vendor interface ff/47/52 at $node ($($B cat $dev/idVendor):$($B cat $dev/idProduct), $($B cat $dev/speed) Mb/s)"
+# the recovery (test-recovery.sh): the vendor interface stays interface 0 next to the
+# USB serial, and the menu answers on the host's side of it (cdc_acm)
+if [ -f /etc/glassine/recovery.version ] && [ "${RECOVERY_USB_SERIAL:-}" = yes ]; then
+	[ "$($B cat $itf/bInterfaceNumber)" = 00 ] && echo "QTEST ok   the vendor interface is interface 0 of the composite gadget" \
+		|| echo "QTEST FAIL the vendor interface is interface $($B cat $itf/bInterfaceNumber), not 0"
+	i=0
+	while [ ! -c /dev/ttyACM0 ] && [ $i -lt 30 ]; do $B sleep 1; i=$((i + 1)); done
+	if [ -c /dev/ttyACM0 ]; then
+		$B stty -F /dev/ttyACM0 raw -echo 2>/dev/null
+		$B cat /dev/ttyACM0 > /tmp/acm 2>/dev/null &
+		cpid=$!
+		$B sleep 1
+		printf '\r' > /dev/ttyACM0
+		i=0
+		while ! $B grep -q '== GlassineOS recovery' /tmp/acm && [ $i -lt 60 ]; do $B sleep 1; i=$((i + 1)); done
+		$B grep -q '== GlassineOS recovery' /tmp/acm && $B grep -q ' current ' /tmp/acm \
+			&& echo "QTEST ok   the menu answers over the USB serial (host /dev/ttyACM0): $($B grep -c . /tmp/acm) lines, the deployments listed" \
+			|| echo "QTEST FAIL the menu over the USB serial showed: $($B tr '\n\r' '  ' < /tmp/acm | $B head -c 400)"
+		kill $cpid 2>/dev/null
+	else echo "QTEST FAIL no /dev/ttyACM0: the USB serial function is not there"; fi
+fi
 in= out=
 for e in $itf/ep_*; do
 	[ "$($B cat $e/type)" = Bulk ] || continue
