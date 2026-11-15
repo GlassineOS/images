@@ -1,11 +1,13 @@
 # Any e-ink device: the panel daemons, the compositor with the e-ink output, the
-# on-screen keyboard with its English suggestions and handwriting, the desktop
-# (shell, Home screen, settings, sway session) and its terminal
+# on-screen keyboard with its English suggestions and handwriting (and the handwriting
+# samples app that teaches it), the desktop (shell, Home screen, settings, sway
+# session) and its terminal
 foot
 glassine-epdd
 glassine-epdd-desktop
 glassine-handwriting
 glassine-handwriting-model
+glassine-handwriting-samples
 glassine-home
 glassine-predict-model-en
 glassine-shell
