@@ -38,6 +38,7 @@ A stage lives in `stages/<stage>/`:
 | `packages` | plain package names, one per line |
 | `lock` | the whole installed set after this stage, as `name=version` |
 | `rootfs/` | files copied over the tree (any stage). None may belong to a package |
+| `expect` | a device stage's values its finished tree must hold, `FILE KEY=VALUE` per line (the file read as its programs read it); the validation stage checks them. The Note Air's: the partitions and the userdata reserve in `/etc/glassine/deploy.conf` |
 
 **What goes where:** behavior goes in packages, which upgrade live. Configuration and
 seeds go in a stage's `rootfs/` and change only with a new base. Applications aren't in
@@ -144,6 +145,14 @@ and the recovery go as they are. The boot loader and the partition layout aren't
 here: `targets/<target>/release.conf` pins them by URL and SHA-256 (GlassineOS/abl's
 release, GlassineOS/installer's `layouts/`), and pool-image fetches them. Details: `docs/artifacts.md`, "Releases";
 `scripts/test-pool-image.sh` tests it.
+
+`scripts/test-first-start-qemu.sh` (CI: boot-qemu's `first-start` job) runs the route's
+last step in QEMU: a release of the generic reference base, made by pool-image, written
+to a virtual `system_b` beside a userdata that holds another system's ext4, booted bare.
+The first start must grow the pool to the partition, format userdata (ext4, 4096-byte
+blocks, no `orphan_file`, the Note Air's `USERDATA_RESERVE_KIB` free at its end, taken
+from `stages/device-onyx-noteair/expect`) and select the first deployment, which boots
+and is accepted. Its header says what differs from the device (the kernel, the base).
 
 ## Kernel and device trees
 
