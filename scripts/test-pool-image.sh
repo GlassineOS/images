@@ -12,12 +12,9 @@
 # onto A inside the image: B read-only, B's received UUID, B's content. Also: a boot
 # without the init verb fails and leaves nothing; an existing --out is refused.
 #
-#   scripts/test-pool-image.sh                  the layout by a STUB glassine-deploy init
-#   POOL_TEST_BOOT=DIR scripts/test-pool-image.sh   by GlassineOS/boot's checkout DIR
-#
-# The stub writes what the install contract says init lays out (bases/, modules/,
-# state/format, state/kernel, state/install); it is a fixture, never the product's layout:
-# scripts/pool-image itself only ever runs boot's own glassine-deploy.
+#   scripts/test-pool-image.sh                  the layout by GlassineOS/boot at the
+#                                               Dockerfile's BOOT_COMMIT (fetched)
+#   POOL_TEST_BOOT=DIR scripts/test-pool-image.sh   by the boot checkout DIR
 # Needs docker (privileged containers), git and python3. Works in .out/test-pool-image/.
 set -eu
 P=$(cd "$(dirname "$0")/.." && pwd)
@@ -62,26 +59,15 @@ head -c 2097152 /dev/urandom > "$RE/ramenv/$RID.img"
 printf 'format=1\nid=%s\ndevice=fixture\nkernel=%s\nsize=2097152\nsha256=%s\n' $RID $REL \
 	"$(sha256sum < "$RE/ramenv/$RID.img" | cut -c1-64)" > "$RE/ramenv/$RID.manifest"
 
-# --- boot: the stub (a fixture) or a real checkout
+# --- boot: the commit this repository pins (BOOT_COMMIT), or a checkout given
 if [ -n "${POOL_TEST_BOOT:-}" ]; then
-	BOOT=$(cd "$POOL_TEST_BOOT" && pwd); echo "layout by boot $(git -C "$BOOT" rev-parse HEAD)"
+	BOOT=$(cd "$POOL_TEST_BOOT" && pwd)
 else
-	BOOT=$O/boot-stub; mkdir -p "$BOOT/sbin" "$BOOT/lib"
-	: > "$BOOT/lib/glassine-state.sh"
-	cat > "$BOOT/sbin/glassine-deploy" <<'EOF'
-#!/bin/sh
-# STUB of GlassineOS/boot's `glassine-deploy init POOL --install-marker` (a test fixture)
-set -eu
-[ "$1" = init ] && [ "$3" = --install-marker ] || exit 2
-[ -z "$(ls -A "$2")" ] || { echo "init: $2 is not empty" >&2; exit 1; }
-mkdir "$2/bases" "$2/modules" "$2/state"
-echo version=1 > "$2/state/format"
-printf 'current=\nprevious=\n' > "$2/state/kernel"
-echo format=1 > "$2/state/install"
-EOF
-	git -C "$BOOT" init -q && git -C "$BOOT" add -A && git -C "$BOOT" -c user.name=t -c user.email=t@t commit -qm stub
-	echo "layout by a STUB glassine-deploy init (fixture; POOL_TEST_BOOT=DIR for boot's own)"
+	BOOT=$O/boot
+	pin=$(sed -n 's/^ARG BOOT_COMMIT=//p' "$P/Dockerfile"); url=$(sed -n 's/^ARG BOOT=//p' "$P/Dockerfile")
+	sh "$P/scripts/git-fetch.sh" test-pool-image "$url" "$pin" "$BOOT" || { echo "FAIL fetching boot $pin"; exit 1; }
 fi
+echo "layout by boot $(git -C "$BOOT" rev-parse HEAD)"
 NOINIT=$O/boot-noinit; mkdir -p "$NOINIT/sbin" "$NOINIT/lib"; : > "$NOINIT/lib/glassine-state.sh"
 printf '#!/bin/sh\necho "usage: glassine-deploy status|..." >&2; exit 2\n' > "$NOINIT/sbin/glassine-deploy"
 git -C "$NOINIT" init -q && git -C "$NOINIT" add -A && git -C "$NOINIT" -c user.name=t -c user.email=t@t commit -qm noinit
