@@ -242,8 +242,9 @@ FROM scratch AS boot-export
 COPY --from=boot /out/ /
 
 # ---------------------------------------------------------------------------------------
-# The RAM environment (docs/ramenv.md): what the installer starts from memory over the
-# boot loader (fastboot boot) to read the whole disk for the backup, read-only.
+# The RAM environment (docs/ramenv.md): what the installer writes to the recovery
+# partition (or starts once with fastboot boot) to read the whole disk for the backup,
+# and to write the partitions it arms (read-only until then).
 #
 #   alpine → ramenv                                               (its initramfs)
 #   kernel-export + dtb-export + ramenv + boot-src → ramenv-boot → ramenv-export
