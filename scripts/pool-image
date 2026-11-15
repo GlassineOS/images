@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Make the installer's release folder from one build: the system partition as a btrfs
-pool image, the boot image, the RAM environment, and release.json (docs/artifacts.md,
-"Releases"; GlassineOS/installer spec 002, FR-019a).
+pool image, the boot image, the RAM environment, the boot loader, the partition layout,
+the recovery, and release.json (docs/artifacts.md, "Releases"; GlassineOS/installer
+spec 002, FR-019a).
 
     scripts/pool-image [OPTIONS] ARTIFACTS TARGET
 
@@ -15,6 +16,12 @@ Options:
   --ramenv DIR       a ramenv-export (docker buildx ... --target ramenv-export -o
                      type=local,dest=DIR): DIR/ramenv/<id>.img and its .manifest. Without
                      it the release has no ram-environment role
+  --recovery PATH    a recovery-export (docker buildx ... --target recovery-export -o
+                     type=local,dest=DIR): DIR/recovery/<id>.img and its .manifest
+                     (role=recovery); or one recovery image FILE. Without it the release
+                     has no recovery role
+  --boot-loader FILE the boot loader the target pins, from FILE instead of its URL
+  --layout FILE      the partition layout the target pins, from FILE instead of its URL
   --boot DIR         a GlassineOS/boot checkout whose glassine-deploy lays the pool out,
                      instead of the build's boot commit (its boot record's boot_commit,
                      fetched from the Dockerfile's BOOT): a trial (boot:<commit12>)
@@ -43,22 +50,33 @@ release.json (release_format 1):
                    min_partition_bytes = the target's board.conf PART_SIZE (every later
                    boot image is packed to that limit)
   ram-environment  with --ramenv: kind raw-image, min_partition_bytes = its size
+  boot-loader      the target's pin (targets/TARGET/release.conf: BOOT_LOADER_URL,
+                   _SHA256, _PART_SIZE): kind raw-image, min_partition_bytes = the boot
+                   loader partition's size
+  partition-layout the target's pin (LAYOUT_URL, LAYOUT_SHA256): kind gpt-recipe,
+                   min_partition_bytes = its size
+  recovery         with --recovery: kind raw-image, min_partition_bytes = its size
 and, beside what the installer reads (readers ignore unknown keys): target, build,
-trial, trial_reasons, missing (the roles this folder doesn't supply: boot-loader,
-partition-layout, recovery) and per role where it came from.
+trial, trial_reasons, missing (the roles this folder doesn't supply) and per role where
+it came from. A pinned file is fetched from its URL (or taken from --boot-loader /
+--layout) and refused unless its SHA-256 is the pin's; a target without a pin for a
+role has no such role, and --boot-loader / --layout for it are refused.
 
 Environment: POOL_IMAGE_TMPFS (default 8g), POOL_IMAGE_IMG (the largest pool tried,
 default 8 GiB), MATERIALIZE_IMAGE (default alpine:3.24).
 Exit: 0 done, 1 failed (nothing left at --out), 2 usage.
 """
-import json, os, re, shutil, subprocess, sys, tempfile
+import json, os, re, shutil, subprocess, sys, tempfile, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import glassine_pins  # noqa: E402
 
 BUILD_ID = re.compile(r'(\d{8}-\d{6})(?:-(\d+))?')
-MISSING = ['boot-loader', 'partition-layout', 'recovery']
+ROLES = ['base', 'kernel', 'ram-environment', 'boot-loader', 'partition-layout', 'recovery']
+# the roles a target pins in targets/<target>/release.conf: (role, key prefix, option)
+PINNED = [('boot-loader', 'BOOT_LOADER', 'boot_loader'), ('partition-layout', 'LAYOUT', 'layout')]
+SHA = re.compile(r'[0-9a-f]{64}')
 
 
 class Fail(Exception):
@@ -79,6 +97,8 @@ def record(path):
 
 def shell_conf(path, key):
     """KEY=value from a board.conf (sh syntax, plain values)."""
+    if not os.path.isfile(path):
+        return None
     with open(path) as f:
         for line in f:
             m = re.fullmatch(rf'{key}=["\']?([^"\'\s]*)["\']?\s*', line)
@@ -124,6 +144,48 @@ def fetch_boot(url, commit, dest):
         raise Fail(f'fetching boot {commit} from {url} failed')
 
 
+def export(d, sub, target, role):
+    """The one <id>.img in an export folder DIR/<sub>/, checked against its manifest."""
+    rd = os.path.join(os.path.abspath(d), sub)
+    ids = sorted(n[:-4] for n in os.listdir(rd) if re.fullmatch(r'[0-9a-f]{16}\.img', n)) \
+        if os.path.isdir(rd) else []
+    if len(ids) != 1:
+        raise Fail(f'{rd}: expected one <id>.img, found {ids}')
+    rec = record(os.path.join(rd, ids[0] + '.manifest'))
+    if rec.get('device') != target:
+        raise Fail(f'{role} {ids[0]} is for {rec.get("device")}, not {target}')
+    if rec.get('role', 'ramenv') != sub:
+        raise Fail(f'{role} {ids[0]}: its manifest says role={rec.get("role", "ramenv")}')
+    checked(os.path.join(rd, ids[0] + '.img'), rec['sha256'], f'{role} {ids[0]}')
+    return ids[0], os.path.join(rd, ids[0] + '.img'), rec
+
+
+def pinned(conf, role, key, given, work):
+    """(path, url) of the file the target pins for role: given (checked) or fetched."""
+    url, sha = shell_conf(conf, key + '_URL'), shell_conf(conf, key + '_SHA256')
+    if not url and not sha:
+        if given:
+            raise Fail(f'{role}: {conf} pins none, so {given} can\'t be checked')
+        return None
+    if not url or not sha or not SHA.fullmatch(sha):
+        raise Fail(f'{conf}: {key}_URL and a 64-hex {key}_SHA256 go together')
+    if given:
+        path = os.path.abspath(given)
+    else:
+        path = os.path.join(work, 'pinned-' + role)
+        print(f'pool-image: fetching {role} {url}')
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r, open(path, 'wb') as f:
+                shutil.copyfileobj(r, f)
+        except OSError as e:
+            raise Fail(f'{role}: fetching {url}: {e}')
+    if not os.path.isfile(path):
+        raise Fail(f'{role}: no {path}')
+    if glassine_pins.sha256_file(path) != sha:
+        raise Fail(f'{role}: {given or url} is not the file the target pins (sha256 {sha})')
+    return path, url
+
+
 def link_or_copy(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     try:
@@ -145,12 +207,13 @@ def usage():
 
 
 def parse(argv):
-    o = {'build': None, 'ramenv': None, 'boot': None, 'boot_commit': None, 'out': None, 'margin': '64',
+    o = {'build': None, 'ramenv': None, 'recovery': None, 'boot_loader': None, 'layout': None, 'boot': None, 'boot_commit': None, 'out': None, 'margin': '64',
          'repo': os.path.dirname(HERE)}
     pos = []
     it = iter(argv)
     for a in it:
-        if a in ('--build', '--ramenv', '--boot', '--boot-commit', '--out', '--margin', '--repo'):
+        if a in ('--build', '--ramenv', '--recovery', '--boot-loader', '--layout', '--boot', '--boot-commit',
+                 '--out', '--margin', '--repo'):
             v = next(it, None)
             if v is None:
                 usage()
@@ -193,18 +256,18 @@ def main(argv):
     if not part or not part.isdigit() or os.path.getsize(bimg) > int(part):
         raise Fail(f'targets/{target}/board.conf: no PART_SIZE, or the boot image is larger')
 
-    ramenv = None
-    if o['ramenv']:
-        rd = os.path.join(os.path.abspath(o['ramenv']), 'ramenv')
-        ids = sorted(n[:-4] for n in os.listdir(rd) if re.fullmatch(r'[0-9a-f]{16}\.img', n)) \
-            if os.path.isdir(rd) else []
-        if len(ids) != 1:
-            raise Fail(f'{rd}: expected one <id>.img, found {ids}')
-        rrec = record(os.path.join(rd, ids[0] + '.manifest'))
-        if rrec.get('device') != target:
-            raise Fail(f'ram environment {ids[0]} is for {rrec.get("device")}, not {target}')
-        checked(os.path.join(rd, ids[0] + '.img'), rrec['sha256'], f'ram environment {ids[0]}')
-        ramenv = (ids[0], os.path.join(rd, ids[0] + '.img'), rrec)
+    ramenv = export(o['ramenv'], 'ramenv', target, 'ram environment') if o['ramenv'] else None
+    recovery = None
+    if o['recovery'] and os.path.isdir(o['recovery']):
+        recovery = export(o['recovery'], 'recovery', target, 'recovery')
+    elif o['recovery']:
+        if not os.path.isfile(o['recovery']):
+            raise Fail(f'recovery: no {o["recovery"]}')
+        recovery = (None, os.path.abspath(o['recovery']), {})
+    conf = os.path.join(repo, 'targets', target, 'release.conf')
+    if any(o[opt] for _, _, opt in PINNED) and not os.path.isfile(conf):
+        raise Fail(f'{conf}: no pins, so --boot-loader / --layout can\'t be checked')
+    abl_part = shell_conf(conf, 'BOOT_LOADER_PART_SIZE')
 
     why = [w for w in m.get('trial_reasons', '').split() if w] if m.get('trial') == 'yes' else []
     out = os.path.abspath(o['out'] or os.path.join(adir, target, 'releases', bid))
@@ -233,6 +296,14 @@ def main(argv):
             fetch_boot(boot_url, boot_commit, boot_dir)
         if boot_commit != m.get('boot_commit'):
             why.append(f'boot:{boot_commit[:12]}')
+        pins = {}
+        for role, key, opt in PINNED:
+            p = pinned(conf, role, key, o[opt], work)
+            if p:
+                pins[role] = p
+        if 'boot-loader' in pins and (not abl_part or not abl_part.isdigit()
+                                      or os.path.getsize(pins['boot-loader'][0]) > int(abl_part)):
+            raise Fail(f'{conf}: no BOOT_LOADER_PART_SIZE, or the boot loader is larger')
         print(f'pool-image: build {bid}: base {base}, kernel {rel}, boot image {img}; '
               f'layout by boot {boot_commit[:12]}')
 
@@ -275,7 +346,21 @@ def main(argv):
             arts['ram-environment'] = entry(os.path.join(stage, r_rel), r_rel, 'raw-image',
                                             os.path.getsize(ramenv[1]), ramenv=ramenv[0],
                                             kernel_release=ramenv[2].get('kernel', ''))
-        missing = MISSING + ([] if ramenv else ['ram-environment'])
+        for role, (path, url) in pins.items():
+            rel_ = f'{role}/{os.path.basename(url.split("?")[0]) or role}'
+            link_or_copy(path, os.path.join(stage, rel_))
+            if role == 'boot-loader':
+                arts[role] = entry(os.path.join(stage, rel_), rel_, 'raw-image', int(abl_part), url=url)
+            else:
+                arts[role] = entry(os.path.join(stage, rel_), rel_, 'gpt-recipe', os.path.getsize(path), url=url)
+        if recovery:
+            name = f'{recovery[0]}.img' if recovery[0] else os.path.basename(recovery[1])
+            c_rel = f'recovery/{name}'
+            link_or_copy(recovery[1], os.path.join(stage, c_rel))
+            extra = {'recovery': recovery[0], 'kernel_release': recovery[2].get('kernel', '')} if recovery[0] else {}
+            arts['recovery'] = entry(os.path.join(stage, c_rel), c_rel, 'raw-image', os.path.getsize(recovery[1]),
+                                     **extra)
+        missing = [r for r in ROLES if r not in arts]
         doc = {'release_format': 1, 'target': target, 'build': bid, 'trial': bool(why),
                'trial_reasons': why, 'missing': missing, 'artifacts': arts}
         with open(os.path.join(stage, 'release.json'), 'w') as f:
@@ -291,7 +376,7 @@ def main(argv):
     print(f'pool-image: release {out}' + (f', trial ({" ".join(why)})' if why else ''))
     print(f'  base             {arts["base"]["size"] / 1048576:.0f} MiB, min partition '
           f'{arts["base"]["min_partition_bytes"] / 1048576:.0f} MiB')
-    print(f'  missing          {" ".join(missing)}')
+    print(f'  missing          {" ".join(missing) or "nothing"}')
     return 0
 
 
