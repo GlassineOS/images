@@ -28,8 +28,10 @@ harness's made-up one:
      powered off by its power button (ACPI, the base's acpid) --accept-wait seconds
      (default 240, QTEST_ACCEPT_WAIT) after that step's service starts. The disk is
      checked after each boot; after boot 2 the deployment must be current (accepted), no
-     candidate, and the loader record names the set it started (its unmarked count is
-     shown: nothing on a PC marks a start healthy yet).
+     candidate, and the loader record names the set it started with unmarked=0: the
+     boot-success step's healthy mark (boot's glassine-loader-mark, in the base's
+     glassine-deploy) cleared the loader's count, and the power-off's shutdown step
+     wrote nothing more.
 
   Without a release loader, or with --direct-kernel (QTEST_DIRECT_KERNEL=1): step 3 only
   shows the firmware starting the entry, and OVMF then starts the set's vmlinuz with its
@@ -427,13 +429,14 @@ def main():
     res(rc == 0, f'boot 2: powered off by its power button (qemu exit {rc})')
     disk_check(2, disk, by, base_id, krel, dep)
     if not direct:
-        # the unmarked count: whether the accepted start was marked healthy in the
-        # loader record (boot's uefi hand-off, in the base's glassine-deploy) is shown,
-        # not checked; unmarked, the loader starts the previous set at 3.
+        # the unmarked count: the accepted start is marked healthy in the loader record
+        # (boot's glassine-loader-mark, 010 FR-023); unmarked, the loader would start
+        # the previous set at 3.
         lr2 = loader_record(cw, disk, bootp)
         print(f'QTEST info the loader record after boot 2: seq={lr2.get("seq")} unmarked={lr2.get("unmarked")} '
               f'started={lr2.get("started")} started_why={lr2.get("started_why")}', flush=True)
         res(lr2.get('started') == kid, f'after boot 2: the loader record names the set it started ({lr2.get("started")})')
+        res(lr2.get('unmarked') == '0', f'after boot 2: the accepted start marked healthy, unmarked=0 ({lr2.get("unmarked")})')
     for p in cw.glob('*.img'):
         p.unlink()
     print(f'test-pc-release-qemu: {len(FAILS)} failed' + ''.join(f'\n  {f}' for f in FAILS), flush=True)
