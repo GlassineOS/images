@@ -11,7 +11,9 @@
 #      changes): the device facts the Note Air's tree must hold
 #      (stages/device-onyx-noteair/expect: SYSTEM_DEV, USERDATA_DEV and
 #      USERDATA_RESERVE_KIB, which validation checks on the Note Air's own tree)
-#      appended to the example's deploy.conf, ACCEPT_AFTER=40, and what this VM needs
+#      appended to the example's deploy.conf, ACCEPT_AFTER=40, the Note Air's loader
+#      record keys (board.conf HANDOFF, BOOT_FORM, BOOT_PART: on this disk, with no
+#      glassine-boot partition, the healthy mark fails and nothing is written), and what this VM needs
 #      to accept a deployment (boot's test/qemu does the same in a deployment's layer;
 #      a first deployment carries nothing, so here it is in the base): the session's
 #      health check passes without a panel, Bluetooth refuses to start without the
@@ -102,6 +104,10 @@ cat > "$Q/etc/conf.d/bluetooth" <<'EOF'
 # bluetoothd would keep the boot-success step from accepting the deployment)
 start_pre() { [ -d /sys/class/bluetooth ] || { eerror "no Bluetooth in this kernel (test)"; return 1; }; }
 EOF
+# the Note Air's loader record keys (board.conf HANDOFF, BOOT_FORM, BOOT_PART; the example
+# base has no board.conf): this disk has no glassine-boot partition, so the accept step
+# says the healthy mark failed, writes nothing and accepts the deployment all the same
+grep -E '^(HANDOFF|BOOT_FORM|BOOT_PART)=' "$BOARD" > "$Q/etc/glassine-bootimg/board.conf"
 { echo "# scripts/test-first-start-qemu.sh: the Note Air's device facts ($EXPECT)"
   echo "$facts"; echo ACCEPT_AFTER=40; } > "$Q/etc/glassine/deploy.conf.qtest"
 DF=$O/Dockerfile

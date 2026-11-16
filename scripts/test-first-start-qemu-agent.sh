@@ -54,6 +54,14 @@ while [ "$(st current)" != "$booted" ] && [ $n -lt $((ACCEPT_AFTER + 300)) ]; do
 dmesg | grep -q "glassine-deploy-accept: $booted accepted"; res $? "$booted accepted by the boot-success step"
 dmesg | grep -q "glassine-deploy-accept: $booted accepted" ||
 	say "info the boot-success step said: $(dmesg | sed -n 's/.*\(glassine-deploy-accept: .*\)/\1/p' | tr '\n' '|')"
+# a board whose loader record is on the raw boot partition (BOOT_FORM=raw) without that
+# partition: the healthy mark is said to fail, nothing is written, the accept goes on
+if grep -qx 'BOOT_FORM=raw' /etc/glassine-bootimg/board.conf 2>/dev/null; then
+	dmesg | grep -q 'glassine-loader-mark: the boot partition: 0 partitions named glassine-boot: nothing written'
+	res $? "BOOT_FORM=raw, no glassine-boot partition: the loader mark says so and writes nothing"
+	dmesg | grep -q 'glassine-deploy-accept: the healthy mark failed (exit 1)' && [ ! -e /run/glassine/loader-marked ]
+	res $? "BOOT_FORM=raw, no glassine-boot partition: the accept step goes on without the mark"
+fi
 [ "$(st current)" = "$booted" ] && [ -z "$(st candidate)" ]; res $? "$booted is current, no candidate (status: $(glassine-deploy status --porcelain 2>/dev/null | sed -n 2p | tr '\t' ' '))"
 
 # userdata is GlassineOS's now: the other system's files are gone, the person's storage is made
