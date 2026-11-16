@@ -280,6 +280,9 @@ RUN --mount=type=bind,source=stages/device-uefi-pc,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-uefi-pc/rootfs/ /
+# the board keys the booted system reads: the target's board.conf, the same file a PC
+# release names as its board role (the kernel set's board archive and command line)
+COPY --chmod=644 targets/uefi-pc/board.conf /etc/glassine-bootimg/board.conf
 
 # ---------------------------------------------------------------------------------------
 # The initramfs and the boot image (GlassineOS/boot's docs/kernel-artifacts.md):

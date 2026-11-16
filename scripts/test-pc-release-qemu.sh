@@ -1,0 +1,100 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# A PC release, installed and started: GlassineOS/installer (its main branch, or
+# INSTALLER_CHECKOUT=DIR) checks the release folder scripts/pc-release makes and
+# installs it with `install --pc` on a blank virtual PC (QEMU q35, OVMF), whose disk
+# then starts the installed kernel set through the first start into the first
+# deployment (scripts/test-pc-release-qemu.py has the steps and what each checks).
+#
+#   scripts/test-pc-release-qemu.sh [RELEASE_DIR]
+#   exit 0 = every QTEST check passed
+#
+# Without RELEASE_DIR, scripts/pc-release makes one first (in the test's artifacts).
+#
+# What differs from a PC: the boot loader. GlassineOS/loader has no release yet, so the
+# release names no boot-loader; the installer gets the placeholder loader of its own
+# QEMU harness (tests/qemu/placeholder.py) for that role, the firmware's start of the
+# new entry is shown with it, and the kernel set is then started by OVMF directly
+# (-kernel/-initrd with the set's own files and command line, + console=ttyS0
+# loglevel=7 to see it), as the loader would start it. The disk is NVMe, the network
+# none.
+#
+# Besides the QEMU run, the host checks the release with the installer's own check and
+# plan (--release) on its PC facts fixtures: the release's least sizes fit the
+# description's partitions.
+#
+# Needs docker (privileged containers; /dev/kvm used when present), git and python3.
+# Works in .out/test-pc-release-qemu/ (the logs are kept; the disks and the release
+# made here are removed at the end, QTEST_KEEP=1 keeps them).
+set -eu
+P=$(cd "$(dirname "$0")/.." && pwd)
+O=$P/.out/test-pc-release-qemu
+ALPINE=$(sed -n 's/^ARG ALPINE=//p' "$P/Dockerfile" | head -n 1)
+die() { echo "test-pc-release-qemu: $*" >&2; exit 1; }
+case "${1:-}" in -*) sed -n 's/^#   //p' "$0" >&2; exit 2 ;; esac
+mkdir -p "$O"
+rm -rf "$O/work" "$O"/*.log
+cleanup() {
+	[ "${QTEST_KEEP:-}" = 1 ] && return
+	docker run --rm -v "$O":/o "$ALPINE" sh -c 'rm -rf /o/work /o/artifacts' >/dev/null 2>&1 || :
+}
+trap cleanup EXIT
+
+# --- the release
+if [ -n "${1:-}" ]; then
+	REL=$(cd "$1" && pwd)
+else
+	rm -rf "$O/artifacts"
+	"$P/scripts/pc-release" --artifacts "$O/artifacts" --no-parent > "$O/pc-release.log" 2>&1 \
+		|| { cat "$O/pc-release.log" >&2; die "pc-release failed"; }
+	REL=$(sed -n 's/^pc-release: //p' "$O/pc-release.log" | tail -n 1)
+fi
+[ -f "$REL/release.json" ] || die "$REL: no release.json"
+echo "release: $REL"
+
+# --- the installer: its main branch, built static in its own toolchain's base image
+if [ -n "${INSTALLER_CHECKOUT:-}" ]; then
+	I=$(cd "$INSTALLER_CHECKOUT" && pwd)
+else
+	I=$O/installer
+	if [ -d "$I/.git" ]; then git -C "$I" fetch -q origin main && git -C "$I" checkout -q --detach origin/main
+	else git clone -q https://github.com/GlassineOS/installer "$I"; fi
+fi
+echo "installer: $(git -C "$I" rev-parse HEAD)"
+RUST=$(sed -n 's/^FROM \(rust:[^ ]*\).*/\1/p' "$I/Dockerfile" | head -n 1)
+[ -n "$RUST" ] || die "$I/Dockerfile: no rust image"
+docker run --rm -e CARGO_HOME=/w/.cargo-home -e "OWNER=$(id -u):$(id -g)" -v "$I":/w -w /w "$RUST" sh -c \
+	'apk add -q musl-dev; rc=0; cargo build -q --release -p glassine-install || rc=$?; chown -R "$OWNER" target .cargo-home; exit $rc' \
+	> "$O/installer-build.log" 2>&1 || { tail -30 "$O/installer-build.log" >&2; die "the installer's build failed"; }
+B=$I/target/release/glassine-install
+[ -x "$B" ] || die "no $B"
+
+# --- the host: the installer's check and plan read the release's least sizes
+fail=0
+for f in pc-two-disks pc-windows; do
+	F=$I/core/tests/fixtures/facts/$f.json
+	rc=0; "$B" check --facts "$F" --release "$REL/release.json" --json > "$O/check-$f.json" 2>"$O/check-$f.err" || rc=$?
+	if [ $rc = 0 ]; then echo "QTEST ok host: check --facts $f --release: exit 0"
+	else echo "QTEST FAIL host: check --facts $f --release: exit $rc ($(head -c 400 "$O/check-$f.err"))"; fail=1; fi
+	rc=0; "$B" plan --dry-run --facts "$F" --release "$REL/release.json" --developer --json > "$O/plan-$f.json" 2>"$O/plan-$f.err" || rc=$?
+	if [ $rc = 0 ]; then echo "QTEST ok host: plan --dry-run --facts $f --release: a plan (exit 0)"
+	else echo "QTEST FAIL host: plan --dry-run --facts $f --release: exit $rc ($(head -c 400 "$O/plan-$f.err"))"; fail=1; fi
+done
+
+# --- the guest: QEMU in a container with the tools of the installer's harness
+KVM=''; [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && KVM='--device /dev/kvm'
+mkdir -p "$O/work" "$O/cache"
+rc=0
+# shellcheck disable=SC2086  # KVM: one option and its value, or nothing
+docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 \
+	-v "$I":/i:ro -v "$REL":/r:ro -v "$P/scripts":/s:ro -v "$O":/o "$ALPINE" sh -c '
+apk add -q --no-progress python3 qemu-system-x86_64 ovmf sgdisk dosfstools mtools squashfs-tools \
+	btrfs-progs e2fsprogs e2fsprogs-extra util-linux coreutils >/dev/null || exit 1
+python3 /s/test-pc-release-qemu.py --installer /i --binary /i/target/release/glassine-install --release /r \
+	--work /o/work --cache /o/cache
+' 2>&1 | tee "$O/qemu.log" || :
+grep -q '^test-pc-release-qemu: 0 failed' "$O/qemu.log" || rc=1
+cp "$O"/work/*.log "$O/" 2>/dev/null || :
+pass=$(grep -c '^QTEST ok' "$O/qemu.log" || :)
+echo "test-pc-release-qemu: guest $pass ok$( [ $rc = 0 ] || echo ', FAILED'); host checks $( [ $fail = 0 ] && echo passed || echo FAILED)"
+[ $rc = 0 ] && [ $fail = 0 ]

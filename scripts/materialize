@@ -11,7 +11,11 @@ FR-021). The artifacts folder and every record are defined in docs/artifacts.md.
                 docker buildx build --platform linux/arm64 -o type=tar,dest=BASE_TAR .
   KERNEL_DIR  the kernel, device-tree, initramfs and boot exports of TARGET in one
               directory (each with -o type=local,dest=KERNEL_DIR): modules/<release>/,
-              boot/dtb/, boot/initramfs/, bootimg/<id>.{img,manifest}, select/<TARGET>
+              boot/dtb/, boot/initramfs/, bootimg/<id>.{img,manifest}, select/<TARGET>.
+              A target whose target file's exports= has no boot-export (a PC) has only
+              modules/<release>/ and boot/initramfs/: its build record names no boot
+              image (bootimg= empty) and names the initramfs (initramfs=<commit12>@<id>),
+              with no boot.manifest or select beside it
   TARGET      a directory under targets/; its base chain ends in device-<TARGET>
   ARTIFACTS   the artifacts folder; created if missing:
                 <TARGET>/bases/<base-id>/    record, base.manifest, tree.manifest,
@@ -128,13 +132,34 @@ def words(v):
     return set(v.split())
 
 
-def kernel_fit(kdir, target, base_needs, boot_commit):
-    """FR-020's base and kernel fit, on the kernel-side exports."""
+def kernel_fit(kdir, target, base_needs, boot_commit, boot_image=True):
+    """FR-020's base and kernel fit, on the kernel-side exports. A target without a boot
+    image (boot_image False: a PC, whose kernel set the installer and the running system
+    put together) has no device tree, boot image or select record: its kernel and
+    initramfs are the only ones in the exports."""
     rel = only(os.path.join(kdir, 'modules'))
     km_path = os.path.join(kdir, 'modules', rel, 'kernel.manifest')
     km = record(km_path)
     if km.get('release') != rel:
         raise Fail(f'{km_path}: release={km.get("release")} is not its directory {rel}')
+    if not boot_image:
+        for sub in ('bootimg', 'select', os.path.join('boot', 'dtb')):
+            if os.path.exists(os.path.join(kdir, sub)):
+                raise Fail(f'{kdir}/{sub}: {target} has no boot image or device tree, so its '
+                           f'kernel side has none')
+        ird_id = only(os.path.join(kdir, 'boot', 'initramfs'), '.manifest')[:-len('.manifest')]
+        ird = record(os.path.join(kdir, 'boot', 'initramfs', ird_id + '.manifest'))
+        if not os.path.isfile(os.path.join(kdir, 'boot', 'initramfs', ird_id + '.cpio.gz')):
+            raise Fail(f'{kdir}/boot/initramfs: no {ird_id}.cpio.gz beside its record')
+        if boot_commit is not None and ird.get('commit') != boot_commit:
+            raise Fail(f'the initramfs is from boot {ird.get("commit")}, the pinned boot commit is {boot_commit}')
+        provides = words(km.get('provides', ''))
+        for who, needs in (('initramfs', words(ird.get('needs', ''))), ('base', base_needs)):
+            if needs - provides:
+                raise Fail(f'the kernel {rel} does not provide what the {who} needs: {sorted(needs - provides)}')
+        print(f'materialize: kernel fit: {rel}, initramfs {ird_id} (no boot image); needs covered')
+        return {'release': rel, 'bootimg': '', 'initramfs': ird_id, 'boot_commit': ird.get('commit', ''),
+                'km_path': km_path, 'br_path': None, 'sel_path': None}
     sel_path = os.path.join(kdir, 'select', target)
     if not os.path.isfile(sel_path):
         raise Fail(f'{sel_path}: no select record for {target}')
@@ -382,7 +407,10 @@ def main(argv):
     needs, features = '', ''
     print(f'materialize: chain {" → ".join(chain)}, locks {locks}')
 
-    k = kernel_fit(kdir, target, words(needs), args.get('BOOT_COMMIT'))
+    # a target whose exports (its target file's exports=) have no boot image: a PC
+    texp = next((ln[8:] for ln in tlines if ln.startswith('exports=')), '').split()
+    boot_image = not texp or 'boot-export' in texp
+    k = kernel_fit(kdir, target, words(needs), args.get('BOOT_COMMIT'), boot_image)
 
     lock = take_lock(adir)
     try:
@@ -470,7 +498,10 @@ def run(o, tar, kdir, target, adir, start, t_start, locks, all_locked, stages_di
         for e in glassine_pins.REGISTRY_EXPORTS:
             m += [(f'export.{e}.{x}', info[f'export.{e}.{x}']) for x in ('key', 'from')
                   if f'export.{e}.{x}' in info]
-        m += [('kernel_release', rel), ('bootimg', k['bootimg']), ('boot_commit', k['boot_commit']),
+        m += [('kernel_release', rel), ('bootimg', k['bootimg'])]
+        if not k['bootimg']:
+            m += [('initramfs', k['initramfs'])]
+        m += [('boot_commit', k['boot_commit']),
               ('stream', f'{target}/bases/{ident}/base.btrfs.zst'), ('stream_sha256', brec['stream_sha256']),
               ('delta', f'{target}/bases/{ident}/{brec["delta"]}' if brec.get('delta') else ''),
               ('delta_sha256', brec.get('delta_sha256', '')),
@@ -479,8 +510,9 @@ def run(o, tar, kdir, target, adir, start, t_start, locks, all_locked, stages_di
         os.makedirs(rdir)
         write_record(os.path.join(rdir, 'manifest'), m)
         shutil.copyfile(k['km_path'], os.path.join(rdir, 'kernel.manifest'))
-        shutil.copyfile(k['br_path'], os.path.join(rdir, 'boot.manifest'))
-        shutil.copyfile(k['sel_path'], os.path.join(rdir, 'select'))
+        if k['br_path']:
+            shutil.copyfile(k['br_path'], os.path.join(rdir, 'boot.manifest'))
+            shutil.copyfile(k['sel_path'], os.path.join(rdir, 'select'))
 
         # into place, each by a rename of a complete file or directory: the kernel side,
         # then the base, the build record last
@@ -491,6 +523,8 @@ def run(o, tar, kdir, target, adir, start, t_start, locks, all_locked, stages_di
             os.replace(os.path.join(stage, 'modules.btrfs.zst'), mstream + '.tmp')
             os.replace(mstream + '.tmp', mstream)
         for sub in ('bootimg', os.path.join('boot', 'dtb'), os.path.join('boot', 'initramfs')):
+            if not os.path.isdir(os.path.join(kdir, sub)) and not k['bootimg']:
+                continue
             for name in sorted(os.listdir(os.path.join(kdir, sub))):
                 put(os.path.join(kdir, sub, name), os.path.join(adir, sub, name))
         if not reused:
