@@ -38,6 +38,12 @@ b=/etc/glassine-bootimg/board.conf
 if [ -r "$b" ] && [ "$( (. "$b" >/dev/null 2>&1; printf %s "${BOOT_FORM:-}") )" = raw ]; then
 	[ -x /usr/sbin/glassine-boot-raw ] \
 		|| no "$b: BOOT_FORM=raw, but the tree has no raw-form writer (glassine-deploy 0.7.2 or later)"
+	# and the loader the board's boot loader starts, with the tool that installs it after a
+	# healthy mark (glassine-deploy 0.7.3 and later; a board's loader package)
+	[ -x /usr/sbin/glassine-loader-update ] \
+		|| no "$b: BOOT_FORM=raw, but the tree has no loader update (glassine-deploy 0.7.3 or later)"
+	[ -s /usr/share/glassine/loader/loader.efi ] \
+		|| no "$b: BOOT_FORM=raw, but the tree carries no loader (/usr/share/glassine/loader/loader.efi)"
 fi
 # kernel modules and firmware updates come with the kernel, outside the base
 for d in /lib/modules /lib/firmware/updates; do
