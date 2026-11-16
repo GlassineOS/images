@@ -1,23 +1,23 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# A PC release, installed and started: GlassineOS/installer (its main branch, or
-# INSTALLER_CHECKOUT=DIR) checks the release folder scripts/pc-release makes and
-# installs it with `install --pc` on a blank virtual PC (QEMU q35, OVMF), whose disk
-# then starts the installed kernel set through the first start into the first
-# deployment (scripts/test-pc-release-qemu.py has the steps and what each checks).
+# A PC release, installed and started: GlassineOS/installer (at the commit pinned in
+# scripts/test-pc-release-qemu.installer, or INSTALLER_CHECKOUT=DIR) checks the release
+# folder scripts/pc-release makes and installs it with `install --pc` on a blank virtual
+# PC (QEMU q35, OVMF), whose disk then starts through the firmware's new boot entry, the
+# release's loader (GlassineOS/loader, pinned in targets/uefi-pc/release.conf) and the
+# installed kernel set, through the first start into the first deployment
+# (scripts/test-pc-release-qemu.py has the steps and what each checks).
 #
 #   scripts/test-pc-release-qemu.sh [RELEASE_DIR]
 #   exit 0 = every QTEST check passed
 #
 # Without RELEASE_DIR, scripts/pc-release makes one first (in the test's artifacts).
 #
-# What differs from a PC: the boot loader. GlassineOS/loader has no release yet, so the
-# release names no boot-loader; the installer gets the placeholder loader of its own
-# QEMU harness (tests/qemu/placeholder.py) for that role, the firmware's start of the
-# new entry is shown with it, and the kernel set is then started by OVMF directly
-# (-kernel/-initrd with the set's own files and command line, + console=ttyS0
-# loglevel=7 to see it), as the loader would start it. The disk is NVMe, the network
-# none.
+# What differs from a PC: the set's command line gets console=ttyS0 loglevel=7 on the
+# installed disk (its check line and the loader record's sum made again), so Linux
+# reaches the serial log. QTEST_DIRECT_KERNEL=1 starts the set with -kernel/-initrd
+# instead (the path for a release without a boot-loader). The disk is NVMe, the
+# network none.
 #
 # Besides the QEMU run, the host checks the release with the installer's own check and
 # plan (--release) on its PC facts fixtures: the release's least sizes fit the
@@ -52,13 +52,16 @@ fi
 [ -f "$REL/release.json" ] || die "$REL: no release.json"
 echo "release: $REL"
 
-# --- the installer: its main branch, built static in its own toolchain's base image
+# --- the installer: the pinned commit, built static in its own toolchain's base image
+INSTALLER_COMMIT=$(sed -n 's/^commit=//p' "$P/scripts/test-pc-release-qemu.installer")
 if [ -n "${INSTALLER_CHECKOUT:-}" ]; then
 	I=$(cd "$INSTALLER_CHECKOUT" && pwd)
 else
+	[ -n "$INSTALLER_COMMIT" ] || die "scripts/test-pc-release-qemu.installer: no commit="
 	I=$O/installer
-	if [ -d "$I/.git" ]; then git -C "$I" fetch -q origin main && git -C "$I" checkout -q --detach origin/main
-	else git clone -q https://github.com/GlassineOS/installer "$I"; fi
+	[ -d "$I/.git" ] || git clone -q https://github.com/GlassineOS/installer "$I"
+	git -C "$I" cat-file -e "$INSTALLER_COMMIT^{commit}" 2>/dev/null || git -C "$I" fetch -q origin "$INSTALLER_COMMIT"
+	git -C "$I" checkout -q --detach "$INSTALLER_COMMIT"
 fi
 echo "installer: $(git -C "$I" rev-parse HEAD)"
 RUST=$(sed -n 's/^FROM \(rust:[^ ]*\).*/\1/p' "$I/Dockerfile" | head -n 1)
@@ -86,7 +89,7 @@ KVM=''; [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && KVM='--device /
 mkdir -p "$O/work" "$O/cache"
 rc=0
 # shellcheck disable=SC2086  # KVM: one option and its value, or nothing
-docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 -e QTEST_ACCEPT_WAIT="${QTEST_ACCEPT_WAIT:-240}" \
+docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 -e QTEST_ACCEPT_WAIT="${QTEST_ACCEPT_WAIT:-240}" -e QTEST_DIRECT_KERNEL="${QTEST_DIRECT_KERNEL:-}" \
 	-v "$I":/i:ro -v "$REL":/r:ro -v "$P/scripts":/s:ro -v "$O":/o "$ALPINE" sh -c '
 apk add -q --no-progress python3 qemu-system-x86_64 ovmf sgdisk dosfstools mtools squashfs-tools \
 	btrfs-progs e2fsprogs e2fsprogs-extra util-linux coreutils >/dev/null || exit 1

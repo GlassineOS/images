@@ -4,3 +4,7 @@
 dosfstools
 # the firmware's boot entries
 efibootmgr
+# a kernel set's boot modules archive, made on the PC by GlassineOS/boot's
+# build-boot-modules.sh (the uefi hand-off): modprobe/depmod and the archive
+cpio
+kmod

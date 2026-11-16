@@ -1,0 +1,112 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Publishes a PC release folder (scripts/pc-release) as a GitHub Release of this
+# repository, for GlassineOS/installer to download (docs/artifacts.md, "Published PC
+# releases"). Run by boot-qemu.yml on main after the folder passed
+# scripts/test-pc-release-qemu.sh; needs gh (GH_TOKEN with contents: write), python3,
+# tar and zstd.
+#
+#   scripts/pc-release-publish RELEASE_DIR [--keep N] [--repo OWNER/NAME] [--dry-run]
+#
+# - Tag uefi-pc-<base-id>, at GITHUB_SHA (or this checkout's HEAD). Assets: release.json
+#   (the folder's, as it is), uefi-pc-release.tar.zst (the whole folder under one
+#   directory uefi-pc-<base-id>/) and SHA256SUMS of both.
+# - A release of that tag that exists already: its release.json's per-role sha256 must be
+#   the folder's (then nothing is done), else it fails: one tag, one set of bytes.
+# - Made as a draft, published once every asset is up; a draft left by a cancelled run is
+#   deleted first. A prerelease: GlassineOS is unreviewed.
+# - Then only the newest N (default 3) published uefi-pc-* releases are kept; older ones
+#   are deleted with their tags.
+set -eu
+die() { echo "pc-release-publish: $*" >&2; exit 1; }
+REL='' KEEP=3 REPO=${GITHUB_REPOSITORY:-GlassineOS/images} DRY=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	--keep) KEEP=$2; shift 2 ;;
+	--repo) REPO=$2; shift 2 ;;
+	--dry-run) DRY=1; shift ;;
+	-*) sed -n 's/^#   //p' "$0" >&2; exit 2 ;;
+	*) REL=$1; shift ;;
+	esac
+done
+[ -n "$REL" ] && [ -f "$REL/release.json" ] || die "no RELEASE_DIR/release.json"
+REL=$(cd "$REL" && pwd)
+P=$(cd "$(dirname "$0")/.." && pwd)
+SHA=${GITHUB_SHA:-$(git -C "$P" rev-parse HEAD)}
+W=$(mktemp -d "${RUNNER_TEMP:-/tmp}/pc-release-publish.XXXXXX")
+trap 'rm -rf "$W"' EXIT
+
+# what the folder is: target, build, base, the roles' sums
+roles() { python3 -I -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+for r,a in sorted(d["artifacts"].items()): print(r, a["sha256"])' "$1"; }
+eval "$(python3 -I -c 'import json,sys,shlex
+d=json.load(open(sys.argv[1])); a=d["artifacts"]
+assert d.get("target")=="uefi-pc", "not a uefi-pc release"
+for k,v in (("BASE",a["base"]["base"]),("BUILD",d.get("build","")),("KREL",a["kernel"].get("release","")),
+            ("TRIAL",str(d.get("trial",""))),("MISSING"," ".join(d.get("missing",[]))),
+            ("LOADER",a.get("boot-loader",{}).get("url",""))):
+    print(f"{k}={shlex.quote(str(v))}")' "$REL/release.json")" || die "release.json unreadable"
+case $TRIAL in False|false|no|'') ;; *) die "a trial (trial=$TRIAL) is never published" ;; esac
+TAG=uefi-pc-$BASE
+roles "$REL/release.json" > "$W/roles"
+echo "pc-release-publish: $TAG (build $BUILD, kernel $KREL, at $SHA)"
+
+# an existing release of the tag
+state=$(gh release view "$TAG" -R "$REPO" --json isDraft --jq '.isDraft' 2>/dev/null || echo none)
+if [ "$state" = false ]; then
+	gh release download "$TAG" -R "$REPO" -p release.json -D "$W/old" || die "$TAG: its release.json can't be read"
+	roles "$W/old/release.json" > "$W/old-roles"
+	if cmp -s "$W/roles" "$W/old-roles"; then
+		echo "pc-release-publish: $TAG is published with these bytes already; nothing to do"
+		exit 0
+	fi
+	diff "$W/old-roles" "$W/roles" >&2 || :
+	die "$TAG is published with other bytes (same base, other parts); a tag is never re-used"
+elif [ "$state" = true ]; then
+	echo "pc-release-publish: deleting the draft $TAG a cancelled run left"
+	[ -n "$DRY" ] || gh release delete "$TAG" -R "$REPO" --yes
+fi
+
+# the assets
+mkdir -p "$W/a"
+cp "$REL/release.json" "$W/a/release.json"
+tar -C "$REL" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
+	--transform "s|^\.|$TAG|" -cf - . | zstd -q -T0 -10 -o "$W/a/uefi-pc-release.tar.zst"
+size=$(stat -c %s "$W/a/uefi-pc-release.tar.zst")
+[ "$size" -lt 2147483648 ] || die "uefi-pc-release.tar.zst is $size bytes, over GitHub's 2 GiB per asset"
+(cd "$W/a" && sha256sum release.json uefi-pc-release.tar.zst > SHA256SUMS && cat SHA256SUMS)
+cat > "$W/notes.md" <<EOF
+A GlassineOS release for generic x86-64 UEFI PCs, made by this repository's boot-qemu workflow (pc-release job) at $SHA from build $BUILD.
+
+- base \`$BASE\`, kernel \`$KREL\`
+- boot loader: $LOADER
+- not supplied: ${MISSING:-nothing}
+
+Assets: \`release.json\` (the folder's manifest: per role the file, sha256, size and least partition size), \`uefi-pc-release.tar.zst\` (the whole release folder, as \`$TAG/\`) and \`SHA256SUMS\`. Unpack with \`zstd -dc uefi-pc-release.tar.zst | tar -x\`, then \`glassine-install install --pc --release-dir $TAG ...\` (GlassineOS/installer).
+
+Before it was published, GlassineOS/installer installed this folder on a blank virtual PC (QEMU q35, OVMF), which then started from its disk alone through the firmware's boot entry and the loader into the first deployment, accepted on its second start.
+
+**Not reviewed, and never run on a real PC.** GlassineOS is a hobby project, written largely with AI coding agents and not reviewed by subsystem experts. This release has been tested only in QEMU. Installing it on real hardware is at your own risk. Only the newest $KEEP PC releases are kept.
+EOF
+if [ -n "$DRY" ]; then
+	echo "pc-release-publish: --dry-run: would publish $TAG with $(ls "$W/a" | tr '\n' ' ')"
+	cat "$W/notes.md"
+	exit 0
+fi
+gh release create "$TAG" -R "$REPO" --draft --prerelease --target "$SHA" --title "GlassineOS PC $BASE" \
+	--notes-file "$W/notes.md" "$W/a/release.json" "$W/a/uefi-pc-release.tar.zst" "$W/a/SHA256SUMS"
+gh release edit "$TAG" -R "$REPO" --draft=false
+echo "pc-release-publish: published https://github.com/$REPO/releases/tag/$TAG"
+
+# retention: the newest KEEP published uefi-pc-* releases
+gh release list -R "$REPO" -L 200 --json tagName,isDraft,createdAt \
+	--jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("uefi-pc-"))] | sort_by(.createdAt) | reverse | .[].tagName' \
+	> "$W/tags"
+n=0
+while read -r t; do
+	n=$((n + 1))
+	[ $n -gt "$KEEP" ] || continue
+	echo "pc-release-publish: deleting $t (keeping the newest $KEEP)"
+	gh release delete "$t" -R "$REPO" --yes --cleanup-tag
+done < "$W/tags"
