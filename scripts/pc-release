@@ -1,0 +1,92 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# A release of the generic x86-64 UEFI PC (targets/uefi-pc) for GlassineOS/installer,
+# from this checkout: the folder `install --pc --release-dir` reads (docs/artifacts.md,
+# "Releases"). scripts/build doesn't build this target (it makes a boot image and a
+# device tree, which a PC has neither of), so this runs the same chain for it:
+#
+#   1. the base's tree (DEVICE=uefi-pc, linux/amd64, up to base-export);
+#   2. the kernel as the registry gives it (scripts/registry exports uefi-pc: pulled
+#      when its key is published, built here otherwise) and its one-release-one-tree
+#      check (scripts/kernel-release-check);
+#   3. the initramfs for x86-64 (initramfs-export, GlassineOS/boot at BOOT_COMMIT);
+#   4. scripts/materialize into the artifacts folder (the base, its streams, the
+#      modules stream, the build record);
+#   5. scripts/pool-image --kernel: the release folder (the pool image, the kernel set's
+#      parts, the board, the boot modules, the splash, release.json).
+#
+#   scripts/pc-release [--artifacts DIR] [--out DIR] [--no-parent]
+#
+#   --artifacts DIR  the artifacts folder (default: artifacts/ in the checkout)
+#   --out DIR        the release folder (default: ARTIFACTS/uefi-pc/releases/<build-id>)
+#   --no-parent      the base gets no parent (only its full stream); default: the newest
+#                    build of uefi-pc in ARTIFACTS, if any, so later bases come as deltas
+#
+# The work files go to .out/pc-release/ (removed at the end). Prints the release folder
+# as its last line: "pc-release: <dir>". Needs docker (buildx, privileged containers),
+# python3 and git; an x86-64 host, or amd64 emulation.
+set -eu
+P=$(cd "$(dirname "$0")/.." && pwd)
+A=$P/artifacts OUT='' PARENT=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	--artifacts) A=$2; shift 2 ;;
+	--out) OUT=$2; shift 2 ;;
+	--no-parent) PARENT=--no-parent; shift ;;
+	*) sed -n 's/^#   //p' "$0" >&2; exit 2 ;;
+	esac
+done
+mkdir -p "$A"; A=$(cd "$A" && pwd)
+W=$P/.out/pc-release
+DEV=uefi-pc PLAT=linux/amd64
+die() { echo "pc-release: $*" >&2; exit 1; }
+rm -rf "$W"; mkdir -p "$W"
+trap 'rm -rf "$W"' EXIT
+t0=$(date +%s)
+tock() { printf 'time %-28s %5d s\n' "$1" $(($(date +%s) - t0)); t0=$(date +%s); }
+
+docker buildx build -q --platform $PLAT --build-arg DEVICE=$DEV -o "type=tar,dest=$W/base.tar" "$P" \
+	> "$W/build-base.log" 2>&1 || { cat "$W/build-base.log" >&2; die "the base's build failed"; }
+tock "base"
+"$P/scripts/registry" exports $DEV "$W/reg" > "$W/kernel.log" 2>&1 \
+	|| { cat "$W/kernel.log" >&2; die "the kernel export failed"; }
+grep '^registry: ' "$W/kernel.log" || :
+K=$W/k
+mkdir -p "$K"; cp -a "$W/reg/kernel-export/." "$K/"; rm -rf "$W/reg"
+"$P/scripts/kernel-release-check" "$K" --artifacts "$A" || die "one release, one tree: the kernel is refused"
+tock "kernel"
+docker buildx build -q --platform $PLAT --build-arg DEVICE=$DEV --target initramfs-export \
+	-o "type=local,dest=$K" "$P" > "$W/build-initramfs.log" 2>&1 \
+	|| { cat "$W/build-initramfs.log" >&2; die "the initramfs's build failed"; }
+tock "initramfs"
+
+clean=yes; [ -z "$(git -C "$P" status --porcelain)" ] || clean=no
+{
+	printf 'images_commit=%s\nimages_clean=%s\n' "$(git -C "$P" rev-parse HEAD)" "$clean"
+	key=$(sed -n 's/^registry: kernel-export key \([0-9a-f]\{64\}\).*/\1/p' "$W/kernel.log" | head -n 1)
+	[ -z "$key" ] || echo "export.kernel-export.key=$key"
+} > "$W/info"
+n=0
+while :; do
+	rc=0
+	# shellcheck disable=SC2086  # PARENT: one option or nothing
+	"$P/scripts/materialize" --build-info "$W/info" $PARENT "$W/base.tar" "$K" $DEV "$A" \
+		> "$W/materialize.log" 2>&1 || rc=$?
+	[ $rc = 4 ] && [ $n -lt 360 ] || break
+	[ $n != 0 ] || echo "pc-release: another materialization holds the host lock; waiting"
+	sleep 10; n=$((n + 1))
+done
+[ $rc = 0 ] || { cat "$W/materialize.log" >&2; die "materialize failed (exit $rc)"; }
+grep -A4 '^materialize: build ' "$W/materialize.log" || :
+rm -f "$W/base.tar"
+tock "materialize"
+bid=$(sed -n 's|^materialize: build [^/]*/builds/\([^:]*\):.*|\1|p' "$W/materialize.log")
+[ -n "$bid" ] || die "materialize named no build"
+rc=0
+"$P/scripts/pool-image" --build "$bid" --kernel "$K" ${OUT:+--out "$OUT"} "$A" $DEV > "$W/pool-image.log" 2>&1 || rc=$?
+grep -v '^time ' "$W/pool-image.log"
+[ $rc = 0 ] || die "pool-image failed (exit $rc)"
+rel=$(sed -n 's/^pool-image: release \([^,]*\).*/\1/p' "$W/pool-image.log")
+[ -n "$rel" ] && [ -f "$rel/release.json" ] || die "pool-image made no release"
+tock "pool-image"
+echo "pc-release: $rel"

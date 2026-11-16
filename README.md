@@ -26,7 +26,7 @@ keeps a lock for each (below).
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session and compressed swap with background-app parking (both enabled at boot) |
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration, and its `targets/onyx-noteair/board.conf` as `/etc/glassine-bootimg/board.conf` (the board keys the booted system reads) |
-| `device-uefi-pc` | a generic x86-64 PC that boots by UEFI, on `glassine-common` (no e-ink): the EFI system partition's tools (`dosfstools`), the firmware's boot entries (`efibootmgr`), and the power button (busybox's `acpid`, enabled at boot). Its kernel is `kernel-lts` (below), which also carries the firmware: the base has none |
+| `device-uefi-pc` | a generic x86-64 PC that boots by UEFI, on `glassine-common` (no e-ink): the EFI system partition's tools (`dosfstools`), the firmware's boot entries (`efibootmgr`), the power button (busybox's `acpid`, enabled at boot), glassine-deploy's `deploy.conf` and `targets/uefi-pc/board.conf` as `/etc/glassine-bootimg/board.conf`, both naming the installer's partitions (`glassine-system`, `glassine-userdata`). Its kernel is `kernel-lts` (below), which also carries the firmware: the base has none |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
 | `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing. It reads the final tree, after `finish`, not each stage: a file added in one stage and removed in a later one isn't seen |
@@ -181,9 +181,10 @@ builds the default device's tree (`--build-arg DEVICE=<name>` for another).
 
     docker buildx build --platform linux/amd64 --build-arg DEVICE=uefi-pc -o type=tar,dest=base.tar .
 
-builds the x86-64 UEFI PC's. `scripts/build` doesn't build that target yet: it makes an
-Android boot image and a device tree, which a PC has neither of; how a PC selects its
-deployment is GlassineOS/boot's spec 010. On an
+builds the x86-64 UEFI PC's. `scripts/build` doesn't build that target: it makes an
+Android boot image and a device tree, which a PC has neither of; `scripts/pc-release`
+makes a PC's release instead ("A release for the installer" below). How a PC selects
+its deployment is GlassineOS/boot's spec 010. On an
 amd64 computer, arm64 runs through QEMU (`docker run --privileged --rm
 tonistiigi/binfmt --install arm64` once). Keep to the tar export: image exports drop
 `user.*` extended attributes.
@@ -202,6 +203,25 @@ and the recovery go as they are. The boot loader and the partition layout aren't
 here: `targets/<target>/release.conf` pins them by URL and SHA-256 (GlassineOS/abl's
 release, GlassineOS/installer's `layouts/`), and pool-image fetches them. Details: `docs/artifacts.md`, "Releases";
 `scripts/test-pool-image.sh` tests it.
+
+**The PC's release.** A target without a boot image (`targets/uefi-pc`) gets the parts
+of a kernel set instead (GlassineOS/boot's `docs/boot-partition.md`): the kernel's
+`vmlinuz`, the initramfs, the board's `board.conf` (whose `CMDLINE` the set starts
+with; the base carries the same file), the microcode archives, the boot-modules archive
+(boot's `build-boot-modules.sh`) and a plain default splash, beside the pool image.
+
+    scripts/pc-release [--artifacts DIR] [--out DIR]
+
+builds that chain (`scripts/build` doesn't build this target): the base, the kernel from
+the registry, the x86-64 initramfs, materialize, then `pool-image --kernel`. The release
+has no boot loader yet (GlassineOS/loader has no release; `targets/uefi-pc/release.conf`
+says where its pin goes) and no recovery (there is no PC recovery kernel), and names
+both under `missing`. `scripts/test-pc-release-qemu.sh` (CI: boot-qemu's `pc-release`
+job, which keeps the folder as the run's artifact `uefi-pc-release` on `main`) has
+GlassineOS/installer's main branch check it and install it with `install --pc` on a
+blank virtual PC (QEMU, OVMF), with the installer harness's placeholder loader standing
+in for the boot loader; the disk then starts the installed kernel set (OVMF starts it
+directly, as the loader would) through the first start into the first deployment.
 
 `scripts/test-first-start-qemu.sh` (CI: boot-qemu's `first-start` job) runs the route's
 last step in QEMU: a release of the generic reference base, made by pool-image, written
