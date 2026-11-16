@@ -22,7 +22,9 @@ publish them. scripts/build uses the same code for a person's build.
         export: key, same or differs). Exit 1 when one differs
     scripts/registry publish TARGET OUT
         publishes each export OUT/plan says was built here and OUT/reproduced says
-        is the same, under its key, unless it is published already. Refuses build
+        is the same, under its key, unless it is published already; a kernel export
+        also under release-<release> (the first one of its release), and not at all
+        when that release has another tree (scripts/kernel-release-check). Refuses build
         arguments, a checkout with changes, and an OUT whose keys aren't this
         checkout's. Needs a login to the registry with write access (CI on main only)
     scripts/registry cache TARGET OUT --cache-from SPEC
@@ -296,6 +298,33 @@ def checkout_changes():
     return r.stdout.strip() if r.returncode == 0 else 'not a git checkout'
 
 
+def release_tag(kdir):
+    """A kernel export's release annotations and tags: ({'release', 'release.tree'},
+    ('release-<release>',) unless that tag is published already). Raises RuntimeError
+    when the registry holds another tree under the release, or can't tell. An export
+    without modules/<release>/kernel.manifest (a test's stand-in) gets neither."""
+    mdir = os.path.join(kdir, 'modules')
+    rels = os.listdir(mdir) if os.path.isdir(mdir) else []
+    if len(rels) != 1 or not os.path.isfile(os.path.join(mdir, rels[0], 'kernel.manifest')):
+        return {}, ()
+    p = subprocess.run([sys.executable, os.path.join(HERE, 'kernel-release-check'), '--tree', kdir],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr.strip())
+    rel, tid = p.stdout.split()
+    if reg.release_ref(rel) is None:
+        raise RuntimeError(f'release {rel!r} can\'t be a registry tag')
+    have = reg.lookup_release(rel)
+    if have['state'] == 'error':
+        raise RuntimeError(f'can\'t tell whether release {rel} is published: {have["why"]}')
+    if have['state'] == 'published':
+        if have['tree'] != tid:
+            raise RuntimeError(f'release {rel} is published ({have["ref"]}) with tree {have["tree"]}, '
+                               f'this export has {tid}: a tree never changes under one release')
+        return {'release': rel, 'release.tree': tid}, ()
+    return {'release': rel, 'release.tree': tid}, (reg.RELEASE_TAG + rel,)
+
+
 def cmd_publish(argv):
     o, (target, out) = parse(argv, 2)
     arch = target_arch(target)
@@ -323,9 +352,18 @@ def cmd_publish(argv):
             rc = 1
             continue
         ann = {f'tree.{i.lower()}': tree[i] for i in keys[e]['inputs']}
+        tags = ()
+        if e == 'kernel-export':
+            try:
+                ann_r, tags = release_tag(os.path.join(out, e))
+            except RuntimeError as x:
+                say(f'registry: {e}: NOT published: {x}')
+                rc = 1
+                continue
+            ann.update(ann_r)
         try:
             state, ref = reg.publish(e, keys[e]['key'], os.path.join(out, e), f'linux/{arch}',
-                                     os.path.join(out, '.work'), ann, run=run_shown)
+                                     os.path.join(out, '.work'), ann, run=run_shown, tags=tags)
         except RuntimeError as x:
             say(f'registry: {e}: NOT published: {x}')
             rc = 1
