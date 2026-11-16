@@ -24,7 +24,21 @@ its key:
 | `boot-export` | `ghcr.io/glassineos/images-boot:<key>` | `bootimg/<id>.img` and `.manifest`, `select/<device>` |
 
 and the layer cache of the stages each export is built from, as a BuildKit registry
-cache (`mode=max`), at `ghcr.io/glassineos/images-cache:<export>`.
+cache (`mode=max`), at `ghcr.io/glassineos/images-cache:<export>` (arm64) or
+`images-cache:<export>-<arch>` (any other architecture, such as `kernel-export-amd64`).
+
+A target has all four unless its target file names fewer with `exports=`. The generic
+x86-64 PC (`targets/uefi-pc`: `arch=x86_64`, `kernel=lts`, `exports=kernel-export`) has
+only the kernel: Alpine's `linux-lts` package with its firmware and microcode packages
+(README, "The x86-64 kernel"). It has no device tree or boot image (the loader assembles
+a kernel set). Its key holds `stages/kernel-lts/lock.x86_64`, so a build whose lock is
+unchanged pulls the export published under that key. That matters because Alpine keeps
+only its newest versions: when the lock refresh holds the firmware for an unchanged
+`linux-lts` (`scripts/kernel-lock.sh`) and Alpine has dropped a held version, the
+export can no longer be built from the repositories, but it is still pulled. Only a
+refresh that moves `linux-lts` changes the key, and then every locked version is the
+newest Alpine offers. A target's `kernel=` sets the `KERNEL` build argument of its
+builds and keys.
 
 - **The image.** One OCI image manifest (no index, no provenance or SBOM) for the
   target's platform (`linux/<arch>`), with one layer: the export's files at the root,

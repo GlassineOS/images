@@ -6,9 +6,10 @@
 # OLD_DIR and NEW_DIR hold lock files (any names); packages are compared across all of
 # them. OUT_FLAG (optional) gets "security" (a change brings a fix from Alpine's secdb),
 # "gone" (a version OLD_DIR names is no longer offered by Alpine's or our repository, so
-# builds of the current locks fail; also a line NEW_DIR holds for the kernel package,
-# scripts/kernel-lock.sh, that is no longer offered) or "routine". Lines held for the
-# kernel get a table of their own, with the fixes their newer versions would bring. Runs in an Alpine container (needs apk
+# builds of the current locks fail) or "routine". Lines held for the kernel package
+# (scripts/kernel-lock.sh) get a table of their own, "Held for the kernel", with the
+# fixes their newer versions would bring; they don't change the kind (the build pulls
+# the kernel export by its key; the lock-refresh workflow opens an issue for them). Runs in an Alpine container (needs apk
 # for version comparison, jq, wget). ARCH (optional): the architecture whose
 # repositories the locks are checked against, as apk names it (x86_64); default the
 # container's. Run once per architecture, each on that architecture's lock files only.
@@ -46,7 +47,9 @@ done | jq -r '.packages[].pkg as $p | $p.secfixes // {} | to_entries[]
 # held: a kernel package's firmware or microcode kept at its locked version because the
 # kernel package didn't move (scripts/kernel-lock.sh) while Alpine offers another one.
 # Alpine keeps only its newest version, so a held line is gone too unless our
-# repository has it: a gone held line breaks the kernel's build until the kernel moves
+# repository has it. A build with that lock pulls the published kernel export by its key
+# (targets/uefi-pc), so a gone held line breaks only a build of it from scratch; the
+# lock-refresh workflow keeps an issue open while lines are held
 # "name locked alpine" for such lines of the new locks
 awk -F: '/^P:/{p=$2} /^V:/{print p, $2}' "$t/alpine" | LC_ALL=C sort -u > "$t/alpine-v"
 awk -F= '$1 ~ /^(linux-firmware-.*|amd-ucode|intel-ucode)$/ {print $1, $2}' "$t/new" \
@@ -57,7 +60,7 @@ while read -r p o n; do
 done < "$t/held"
 
 security=routine
-[ ! -s "$t/gone" ] && [ ! -s "$t/heldgone" ] || security=gone
+[ ! -s "$t/gone" ] || security=gone
 : > "$t/sec"
 while read -r p o n; do
 	[ "$o" != - ] && [ "$n" != - ] || continue
@@ -106,7 +109,7 @@ if [ -s "$t/held" ]; then
 	echo "| Package | Locked | Alpine offers | Locked version offered | Fixes waiting |"
 	echo "|---|---|---|---|---|"
 	while read -r p o n; do
-		off=yes; grep -qx "$p=$o" "$t/heldgone" && off="**no**: the kernel's build fails until the kernel moves"
+		off=yes; grep -qx "$p=$o" "$t/heldgone" && off="no (builds pull the published kernel export; one from scratch fails)"
 		fx=$(awk -v p="$p" '$1 == p && $2 != "" {printf "%s%s", s, $2; s = ","}' "$t/heldsec")
 		echo "| \`$p\` | $o | $n | $off | ${fx:--} |"
 	done < "$t/held"

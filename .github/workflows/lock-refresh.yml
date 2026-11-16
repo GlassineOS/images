@@ -21,6 +21,7 @@ permissions:
   contents: write
   pull-requests: write
   actions: write
+  issues: write
 
 concurrency: lock-refresh
 
@@ -109,6 +110,40 @@ jobs:
           done
           echo $kind > /tmp/locks/kind
           cat /tmp/locks/body.md >> "$GITHUB_STEP_SUMMARY"
+      # firmware or microcode held for the x86-64 kernel (scripts/kernel-lock.sh): one open
+      # issue that says so, with the fixes waiting, kept up to date every day (also when
+      # no lock changed, so no pull request opens), closed once nothing is held. A held
+      # version Alpine dropped doesn't break the build while the kernel-lts lock is
+      # unchanged: the build pulls the published kernel export by its key (targets/uefi-pc)
+      - name: Held for the kernel
+        if: needs.refresh-x86_64.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Locks: firmware held for the x86-64 kernel"
+          n=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "[.[] | select(.title == \"$title\")][0].number // empty")
+          awk '/^\*\*Held for the kernel\*\*/ {p = 1} p && /^\| Package \| Was \| Now \|$/ {exit} p' \
+            /tmp/locks/x86_64/body.md > /tmp/locks/held.md
+          if [ -s /tmp/locks/held.md ]; then
+            {
+              echo "The x86-64 kernel package (\`linux-lts\`) didn't move, so the lock refresh keeps its"
+              echo "firmware and microcode at their locked versions (\`scripts/kernel-lock.sh\`;"
+              echo "GlassineOS/boot's docs/kernel-artifacts.md, \"A distribution's kernel\"). They move"
+              echo "with the next \`linux-lts\`. While the kernel-lts lock is unchanged, builds pull the"
+              echo "published kernel export by its key, so a held version Alpine no longer offers"
+              echo "doesn't break them; a build from scratch of that export does fail."
+              echo
+              cat /tmp/locks/held.md
+              echo
+              echo "Updated by the lock-refresh workflow, run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+            } > /tmp/locks/issue.md
+            if [ -n "$n" ]; then gh issue edit "$n" --body-file /tmp/locks/issue.md
+            else gh issue create --title "$title" --body-file /tmp/locks/issue.md; fi
+            cat /tmp/locks/issue.md >> "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$n" ]; then
+            gh issue close "$n" --comment "Nothing is held for the x86-64 kernel any more (run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          fi
       # the glassine-lock-refresh app's token, made after the refresh (it is valid for an
       # hour): its push and pull request start the pull request's checks, github.token's
       # start nothing. Without the app (variable LOCK_REFRESH_APP_CLIENT_ID, secret

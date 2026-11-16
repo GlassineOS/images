@@ -1,6 +1,8 @@
 # The kernel, device-tree, initramfs and boot-image exports of every target
 # (specs/003-kernel-outputs-registry, docs/registry.md), on an amd64 runner (the
-# kernel-build image is amd64 only):
+# kernel-build image is amd64 only). A target whose target file names exports= has only
+# those (uefi-pc: the PC's kernel, Alpine's linux-lts, so a build with an unchanged
+# kernel-lts lock pulls it and never needs Alpine to still offer a held version):
 #
 #   kernel   each export published under its key is pulled, the others are built (with
 #            the registry's and GitHub's layer cache); all are checked with
@@ -84,8 +86,11 @@ jobs:
         run: |
           for t in $(ls targets); do
             echo "::group::$t"
+            # one GitHub cache scope per architecture (kernel for arm64, kernel-<arch> else)
+            a=$(sed -n 's/^arch=//p' "targets/$t/target"); sc=kernel
+            case $a in arm64|aarch64) ;; *) sc=kernel-$a ;; esac
             scripts/registry exports "$t" "/tmp/out/$t" \
-              --cache-from type=gha,scope=kernel --cache-to type=gha,mode=max,scope=kernel
+              --cache-from type=gha,scope=$sc --cache-to type=gha,mode=max,scope=$sc
             echo "::endgroup::"
           done
       - name: Check
@@ -95,11 +100,17 @@ jobs:
             -o type=local,dest=/tmp/device-files .
           for t in $(ls targets); do
             m=/tmp/merged/$t; mkdir -p "$m"
-            for e in kernel-export dtb-export initramfs-export boot-export; do cp -a "/tmp/out/$t/$e/." "$m/"; done
-            scripts/kernel-check "$m"
+            # the target's exports (exports= in its target file; default all four)
+            ex=$(sed -n 's/^exports=//p' "targets/$t/target")
+            for e in ${ex:-kernel-export dtb-export initramfs-export boot-export}; do cp -a "/tmp/out/$t/$e/." "$m/"; done
+            # a compiled kernel's checks and the boot image's, for a target with them
+            # (a PC's kernel is a distribution's package and has no boot image)
+            if [ -z "$ex" ]; then
+              scripts/kernel-check "$m"
+              scripts/boot-check "$m" "$t"
+            fi
             # one release, one tree: the registry's release-<release>, if published
             scripts/kernel-release-check "$m"
-            scripts/boot-check "$m" "$t"
             /tmp/device-files/device-files "$m"
           done
       - name: Build again from scratch and compare

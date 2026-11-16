@@ -120,11 +120,17 @@ by the check build. The pull request lists the held packages under "Held for the
 with the fixes their newer versions would bring.
 
 Alpine keeps only the newest version of a package, and its `linux-firmware` isn't in our
-repository, so a held version is no longer offered as soon as Alpine moves it: the PC
-kernel's build then fails, naming the lines, until `linux-lts` moves and the firmware
-moves with it (the refresh's pull request is marked "locked versions gone"). Keeping the
-held versions in GlassineOS/packages doesn't fit: the locked firmware is about 270 MiB
-a version, against x86-64's 64 MiB share of that site's 900 MiB.
+repository, so a held version is no longer offered as soon as Alpine moves it. The PC's
+kernel is therefore published to the registry like the arm64 kernels (target
+`uefi-pc`, docs/registry.md): its key holds `lock.x86_64`, so while that lock is
+unchanged every build pulls the published export and asks Alpine for nothing. Only a
+build of that export from scratch (`--no-registry`, `registry reproduce --all`) fails on
+a dropped held version; a refresh that moves `linux-lts` gives a new key, and then every
+locked version is offered. While anything is held, the `lock-refresh` workflow keeps
+one issue open ("Locks: firmware held for the x86-64 kernel") with the held packages and
+the security fixes their newer versions would bring, and closes it once nothing is held.
+(Keeping the held versions in GlassineOS/packages doesn't fit: the locked firmware is
+about 270 MiB a version, against x86-64's 64 MiB share of that site's 900 MiB.)
 
 `scripts/test-apk-stage.sh` tests the install and the comparison in an Alpine container
 on a made-up repository; `scripts/test-kernel-lock.sh` tests the hold, the tag move and
@@ -261,6 +267,7 @@ hand it can also run the reproducibility check.
 
 ## The x86-64 kernel
 
+    scripts/registry exports uefi-pc out          # pulled when its key is published, else built
     docker buildx build --platform linux/amd64 --build-arg KERNEL=lts --target kernel-export -o type=local,dest=out .
 
 `kernel-lts` installs Alpine's `linux-lts` as a package, at the version its
@@ -306,8 +313,8 @@ have that manifest when it carries the release). `scripts/build` runs it on ever
 (the registry unless `--no-registry`), CI on every kernel export (`kernel` and `build`
 workflows), and `scripts/registry publish` refuses a kernel whose release is published
 with another tree. It applies to every kernel; a compiled one's release already follows
-its firmware (`cfg6`). The x86-64 kernel isn't published to the registry yet (no x86-64
-target), so for it the check compares with artifacts folders only, until it is.
+its firmware (`cfg6`). The x86-64 kernel is published by the `kernel` workflow as the
+`uefi-pc` target's only export, with its release tag.
 
 `scripts/test-boot-qemu-x86_64.sh` (CI: boot-qemu's `boot-qemu-x86_64` job, with KVM)
 boots the PC's base, this kernel and the initramfs built for x86-64 in

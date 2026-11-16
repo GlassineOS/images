@@ -1,0 +1,10 @@
+format=1
+# A generic x86-64 PC that boots by UEFI (device-uefi-pc): what the registry builds and
+# publishes for it. No device tree and no boot image (the loader assembles a kernel set;
+# GlassineOS/boot spec 010), so its only registry export is the kernel.
+#   arch     the target's CPU architecture
+#   kernel   the kernel stage it boots: kernel-<kernel> (Alpine's linux-lts as a package)
+#   exports  the registry exports it has (docs/registry.md); default all four
+arch=x86_64
+kernel=lts
+exports=kernel-export
