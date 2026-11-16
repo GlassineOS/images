@@ -51,6 +51,15 @@ ARG LINUX_SDM660=c1e08bc321be63d389ce9897612f7ff284695ecc
 ARG DTB_COMMIT=${LINUX_SDM660}
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
+# the license texts of the PC kernel's linux-firmware packages: upstream's repository at
+# the tag of the packages' version (kernel-package.sh fails when the two differ) and that
+# tag's commit, and the two Raspberry Pi sources Alpine adds to brcm/ and cypress/, at
+# the commits its linux-firmware APKBUILD pins
+ARG LINUX_FIRMWARE_GIT=https://gitlab.com/kernel-firmware/linux-firmware.git
+ARG LINUX_FIRMWARE_TAG=20260519
+ARG LINUX_FIRMWARE_TAG_COMMIT=d962a6a309b78778f458dc94713845eee105be14
+ARG RPI_BLUEZ_FIRMWARE=https://raw.githubusercontent.com/RPi-Distro/bluez-firmware/cdf61dc691a49ff01a124752bd04194907f0f9cd
+ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-nonfree/9794282eb9f4a2de1f23b41a738926740e975d83
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
@@ -100,22 +109,55 @@ RUN --mount=type=bind,from=linux-sdm660-src,source=/src/linux,target=/src/linux 
     --mount=type=cache,id=${KCACHE}-${KERNEL_BUILD_DIGEST},target=/cache,sharing=locked \
     REPO=$LINUX COMMIT=$LINUX_SDM660 BUILDER=$KERNEL_BUILD_IMAGE@$KERNEL_BUILD_DIGEST JOBS=$JOBS sh /run/kernel.sh build
 
+# The licenses of the PC kernel's firmware (decision 0016: firmware published for
+# redistribution ships with its license). Alpine's linux-firmware subpackages carry the
+# firmware but no license file, so they come from upstream at the packages' own tag:
+# WHENCE (which license covers which file) and every license file at the top of the
+# tree, about 1 MB. One shallow fetch without file contents, then only those files
+# (GitLab limits its raw file downloads, so one ADD each would be refused); the tag must
+# be the pinned commit. Alpine replaces or adds Raspberry Pi files in brcm/ and cypress/
+# (Broadcom, Cypress and Synaptics licenses); their terms are in the Debian copyright
+# files of the two sources, at the commits Alpine pins, each by its checksum.
+# kernel-package.sh puts them all in the kernel's firmware/. Fetched on the build
+# computer's own platform, as boot-src; the files are the same on every platform.
+FROM --platform=$BUILDPLATFORM ${ALPINE} AS firmware-licenses-pc
+ARG LINUX_FIRMWARE_GIT LINUX_FIRMWARE_TAG LINUX_FIRMWARE_TAG_COMMIT
+RUN apk add -q --no-cache git && git init -q /src && cd /src \
+    && git sparse-checkout set --no-cone /WHENCE '/LICEN*' \
+    && n=1 && until timeout 600 git -c protocol.version=2 fetch -q --depth=1 --filter=blob:none \
+            "$LINUX_FIRMWARE_GIT" "refs/tags/$LINUX_FIRMWARE_TAG" \
+        && test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$LINUX_FIRMWARE_TAG_COMMIT" \
+        && timeout 600 git -c advice.detachedHead=false checkout -q FETCH_HEAD; do \
+        [ "$n" -lt 4 ] || { echo "firmware-licenses-pc: no tag $LINUX_FIRMWARE_TAG at $LINUX_FIRMWARE_TAG_COMMIT from $LINUX_FIRMWARE_GIT" >&2; exit 1; }; \
+        sleep $((15 * n)); n=$((n + 1)); done \
+    && test "$(git rev-parse HEAD)" = "$LINUX_FIRMWARE_TAG_COMMIT" \
+    && mkdir /out && cp WHENCE LICEN* /out/ \
+    && echo "firmware-licenses-pc: $(ls /out | wc -l) files from $LINUX_FIRMWARE_TAG"
+ARG RPI_BLUEZ_FIRMWARE RPI_FIRMWARE_NONFREE
+ADD --checksum=sha256:5f6acad870790f7e23150a30cab85c643f926266bf16e6a63acbde4257b957d4 \
+    ${RPI_BLUEZ_FIRMWARE}/debian/copyright /out/copyright.rpi-bluez-firmware
+ADD --checksum=sha256:0bbfd2c3ec95c4ec047923243ed647026e1cbe26d18d3e632361c81753506e23 \
+    ${RPI_FIRMWARE_NONFREE}/debian/copyright /out/copyright.rpi-firmware-nonfree
+
 # The kernel of a generic x86-64 PC (KERNEL=lts, --platform linux/amd64): Alpine's
 # linux-lts, installed as a package at the version stages/kernel-lts/lock.x86_64 names,
-# not compiled here. Its tree is the shape kernel-export's contract gives a device's
-# modules subvolume (modules/<release>/: the modules and depmod's files, an empty
-# firmware/, kernel.manifest), with the EFI-stub image as vmlinuz. linux-lts needs one
-# provider of linux-firmware-any: linux-firmware-none, so no firmware is installed.
-# From the Alpine image itself (the kernel is Alpine's; the alpine stage, with our
-# repository, comes later in this file).
+# not compiled here, with the linux-firmware packages for common PC hardware and the CPU
+# microcode. Its tree is the shape kernel-export's contract gives a device's modules
+# subvolume (modules/<release>/: the modules and depmod's files, firmware/ with the
+# packages' firmware and its licenses, kernel.manifest), with the EFI-stub image as
+# vmlinuz and the early microcode archives in microcode/. From the Alpine image itself
+# (the kernel is Alpine's; the alpine stage, with our repository, comes later in this
+# file).
 FROM ${ALPINE} AS kernel-lts
 ARG LOCK=check
 RUN --mount=type=bind,source=stages/kernel-lts,target=/run/stage \
     --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
+ARG LINUX_FIRMWARE_TAG
 RUN --mount=type=bind,source=scripts/kernel-package.sh,target=/run/kernel-package.sh \
-    sh /run/kernel-package.sh linux-lts /boot/vmlinuz-lts
+    --mount=type=bind,from=firmware-licenses-pc,source=/out,target=/run/firmware-licenses \
+    FIRMWARE_TAG=$LINUX_FIRMWARE_TAG sh /run/kernel-package.sh linux-lts /boot/vmlinuz-lts
 
 FROM kernel-${KERNEL} AS kernel
 FROM scratch AS kernel-export
