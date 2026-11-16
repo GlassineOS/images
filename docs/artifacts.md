@@ -290,6 +290,14 @@ during an install). It is made in a privileged container
 3. The base's full stream received into `bases/<base-id>` (read-only, the received UUID
    of its base record, so every later base arrives as a delta), and the build's modules
    stream into `modules/<release>`: the release of the boot image in `kernel`.
+   Then the base's `boot/` files as GlassineOS/boot's `glassine-deploy receive --boot`
+   keeps them (boot's `docs/kernel-artifacts.md`, "On the system partition"): the
+   initramfs the release boots (a PC: the build's `initramfs`; a target with a boot image:
+   its boot record's `initramfs`) and, where the boot record names one, its device tree
+   (`dtb`), each with its manifest, under `boot/initramfs/` and `boot/dtb/`. Each is
+   checked first as `receive --boot` checks it (the manifest's `sha256` is the file's,
+   the name's id its first 16 hex digits, the name's commit12 or device the manifest's)
+   and read back. So the first kernel update on an installed system finds them.
 4. Shrunk to what it allocates + 64 MiB (`--margin`), a whole MiB, at least 256 MiB (the
    kernel refuses a smaller btrfs); `btrfs check`, then mounted read-only once more and
    checked. The image is not partition-sized: the first start grows the file system to
@@ -324,7 +332,9 @@ build's, plus `boot:<commit12>`), `missing` (the roles this folder doesn't suppl
 `scripts/test-pool-image.sh` tests it on fixtures: the folder and release.json with all
 six roles (the boot loader from `--boot-loader`, the layout fetched from a `file://`
 pin), wrong pinned bytes and an unpinned target's `--boot-loader` refused, the missing
-roles of a target without pins, the image read-only (the base read-only with its received UUID, the modules, the marker),
+roles of a target without pins, the image read-only (the base read-only with its received UUID, the modules, the marker,
+`boot/` with exactly the boot image's device tree and initramfs, a PC's initramfs), an
+initramfs or device tree whose manifest doesn't match refused,
 and, on a copy grown to `min_partition_bytes`, a delta made by materialize (a base and
 its child) received onto the base inside the image.
 

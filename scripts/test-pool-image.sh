@@ -48,10 +48,13 @@ printf 'DEVICE=fixture\nPART_SIZE=67108864\n' > "$R/targets/fixture/board.conf"
 K=$O/k; mkdir -p "$K/modules/$REL/kernel" "$K/boot/dtb" "$K/boot/initramfs" "$K/bootimg" "$K/select"
 echo image > "$K/modules/$REL/Image.gz"; head -c 300000 /dev/urandom > "$K/modules/$REL/kernel/x.ko"
 printf 'format=1\nrelease=%s\nprovides=\nfeatures=\n' $REL > "$K/modules/$REL/kernel.manifest"
-DTB=fixture@0000000000000001; IRD=0123456789ab@0000000000000002; IMG=00000000000000aa
-echo dtb > "$K/boot/dtb/$DTB.dtb"; printf 'format=1\ndevice=fixture\n' > "$K/boot/dtb/$DTB.manifest"
-echo ird > "$K/boot/initramfs/$IRD.cpio.gz"
-printf 'format=1\ncommit=%s\nneeds=\nfeatures=\n' $BOOT_COMMIT > "$K/boot/initramfs/$IRD.manifest"
+# the device tree and the initramfs, named by their content as the build names them
+sha() { sha256sum < "$1" | cut -c1-64; }
+echo dtb > "$O/dtb"; DTB=fixture@$(sha "$O/dtb" | cut -c1-16); mv "$O/dtb" "$K/boot/dtb/$DTB.dtb"
+printf 'format=1\ndevice=fixture\nsha256=%s\n' "$(sha "$K/boot/dtb/$DTB.dtb")" > "$K/boot/dtb/$DTB.manifest"
+echo ird > "$O/ird"; IRD=0123456789ab@$(sha "$O/ird" | cut -c1-16); mv "$O/ird" "$K/boot/initramfs/$IRD.cpio.gz"
+printf 'format=1\ncommit=%s\nsha256=%s\nneeds=\nfeatures=\n' $BOOT_COMMIT "$(sha "$K/boot/initramfs/$IRD.cpio.gz")" > "$K/boot/initramfs/$IRD.manifest"
+IMG=00000000000000aa
 head -c 4194304 /dev/urandom > "$K/bootimg/$IMG.img"
 printf 'format=1\nid=%s\ndevice=fixture\nkernel=%s\ndtb=%s\ninitramfs=%s\nsize=%s\nsha256=%s\n' $IMG $REL $DTB $IRD \
 	4194304 "$(sha256sum < "$K/bootimg/$IMG.img" | cut -c1-64)" > "$K/bootimg/$IMG.manifest"
@@ -180,6 +183,8 @@ echo "bases=$(ls /w/m/bases | tr "\n" " ")"; echo "modules=$(ls /w/m/modules | t
 echo "a_$(btrfs property get -ts /w/m/bases/$IDA ro)"; echo "a_ruuid=$(ru /w/m/bases/$IDA)"
 echo "m_$(btrfs property get -ts /w/m/modules/$REL ro)"
 [ -f /w/m/state/format ] && echo "format=$(cat /w/m/state/format)"; [ -e /w/m/state/install ] && echo marker=yes
+echo "boot=$(cd /w/m && find boot -type f | sort | tr "\n" " ")"
+for f in $(cd /w/m && find boot -type f); do cmp -s /w/m/$f /o/k/$f && echo "same=$f"; done
 umount /w/m
 cp $img /w/pool.img
 truncate -s "$MIN" /w/pool.img
@@ -196,6 +201,7 @@ L=$O/img.log
 check "image read-only: bases/A only, modules/<release> only, both read-only" "grep -qx 'bases=$IDA ' '$L' && grep -qx 'modules=$REL ' '$L' && grep -qx a_ro=true '$L' && grep -qx m_ro=true '$L'"
 check "image: A carries the base record's received UUID" "grep -qx \"a_ruuid=\$(v received_uuid '$A/fixture/bases/$IDA/record')\" '$L'"
 check "image: state/format and the install marker" "grep -q '^format=' '$L' && grep -qx marker=yes '$L'"
+check "image: boot/ holds the boot image's device tree and initramfs with their manifests, the build's bytes (nothing else)" "grep -qx 'boot=boot/dtb/$DTB.dtb boot/dtb/$DTB.manifest boot/initramfs/$IRD.cpio.gz boot/initramfs/$IRD.manifest ' '$L' && [ \$(grep -c '^same=' '$L') = 4 ]"
 check "grown to min_partition_bytes as the first start does" "grep -q '^grown=[0-9]' '$L' && [ \"\$(v grown '$L')\" -ge 1073741824 ]"
 check "B's incremental stream receives onto A inside the image: read-only, B's received UUID" "grep -qx delta=received '$L' && grep -qx b_ro=true '$L' && grep -qx \"b_ruuid=\$(v received_uuid '$A/fixture/bases/$IDB/record')\" '$L'"
 check "B's content: the changed file, its base manifest; A unchanged" "grep -qx b_config=two '$L' && grep -qx a_config=one '$L' && grep -qx b_manifest=same '$L' && grep -qx blob=same '$L'"
@@ -216,8 +222,7 @@ head -c 100000 /dev/urandom > "$PK/modules/$PREL/vmlinuz"
 head -c 3001 /dev/urandom > "$PK/modules/$PREL/microcode/intel-ucode.img"
 head -c 2002 /dev/urandom > "$PK/modules/$PREL/microcode/amd-ucode.img"
 printf 'format=1\nrelease=%s\nprovides=\nfeatures=\n' $PREL > "$PK/modules/$PREL/kernel.manifest"
-PIRD=0123456789ab@0000000000000003
-echo pc-ird > "$PK/boot/initramfs/$PIRD.cpio.gz"
+echo pc-ird > "$O/pird"; PIRD=0123456789ab@$(sha "$O/pird" | cut -c1-16); mv "$O/pird" "$PK/boot/initramfs/$PIRD.cpio.gz"
 printf 'format=1\ncommit=%s\nsha256=%s\nneeds=\nfeatures=\n' $BOOT_COMMIT "$(sha256sum < "$PK/boot/initramfs/$PIRD.cpio.gz" | cut -c1-64)" \
 	> "$PK/boot/initramfs/$PIRD.manifest"
 docker run --rm -v "$O":/o -v "$R/targets/pcfix/board.conf":/board.conf:ro -e HOST="$(id -u):$(id -g)" -e PREL=$PREL alpine:3.24 sh -euc '
@@ -282,6 +287,25 @@ check "a PC target whose board.conf isn't the base's: exit 1, named" "[ $rc = 1 
 cp "$O/board.saved" "$R/targets/pcfix/board.conf"; echo tampered >> "$PK/modules/$PREL/vmlinuz"
 PI --build 20260103-100000 --boot "$BOOT" --kernel "$PK" --out "$O/rel-pcz" "$A" pcfix > "$O/o" 2>&1 && rc=0 || rc=$?
 check "a PC kernel that isn't the build's modules tree: exit 1, named" "[ $rc = 1 ] && grep -q 'kernel: .* is not the file modules/' '$O/o' && [ ! -e '$O/rel-pcz' ]"
+
+# --- the boot/ files: the PC's pool holds its initramfs; a mismatched identity is refused
+docker run --rm --privileged -v "$O":/o -e IDP="$(v base "$BP/manifest")" alpine:3.24 sh -euc '
+for i in $(seq 0 31); do [ -e /dev/loop$i ] || mknod /dev/loop$i b 7 $i; done
+mkdir /m && mount -o loop,ro /o/rel-pc/base/$IDP.pool.img /m
+echo "boot=$(cd /m && find boot -type f | sort | tr "\n" " ")"
+for f in $(cd /m && find boot -type f); do cmp -s /m/$f /o/pk/$f && echo "same=$f"; done
+umount /m' > "$O/pcimg.log" 2>&1 || true
+sed 's/^/    /' "$O/pcimg.log"
+check "image, a PC target: boot/ holds its initramfs and manifest, the build's bytes" "grep -qx 'boot=boot/initramfs/$PIRD.cpio.gz boot/initramfs/$PIRD.manifest ' '$O/pcimg.log' && [ \$(grep -c '^same=' '$O/pcimg.log') = 2 ]"
+IM=$A/boot/initramfs/$IRD.manifest; cp "$IM" "$O/im.saved"
+sed -i 's/^commit=.*/commit=fedcba9876540000000000000000000000000000/' "$IM"
+PI --build 20260101-100000 --boot "$BOOT" --out "$O/rel-id" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "an initramfs whose manifest names another commit: exit 1, named, nothing left" "[ $rc = 1 ] && grep -q 'initramfs $IRD: the manifest names' '$O/o' && [ ! -e '$O/rel-id' ]"
+cp "$O/im.saved" "$IM"; DM=$A/boot/dtb/$DTB.manifest; cp "$DM" "$O/dm.saved"
+sed -i 's/^sha256=.*/sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$DM"
+PI --build 20260101-100000 --boot "$BOOT" --out "$O/rel-id" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a device tree that isn't its manifest's bytes: exit 1, named, nothing left" "[ $rc = 1 ] && grep -q 'dtb $DTB: .* is not the file its record names' '$O/o' && [ ! -e '$O/rel-id' ]"
+cp "$O/dm.saved" "$DM"
 
 rm -rf "$O"
 echo "$fails failed"; [ $fails = 0 ]
