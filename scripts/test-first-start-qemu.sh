@@ -142,8 +142,9 @@ tock "kernel + initramfs"
 K=$O/k; mkdir -p "$K/modules/$KREL" "$K/boot/dtb" "$K/boot/initramfs" "$K/bootimg" "$K/select"
 tar -C "$K/modules/$KREL" -xf "$O/modules.tar"
 printf 'format=1\nrelease=%s\nprovides=\nfeatures=\n' "$KREL" > "$K/modules/$KREL/kernel.manifest"
-DTB=example@0000000000000000; IMG=0000000000000000
-echo placeholder > "$K/boot/dtb/$DTB.dtb"; printf 'format=1\ndevice=example\n' > "$K/boot/dtb/$DTB.manifest"
+# a placeholder device tree, named by its content as a build names it (the pool's boot/ takes it)
+echo placeholder > "$O/dtb"; DSHA=$(sha256sum < "$O/dtb" | cut -c1-64); DTB=example@$(printf '%.16s' "$DSHA"); IMG=0000000000000000
+mv "$O/dtb" "$K/boot/dtb/$DTB.dtb"; printf 'format=1\ndevice=example\nsha256=%s\n' "$DSHA" > "$K/boot/dtb/$DTB.manifest"
 cp "$O/ird/boot/initramfs/$IRD.cpio.gz" "$O/ird/boot/initramfs/$IRD.manifest" "$K/boot/initramfs/"
 echo placeholder > "$K/bootimg/$IMG.img"
 printf 'format=1\nid=%s\ndevice=example\nkernel=%s\ndtb=%s\ninitramfs=%s\nsize=%s\nsha256=%s\n' $IMG "$KREL" $DTB "$IRD" \

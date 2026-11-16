@@ -42,7 +42,9 @@ on a sparse file, GlassineOS/boot's `glassine-deploy init POOL --install-marker`
 empty, mounted pool (bases/, modules/, state/, the install marker state/install), the
 base's full stream received into bases/ (read-only, the received UUID the base record
 names, so later bases arrive as deltas), the modules stream of the build's kernel
-release into modules/, then shrunk to what it allocates plus the margin (a whole MiB),
+release into modules/, the base's boot/ files (its initramfs and, where the boot image
+has one, its device tree, each with its manifest, checked as boot's `receive --boot`
+checks them), then shrunk to what it allocates plus the margin (a whole MiB),
 checked (btrfs check, no mixed block groups) and read back. The image holds no free
 space for the partition: the first start grows the file system to the partition.
 
@@ -405,6 +407,30 @@ def pc_parts(o, adir, repo, target, tconf, m, brec, boot_dir, work):
     return parts, (least + MIB - 1) // MIB * MIB
 
 
+def boot_file(adir, kind, name):
+    """The build's boot/<kind>/<name> file (a device tree or an initramfs) checked as
+    GlassineOS/boot's `glassine-deploy receive --boot` checks it (docs/kernel-artifacts.md,
+    "On the system partition"): its manifest beside it, format 1, the manifest's sha256 is
+    the file's, the name's id its first 16 hex digits, the name's device or commit12 the
+    manifest's. Returns the paths under adir: (file, manifest)."""
+    ext = {'dtb': '.dtb', 'initramfs': '.cpio.gz'}[kind]
+    label, _, ident = name.partition('@')
+    if not label or not re.fullmatch(r'[0-9a-f]{16}', ident) or (
+            kind == 'initramfs' and not re.fullmatch(r'[0-9a-f]{12}', label)) or (
+            kind == 'dtb' and not re.fullmatch(r'[A-Za-z0-9_+-][A-Za-z0-9._+-]*', label)):
+        raise Fail(f'{kind} {name!r}: not a boot/ name ({"DEVICE" if kind == "dtb" else "COMMIT12"}@ID)')
+    rel = os.path.join('boot', kind, name + ext)
+    man = os.path.join('boot', kind, name + '.manifest')
+    rec = record(os.path.join(adir, man))
+    checked(os.path.join(adir, rel), rec.get('sha256', ''), f'{kind} {name}')
+    if rec['sha256'][:16] != ident:
+        raise Fail(f'{kind} {name}: the id is not its content\'s ({rec["sha256"][:16]})')
+    if (kind == 'initramfs' and not rec.get('commit', '').startswith(label)) or (
+            kind == 'dtb' and rec.get('device') != label):
+        raise Fail(f'{kind} {name}: the manifest names {rec.get("commit") if kind == "initramfs" else rec.get("device")!r}')
+    return rel, man
+
+
 def usage():
     print(__doc__, file=sys.stderr)
     sys.exit(2)
@@ -528,6 +554,14 @@ def main(argv):
             raise Fail(f'{conf}: no BOOT_LOADER_PART_SIZE, or the boot loader is larger')
         if pc:
             parts, boot_least = pc_parts(o, adir, repo, target, tconf, m, brec, boot_dir, work)
+        # the base's boot/ files (docs/artifacts.md, the pool image): the initramfs the release
+        # boots and, where the boot image has one, its device tree, so the first kernel
+        # update on an installed system finds them as a receive --boot leaves them
+        boot_names = [('initramfs', m['initramfs'])] if pc else \
+            [(k, brec_img.get(k, '')) for k in ('dtb', 'initramfs') if brec_img.get(k)]
+        if not any(k == 'initramfs' for k, _ in boot_names):
+            raise Fail(f'build {bid}: names no initramfs for the pool\'s boot/')
+        boot_files = [p for k, n in boot_names for p in boot_file(adir, k, n)]
         print(f'pool-image: build {bid}: base {base}, kernel {rel}, '
               + (f'initramfs {m["initramfs"]} (a kernel set)' if pc else f'boot image {img}')
               + f'; layout by boot {boot_commit[:12]}')
@@ -536,6 +570,7 @@ def main(argv):
         cmd = ['docker', 'run', '--rm', '--privileged',
                '-e', f'BASE={base}', '-e', f'RUUID={ruuid}', '-e', f'STREAM={stream}',
                '-e', f'RELEASE={rel}', '-e', f'MSTREAM={mstream}',
+               '-e', f'BOOTFILES={" ".join(boot_files)}',
                '-e', f'MARGIN={int(o["margin"]) << 20}',
                '-e', f'IMG={os.environ.get("POOL_IMAGE_IMG", str(8 << 30))}',
                '-e', f'TMPFS={os.environ.get("POOL_IMAGE_TMPFS", "8g")}',
