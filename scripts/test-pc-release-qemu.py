@@ -18,7 +18,8 @@ harness's made-up one:
      assembled from the release's parts, the loader record, the splash, and one new
      firmware boot entry, first;
   3. the machine from its disk alone: the firmware starts that entry, the release's
-     loader (GlassineOS/loader: its LOADER_START line with the pinned version), which starts the default set
+     loader (GlassineOS/loader: its LOADER_START line with the pinned version), which draws
+     the release's default splash (SPLASH_DRAWN default) and starts the default set
      (START_KERNEL) from its record. One change to the installed disk, so that Linux
      reaches the serial log: the set's command line gets console=ttyS0 loglevel=7, with
      set.rec's check line and the loader record's default_rec made again (console_on);
@@ -309,6 +310,7 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
     for x in text.splitlines():
         if any(k in x for k in ('glassine-first-start:', 'glassine-deploy-accept:', 'glassine-boot:', 'glassine-switch:',
                                 'efi: EFI v', 'boot modules:', 'LOADER_START', 'START_KERNEL', 'SECURE_BOOT',
+                                'SPLASH_DRAWN', 'IMAGE_SKIPPED',
                                 'MESSAGE ', 'PANIC ', 'StartImage', 'glassine-loader-mark:', 'qtest-limit:')):
             print('    ' + x.strip(), flush=True)
     return g.p.returncode, text
@@ -583,6 +585,10 @@ def main():
         want = 'LOADER_START x86-64' + (f' {m.group(1)}' if m else '')
         res(want in text, f'boot 1: the release\'s loader ({bl.get("url") or bl.get("file")}) started from the firmware\'s entry: "{want}"')
         res(f'START_KERNEL {kid} ' in text, f'boot 1: the loader started the default set {kid}')
+        if 'splash' in s['doc']['artifacts']:
+            # the release's loader reads the release's splash (boot's image format): a
+            # loader that skips it logs IMAGE_SKIPPED and draws nothing
+            res('SPLASH_DRAWN default' in text, 'boot 1: the release\'s loader drew the release\'s default splash')
     res('efi: EFI v' in text, 'boot 1: started by UEFI firmware')
     res('first deployment' in text and 'selected' in text, 'boot 1: the first start selected the first deployment')
     res(rc == 0, f'boot 1: rebooted by itself (qemu exit {rc})')

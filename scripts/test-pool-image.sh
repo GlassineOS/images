@@ -209,7 +209,7 @@ printf 'busybox=1.0-r0\n' > "$R/stages/base0/lock.x86_64"
 printf 'FROM base0 AS device-pcfix\n' >> "$R/Dockerfile"
 printf 'arch=x86_64\nkernel=fake\nexports=kernel-export\n' > "$R/targets/pcfix/target"
 printf 'ROOT_PART=glassine-system\nCMDLINE="quiet panic=10"\n' > "$R/targets/pcfix/board.conf"
-printf 'SPLASH_WIDTH=320\nSPLASH_HEIGHT=200\nSPLASH_COLOR=0x102030\n' > "$R/targets/pcfix/release.conf"
+printf 'SPLASH_WIDTH=320\nSPLASH_HEIGHT=200\nSPLASH_COLOR=0x102030\nSPLASH_LAYOUT=grey8\n' > "$R/targets/pcfix/release.conf"
 PK=$O/pk; PREL=6.18.0-0-fake
 mkdir -p "$PK/modules/$PREL/microcode" "$PK/boot/initramfs"
 head -c 100000 /dev/urandom > "$PK/modules/$PREL/vmlinuz"
@@ -261,12 +261,15 @@ assert a['initramfs']['identity'] == ird and a['initramfs']['kind'] == 'initramf
 assert open(os.path.join(d, a['board']['file']), 'rb').read() == open(board, 'rb').read() and a['board']['kind'] == 'board-conf'
 assert a['boot-modules']['kind'] == 'cpio-gz'
 s = open(os.path.join(d, a['splash']['file']), 'rb').read()
-assert s[:8] == b'GLSPLASH' and struct.unpack_from('<HHII', s, 8) == (1, 0, 320, 200), s[:32]
+assert s[:8] == b'GLSPLASH' and struct.unpack_from('<HHII', s, 8) == (2, 0, 320, 200), s[:32]
+# format 2: grey8 (layout 3), run-length (1), no filter (0); the grey is the colour's luma
+assert struct.unpack_from('<IIHH', s, 28) == (3, 0x102030, 1, 0), s[28:40]
 assert zlib.crc32(s[:52]) == struct.unpack_from('<I', s, 52)[0] and zlib.crc32(s[64:]) == struct.unpack_from('<I', s, 48)[0]
+grey = (77 * 0x10 + 150 * 0x20 + 29 * 0x30 + 128) >> 8
 n, i, p = 0, 0, s[64:]
 while i < len(p):
-    c = p[i]; n += c + 1 if c < 128 else c - 126; i += 1 + ((c + 1) * 4 if c < 128 else 4)
-    assert c < 128 or p[i - 4:i] == struct.pack('<I', 0x102030)
+    c = p[i]; n += c + 1 if c < 128 else c - 126; i += 1 + (c + 1 if c < 128 else 1)
+    assert c < 128 or p[i - 1] == grey
 assert i == len(p) and n == 320 * 200, (i, len(p), n)
 assert a['base']['kind'] == 'btrfs-pool-image' and a['base']['kernel_release'] == rel
 print('kernel set: min boot partition', k['min_partition_bytes'])
