@@ -1,6 +1,10 @@
 # Onyx Boox Note Air: its services and scripts (the kernel is not in the base chain).
 # Its configuration files are in rootfs/.
 device-onyx-noteair
+# the GlassineOS loader (a pinned GlassineOS/loader release) and the default splash for
+# the raw boot partition glassine-boot, which the device's ABL starts the loader from;
+# glassine-deploy's glassine-loader-update writes them after a healthy mark
+glassine-loader-onyx-noteair
 # our Mesa for Flatpak apps (freedreno, Adreno 509): Flathub's loses texture uploads
 # on this GPU. Only for freedreno devices, since apps then prefer it to Flathub's Mesa.
 mesa-flatpak-glassine
