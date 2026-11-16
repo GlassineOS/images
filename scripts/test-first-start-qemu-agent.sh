@@ -61,6 +61,9 @@ if grep -qx 'BOOT_FORM=raw' /etc/glassine-bootimg/board.conf 2>/dev/null; then
 	res $? "BOOT_FORM=raw, no glassine-boot partition: the loader mark says so and writes nothing"
 	dmesg | grep -q 'glassine-deploy-accept: the healthy mark failed (exit 1)' && [ ! -e /run/glassine/loader-marked ]
 	res $? "BOOT_FORM=raw, no glassine-boot partition: the accept step goes on without the mark"
+	# the loader update runs only after a mark this start wrote: nothing is tried here
+	! dmesg | grep -q 'glassine-loader-update:' && ! dmesg | grep -q 'glassine-deploy-accept: the loader update'
+	res $? "BOOT_FORM=raw, no healthy mark: the loader update doesn't run, nothing written"
 fi
 [ "$(st current)" = "$booted" ] && [ -z "$(st candidate)" ]; res $? "$booted is current, no candidate (status: $(glassine-deploy status --porcelain 2>/dev/null | sed -n 2p | tr '\t' ' '))"
 
