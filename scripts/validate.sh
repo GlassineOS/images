@@ -33,6 +33,12 @@ o=$(echo "$a" | grep -v -e '^WARNING: opening from cache ' -e '^OK: ' || :)
 b=/etc/glassine-bootimg/board.conf
 [ ! -e "$b" ] || ! grep '^[[:space:]]*CMDLINE=' "$b" | grep -q 'glassine\.devmode' \
 	|| no "$b: CMDLINE carries glassine.devmode"
+# a loader record in the raw form (BOOT_FORM=raw): the tools that write it are in the
+# tree (glassine-deploy 0.7.2 and later: glassine-boot-raw came with the raw form)
+if [ -r "$b" ] && [ "$( (. "$b" >/dev/null 2>&1; printf %s "${BOOT_FORM:-}") )" = raw ]; then
+	[ -x /usr/sbin/glassine-boot-raw ] \
+		|| no "$b: BOOT_FORM=raw, but the tree has no raw-form writer (glassine-deploy 0.7.2 or later)"
+fi
 # kernel modules and firmware updates come with the kernel, outside the base
 for d in /lib/modules /lib/firmware/updates; do
 	[ -z "$(ls -A "$d" 2>/dev/null)" ] || no "$d isn't empty"
