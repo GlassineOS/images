@@ -1,4 +1,5 @@
-# Refreshes the stage locks every day on a native arm64 runner (scripts/lock.sh) and
+# Refreshes the stage locks every day, each architecture on a native runner of its own
+# (scripts/lock.sh: arm64's lock files, and x86-64's lock.x86_64 with --arch x86_64), and
 # opens or updates one pull request with what changed: on Mondays for any change, on
 # any day when a change brings a fix listed in Alpine's security database or when a
 # version the current locks name is no longer offered (builds fail until it merges).
@@ -21,7 +22,25 @@ permissions:
 concurrency: lock-refresh
 
 jobs:
+  # x86-64's locks, handed to the refresh job as an artifact. A failure here leaves them
+  # as they were; arm64's refresh and its pull request go on, and the run shows the failure
+  refresh-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - name: Refresh the x86-64 locks
+        run: scripts/lock.sh --arch x86_64
+      - uses: actions/upload-artifact@v7
+        with:
+          name: locks-x86_64
+          path: stages/*/lock.x86_64
+          if-no-files-found: error
   refresh:
+    needs: refresh-x86_64
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -30,15 +49,41 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - name: Refresh the locks
         run: |
-          mkdir -p /tmp/locks/old /tmp/locks/new
+          # per architecture: aarch64 = the lock files, x86_64 = lock.x86_64
+          mkdir -p /tmp/locks/aarch64/old /tmp/locks/aarch64/new /tmp/locks/x86_64/old /tmp/locks/x86_64/new
           # stages without a package lock (the kernel's) are skipped
-          for d in stages/*/; do if [ -f "$d/lock" ]; then cp "$d/lock" "/tmp/locks/old/$(basename "$d")"; fi; done
+          for d in stages/*/; do if [ -f "$d/lock" ]; then cp "$d/lock" "/tmp/locks/aarch64/old/$(basename "$d")"; fi; done
+          for d in stages/*/; do if [ -f "$d/lock.x86_64" ]; then cp "$d/lock.x86_64" "/tmp/locks/x86_64/old/$(basename "$d")"; fi; done
           scripts/lock.sh
-          for d in stages/*/; do if [ -f "$d/lock" ]; then cp "$d/lock" "/tmp/locks/new/$(basename "$d")"; fi; done
+          for d in stages/*/; do if [ -f "$d/lock" ]; then cp "$d/lock" "/tmp/locks/aarch64/new/$(basename "$d")"; fi; done
+      - uses: actions/download-artifact@v8
+        if: needs.refresh-x86_64.result == 'success'
+        with:
+          name: locks-x86_64
+          path: stages
       - name: What changed
+        env:
+          X86: ${{ needs.refresh-x86_64.result }}
         run: |
-          docker run --rm -v /tmp/locks:/l -v "$PWD/scripts:/s:ro" alpine:3.24 \
-            sh -c 'apk add -q jq && sh /s/lock-diff.sh /l/old /l/new /l/kind' > /tmp/locks/body.md
+          for d in stages/*/; do if [ -f "$d/lock.x86_64" ]; then cp "$d/lock.x86_64" "/tmp/locks/x86_64/new/$(basename "$d")"; fi; done
+          # x86-64's diff only after its refresh succeeded: it reads our x86_64 index too
+          a_list=aarch64; [ "$X86" != success ] || a_list="aarch64 x86_64"
+          for a in $a_list; do
+            docker run --rm -e ARCH=$a -v /tmp/locks/$a:/l -v "$PWD/scripts:/s:ro" alpine:3.24 \
+              sh -c 'apk add -q jq && sh /s/lock-diff.sh /l/old /l/new /l/kind' > /tmp/locks/$a/body.md
+          done
+          {
+            echo "### arm64"; echo; cat /tmp/locks/aarch64/body.md; echo
+            echo "### x86-64"; echo
+            if [ "$X86" = success ]; then cat /tmp/locks/x86_64/body.md
+            else echo "**Not refreshed**: the x86-64 refresh failed (job result: $X86); its locks are unchanged."; fi
+          } > /tmp/locks/body.md
+          # the more urgent kind of the two: security, then gone, then routine
+          kind=routine
+          for k in gone security; do
+            grep -qx $k /tmp/locks/aarch64/kind /tmp/locks/x86_64/kind 2>/dev/null && kind=$k
+          done
+          echo $kind > /tmp/locks/kind
           cat /tmp/locks/body.md >> "$GITHUB_STEP_SUMMARY"
       # the glassine-lock-refresh app's token, made after the refresh (it is valid for an
       # hour): its push and pull request start the pull request's checks, github.token's

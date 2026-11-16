@@ -1,6 +1,8 @@
-# Builds the stage chain for every device on a native arm64 runner, with the locks
-# checked, and checks the exported tree. Pull requests and pushes alike; the base's
-# stages are not published (the kernel side is: kernel.yml, docs/registry.md).
+# Builds the stage chain for every device on a native runner of its architecture, with
+# the locks checked, and checks the exported tree: the arm64 devices (a stage lock) on
+# arm64, the x86-64 ones (lock.x86_64) and their package kernel on x86-64. Pull requests
+# and pushes alike; the base's stages are not published (the kernel side is: kernel.yml,
+# docs/registry.md).
 name: build
 on:
   push:
@@ -20,7 +22,7 @@ jobs:
         run: sh scripts/test-device-files.sh
       - name: Build and export each device's tree
         run: |
-          devices=$(cd stages && ls -d device-* | sed 's/^device-//')
+          devices=$(cd stages && for d in device-*; do [ ! -f "$d/lock" ] || echo "${d#device-}"; done)
           from=$(for d in $devices; do printf ' --cache-from type=gha,scope=%s' "$d"; done)
           first=1
           for d in $devices; do
@@ -47,3 +49,38 @@ jobs:
             fi
             first=0
           done
+  build-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and export each x86-64 device's tree
+        run: |
+          devices=$(cd stages && for d in device-*; do [ ! -f "$d/lock.x86_64" ] || echo "${d#device-}"; done)
+          [ -n "$devices" ] || { echo "::error::no device stage has a lock.x86_64"; exit 1; }
+          for d in $devices; do
+            echo "::group::$d"
+            docker buildx build --progress=plain --platform linux/amd64 --build-arg DEVICE="$d" \
+              --cache-from "type=gha,scope=x86_64-$d" --cache-to "type=gha,mode=max,scope=x86_64-$d" \
+              -o "type=tar,dest=/tmp/$d.tar" . 2>&1 | tee "/tmp/$d.log"
+            [ "${PIPESTATUS[0]}" = 0 ] || exit 1
+            if tar -tf "/tmp/$d.tar" | grep -qx 'etc/resolv.conf'; then
+              echo "::error::$d: /etc/resolv.conf from the build is in the tree"; exit 1
+            fi
+            echo "$d: $(tar -tf "/tmp/$d.tar" | wc -l) entries, $(du -h "/tmp/$d.tar" | cut -f1)"
+            echo "::endgroup::"
+          done
+      - name: The kernel package's export (KERNEL=lts)
+        run: |
+          docker buildx build --progress=plain --platform linux/amd64 --build-arg KERNEL=lts \
+            --target kernel-export -o type=local,dest=/tmp/kernel .
+          # the manifest without its firmware list (one name@sha256-16 per firmware file)
+          for m in /tmp/kernel/modules/*/kernel.manifest; do
+            grep -v '^firmware=' "$m"
+            echo "firmware: $(sed -n 's/^firmware=//p' "$m" | wc -w) files; $(du -sh "${m%/*}/firmware" | cut -f1) in firmware/, $(du -sh "${m%/*}" | cut -f1) in all"
+          done
+      - name: The initramfs for x86-64 (boot's build-initramfs.sh, arch-neutral)
+        run: |
+          docker buildx build --progress=plain --platform linux/amd64 \
+            --target initramfs-export -o type=local,dest=/tmp/initramfs .
+          ls -l /tmp/initramfs/boot/initramfs/

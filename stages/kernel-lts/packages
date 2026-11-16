@@ -1,0 +1,34 @@
+# The kernel of a generic x86-64 PC: Alpine's long-term-support kernel, for real PCs
+# (their storage, USB and graphics drivers as modules) and virtual machines alike.
+linux-lts
+# The firmware it loads for common PC hardware (decision 0016: published for
+# redistribution, as locked distribution packages): GPUs (AMD, Intel i915 and xe), Intel
+# Wi-Fi, Bluetooth, audio and more (intel), Wi-Fi and Bluetooth of Qualcomm Atheros
+# (ath10k, ath11k, ath12k, qca), Realtek (rtw88, rtw89, rtlwifi, rtl_bt), Broadcom and
+# Cypress (brcm, cypress) and MediaTek, Realtek's Ethernet (rtl_nic). Each provides
+# linux-firmware-any, which linux-lts needs. scripts/kernel-package.sh moves them into
+# the kernel's firmware/, with their licenses (the firmware-licenses-pc stage: the
+# packages carry none). NVIDIA's (nouveau) is not among them yet.
+linux-firmware-amdgpu
+linux-firmware-i915
+linux-firmware-xe
+linux-firmware-intel
+linux-firmware-ath10k
+linux-firmware-ath11k
+linux-firmware-ath12k
+linux-firmware-rtw88
+linux-firmware-rtw89
+linux-firmware-rtlwifi
+linux-firmware-rtl_bt
+linux-firmware-rtl_nic
+linux-firmware-brcm
+linux-firmware-cypress
+linux-firmware-mediatek
+linux-firmware-qca
+# CPU microcode: AMD's as firmware files (linux-firmware-amd-ucode) and as the early
+# archive (amd-ucode), Intel's as its early archive (intel-ucode). The kernel loads
+# microcode only early (CONFIG_MICROCODE_LATE_LOADING is off): the archives go into the
+# kernel's microcode/, for the loader to put in front of the initramfs.
+linux-firmware-amd-ucode
+amd-ucode
+intel-ucode

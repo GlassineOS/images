@@ -7,7 +7,9 @@
 # them. OUT_FLAG (optional) gets "security" (a change brings a fix from Alpine's secdb),
 # "gone" (a version OLD_DIR names is no longer offered by Alpine's or our repository, so
 # builds of the current locks fail) or "routine". Runs in an Alpine container (needs apk
-# for version comparison, jq, wget).
+# for version comparison, jq, wget). ARCH (optional): the architecture whose
+# repositories the locks are checked against, as apk names it (x86_64); default the
+# container's. Run once per architecture, each on that architecture's lock files only.
 set -eu
 old=$1 new=$2 flag=${3:-}
 t=$(mktemp -d)
@@ -24,7 +26,7 @@ awk -F= 'NR==FNR {o[$1]=$2; next} {n[$1]=$2}
 
 # a package's origin (secdb lists origins: openssl, not libcrypto3)
 rel=$(sed -n 's/^\([0-9]*\.[0-9]*\).*/v\1/p' /etc/alpine-release)
-arch=$(apk --print-arch)
+arch=${ARCH:-$(apk --print-arch)}
 for r in main community; do
 	wget -qO- "https://dl-cdn.alpinelinux.org/alpine/$rel/$r/$arch/APKINDEX.tar.gz" | tar -xzO APKINDEX
 done > "$t/alpine"

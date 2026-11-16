@@ -12,7 +12,13 @@ its send stream). Most of GlassineOS's own software isn't packaged yet either, s
 
 ```
 alpine → glassine-common → eink → device-<name> → finish → validation → base-export
+alpine → glassine-common → device-uefi-pc → finish → validation → base-export   (x86-64)
 ```
+
+Two architectures: the Note Air's chain (and `device-example`) is arm64's, the generic
+x86-64 UEFI PC's (`device-uefi-pc`) x86-64's. The same Dockerfile builds both; the
+architecture is `--platform` (`linux/arm64`, `linux/amd64`), and a stage built for both
+keeps a lock for each (below).
 
 | Stage | Holds |
 |---|---|
@@ -20,6 +26,7 @@ alpine → glassine-common → eink → device-<name> → finish → validation 
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session and compressed swap with background-app parking (both enabled at boot) |
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration, and its `targets/onyx-noteair/board.conf` as `/etc/glassine-bootimg/board.conf` (the board keys the booted system reads) |
+| `device-uefi-pc` | a generic x86-64 PC that boots by UEFI, on `glassine-common` (no e-ink): the EFI system partition's tools (`dosfstools`), the firmware's boot entries (`efibootmgr`), and the power button (busybox's `acpid`, enabled at boot). Its kernel is `kernel-lts` (below), which also carries the firmware: the base has none |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
 | `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing. It reads the final tree, after `finish`, not each stage: a file added in one stage and removed in a later one isn't seen |
@@ -36,7 +43,8 @@ A stage lives in `stages/<stage>/`:
 | File | What |
 |---|---|
 | `packages` | plain package names, one per line |
-| `lock` | the whole installed set after this stage, as `name=version` |
+| `lock` | the whole installed set after this stage on arm64, as `name=version` |
+| `lock.x86_64` | the same on x86-64, for a stage built there (`alpine`, `glassine-common`, `device-uefi-pc`, `initramfs`, `kernel-lts`) |
 | `rootfs/` | files copied over the tree (any stage). None may belong to a package |
 | `expect` | a device stage's values its finished tree must hold, `FILE KEY=VALUE` per line (the file read as its programs read it); the validation stage checks them. The Note Air's: the partitions and the userdata reserve in `/etc/glassine/deploy.conf` |
 
@@ -59,7 +67,13 @@ refresh, on any difference (a package the stage pulls in that the lock lacks, a 
 line nothing needs any more). The lock is also an input of its stage, so a refreshed
 lock rebuilds that stage and the ones after it.
 
-    scripts/lock.sh                   # rebuild from scratch, rewrite every lock
+    scripts/lock.sh                   # rebuild from scratch, rewrite every arm64 lock
+    scripts/lock.sh --arch x86_64     # the same for x86-64: every lock.x86_64
+
+`scripts/apk-stage.sh` reads the lock of the architecture it runs on (`apk --print-arch`):
+`lock` on aarch64, `lock.<arch>` elsewhere, and fails naming the file when the stage has
+none. Each architecture refreshes on its own, natively (through QEMU elsewhere), so a
+refresh of one never moves the other's versions.
 
 A locked version must still be offered. Our repository keeps every version for 30 days
 after a newer one replaces it, and every version `main`'s locks name (GlassineOS/packages,
@@ -72,12 +86,14 @@ applies.) A refresh upgrades those too, so a lock never keeps an outdated versio
 because the Alpine image carries it; a check build then installs the newer locked version
 over the image's.
 
-The `lock-refresh` workflow refreshes every day on an arm64 runner and keeps one pull
+The `lock-refresh` workflow refreshes every day, arm64's locks on an arm64 runner and
+x86-64's on an x86-64 runner (a failed x86-64 refresh leaves its locks as they were and
+says so in the pull request; arm64's goes on), and keeps one pull
 request (branch `lock-refresh`) with the changed packages: on Mondays for any change, and
 on any day when a change brings a fix from Alpine's security database or when a version
 the current locks name is no longer offered (the build is broken until it merges). It
 can also be started by hand. `scripts/lock-diff.sh` writes the pull request's
-description. It pushes and opens the pull request with the token of the
+description, once per architecture. It pushes and opens the pull request with the token of the
 `glassine-lock-refresh` GitHub App (variable `LOCK_REFRESH_APP_CLIENT_ID`, secret
 `LOCK_REFRESH_APP_KEY`), so the pull request gets its checks. Without the app it falls
 back to the workflow's own token, whose push and pull request start no checks; it then
@@ -128,7 +144,13 @@ One stage on its own:
 
     docker buildx build --platform linux/arm64 -o type=tar,dest=base.tar .
 
-builds the default device's tree (`--build-arg DEVICE=<name>` for another). On an
+builds the default device's tree (`--build-arg DEVICE=<name>` for another).
+
+    docker buildx build --platform linux/amd64 --build-arg DEVICE=uefi-pc -o type=tar,dest=base.tar .
+
+builds the x86-64 UEFI PC's. `scripts/build` doesn't build that target yet: it makes an
+Android boot image and a device tree, which a PC has neither of; how a PC selects its
+deployment is GlassineOS/boot's spec 010. On an
 amd64 computer, arm64 runs through QEMU (`docker run --privileged --rm
 tonistiigi/binfmt --install arm64` once). Keep to the tar export: image exports drop
 `user.*` extended attributes.
@@ -157,6 +179,8 @@ from `stages/device-onyx-noteair/expect`) and select the first deployment, which
 and is accepted. Its header says what differs from the device (the kernel, the base).
 
 ## Kernel and device trees
+
+(For the x86-64 PC's kernel, see "The x86-64 kernel" below.)
 
 Built apart from the root file system, to the contract in GlassineOS/boot's
 `docs/kernel-artifacts.md`. A kernel change doesn't rebuild a base, and a base change
@@ -207,6 +231,55 @@ digest, so a new builder starts from an empty one.
 
 The `kernel` workflow builds and checks these on changes to the kernel side; started by
 hand it can also run the reproducibility check.
+
+## The x86-64 kernel
+
+    docker buildx build --platform linux/amd64 --build-arg KERNEL=lts --target kernel-export -o type=local,dest=out .
+
+`kernel-lts` installs Alpine's `linux-lts` as a package, at the version its
+`lock.x86_64` names, with the `linux-firmware` subpackages for common PC hardware (GPUs
+of AMD and Intel, Wi-Fi and Bluetooth of Intel, Qualcomm Atheros, Realtek, Broadcom,
+Cypress and MediaTek, Realtek's Ethernet; `stages/kernel-lts/packages` lists them) and
+the CPU microcode (`linux-firmware-amd-ucode`, `amd-ucode`, `intel-ucode`). Decision
+0016: firmware published for redistribution, as locked distribution packages, never
+committed files. `scripts/kernel-package.sh` lays it out as kernel-export's
+`modules/<release>/`: the modules and depmod's files, the image as `vmlinuz` (the EFI
+stub), `firmware/`, `microcode/` and `kernel.manifest`.
+- **firmware/** is what the packages installed in `/lib/firmware` (about 261 MB, already
+  zstd-compressed by Alpine; a package's symlinks become hard links), bound on
+  `/lib/firmware/updates` at boot like any kernel's. The packages carry no license
+  files, so `firmware-licenses-pc` adds them from upstream at the packages' own tag
+  (checked against its pinned commit): `WHENCE` (which license covers which file) and
+  every license file at the top of the tree, plus the Debian copyright files of the two
+  Raspberry Pi sources Alpine adds to `brcm/` and `cypress/` (pinned by checksum). The build fails when the packages' version isn't
+  that tag (`LINUX_FIRMWARE_TAG`), so a lock refresh that moves `linux-firmware` needs
+  the new tag's licenses. `kernel.manifest`'s `firmware` lists every file
+  (`name@sha256-16`; a space in a name as `%20`, a `%` as `%25`), as a compiled
+  kernel's does.
+- **microcode/** holds the early microcode archives (`intel-ucode.img`,
+  `amd-ucode.img`) and their licenses. The kernel loads microcode only early, from an
+  uncompressed archive in front of the initramfs; nothing puts them there yet (the
+  loader's job).
+- NVIDIA's firmware (nouveau) isn't included yet.
+
+Unlike a kernel compiled here, the release is the package's own (`6.18.63-0-lts`),
+`source=` names the package and its version, there is no builder, layout or
+configuration hash, and `scripts/kernel-check` (an arm64 compile's checks) doesn't
+apply. The release doesn't follow the firmware: a lock refresh that moves only
+`linux-firmware` gives a different `firmware/` (and `kernel.manifest`) under the same
+release name.
+
+`scripts/test-boot-qemu-x86_64.sh` (CI: boot-qemu's `boot-qemu-x86_64` job, with KVM)
+boots the PC's base, this kernel and the initramfs built for x86-64 in
+`qemu-system-x86_64` under UEFI firmware (OVMF starts the kernel's EFI stub;
+`-kernel`/`-initrd`, no boot loader) through boot's outside-base harness, the same
+lifecycle and the same `QTEST DONE` as the arm64 test, and checks that every boot
+started under UEFI and loaded all of its boot modules. The kernel set's initramfs is the
+release's initramfs, a board archive (the harness's partition names) and the kernel's
+boot-modules archive (boot's `build-boot-modules.sh`: `linux-lts` builds its disk and
+file system drivers as modules). No stage here assembles a PC's kernel set, so the test
+does; on a PC that is the loader's and the installer's (GlassineOS/boot spec 010). Its
+header says what else differs from a real PC.
 
 ## The registry
 
