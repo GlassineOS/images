@@ -151,6 +151,12 @@ check "build manifest: each export's key and where it came from (specs/003 FR-00
 check "pinned clean build: not a trial" "[ \"\$(v trial '$R1/manifest')\" = no ] && [ -z \"\$(v trial_reasons '$R1/manifest')\" ]"
 check "uuid = received_uuid, both set, in the build and the base record" "[ -n \"\$(v uuid '$R1/manifest')\" ] && [ \"\$(v uuid '$R1/manifest')\" = \"\$(v received_uuid '$R1/manifest')\" ] && [ \"\$(v uuid '$B/record')\" = \"\$(v uuid '$R1/manifest')\" ] && [ \"\$(v build '$B/record')\" = 20260101-100000 ]"
 check "locked stages only (middle has no lock)" "! grep -q '^lock.middle=' '$R1/manifest'"
+# one release, one tree (scripts/kernel-release-check) against the manifest materialize wrote
+python3 -I "$P/scripts/kernel-release-check" "$K" --artifacts "$A" --no-registry > "$O/krc.out" 2>&1 && rc=0 || rc=$?
+check "release check: the export against the modules manifest materialize wrote: the same" "[ $rc = 0 ] && grep -q 'the same as $A/modules/$REL.manifest' '$O/krc.out'"
+rm -rf "$O/k2"; cp -a "$K" "$O/k2"; echo ko2 > "$O/k2/modules/$REL/kernel/x.ko"
+python3 -I "$P/scripts/kernel-release-check" "$O/k2" --artifacts "$A" --no-registry > "$O/krc2.out" 2>&1 && rc=0 || rc=$?
+check "release check: another tree under the release: refused" "[ $rc = 1 ] && grep -q 'holds another tree' '$O/krc2.out'"
 TM=$B/tree.manifest
 check "FR-005 in the content manifest: owner, setuid, sticky, symlinks, hardlinks" "grep -qx 'etc/owned - 1000:1000 0644 5 .*' '$TM' && grep -q '^usr/bin/su - 0:0 4755 ' '$TM' && grep -qx 'tmp d 0:0 1777 0 -' '$TM' && grep -qx 'usr/bin/link l 0:0 0777 0 -> su' '$TM' && grep -qx 'usr/bin/dangling l 0:0 0777 0 -> /nonexistent/target' '$TM' && grep -q '^usr/lib/a .* =usr/lib/a\$' '$TM' && grep -q '^usr/lib/b .* =usr/lib/a\$' '$TM'"
 check "FR-005 in the content manifest: FIFO, device node, capability, user xattr" "grep -qx 'run/fifo p 0:0 0644 0 -' '$TM' && grep -qx 'dev/null c 0:0 0644 0 dev 1,3' '$TM' && grep -q '^usr/bin/ping .* security.capability=' '$TM' && grep -q '^usr/lib/note .* user.glassine.test=68656c6c6f\$' '$TM'"

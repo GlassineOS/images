@@ -100,8 +100,35 @@ back to the workflow's own token, whose push and pull request start no checks; i
 starts `build`, `boot-qemu` and `safety` on the branch itself (their results show on the
 commit and in Actions; closing and reopening the pull request puts them in its checks).
 
+**A distribution's kernel moves its firmware with it.** The x86-64 kernel (`kernel-lts`)
+is Alpine's `linux-lts` package, and its release (`uname -r`) names only that package's
+version, not the firmware and microcode packages that go in its tree. So a tree would
+change under one release if they moved alone, which GlassineOS/boot's
+`docs/kernel-artifacts.md` ("A distribution's kernel") forbids. `scripts/lock.sh --arch
+x86_64` therefore keeps every `linux-firmware-*`, `amd-ucode` and `intel-ucode` line of
+`stages/kernel-lts/lock.x86_64` at its locked version unless `linux-lts` moves in the same
+refresh (a new package revision counts: the release carries it); the other packages move
+as usual (`scripts/kernel-lock.sh hold`). When `linux-lts` moves, they all move, and
+`LINUX_FIRMWARE_TAG` and `LINUX_FIRMWARE_TAG_COMMIT` in the `Dockerfile` follow them:
+Alpine's `linux-firmware` version is upstream's tag plus Alpine's revision
+(`20260519-r0` is tag `20260519`), and the commit is the tag's, read from upstream
+(`scripts/kernel-lock.sh tag`). That step fails, changing nothing, when the version isn't
+of that form, upstream has no such tag, or Alpine's APKBUILD has moved the Raspberry Pi
+sources (`RPI_BLUEZ_FIRMWARE`, `RPI_FIRMWARE_NONFREE` and their checksums need a hand).
+The refresh build only records the packages; the tree is laid out (and the tag checked)
+by the check build. The pull request lists the held packages under "Held for the kernel",
+with the fixes their newer versions would bring.
+
+Alpine keeps only the newest version of a package, and its `linux-firmware` isn't in our
+repository, so a held version is no longer offered as soon as Alpine moves it: the PC
+kernel's build then fails, naming the lines, until `linux-lts` moves and the firmware
+moves with it (the refresh's pull request is marked "locked versions gone"). Keeping the
+held versions in GlassineOS/packages doesn't fit: the locked firmware is about 270 MiB
+a version, against x86-64's 64 MiB share of that site's 900 MiB.
+
 `scripts/test-apk-stage.sh` tests the install and the comparison in an Alpine container
-on a made-up repository.
+on a made-up repository; `scripts/test-kernel-lock.sh` tests the hold, the tag move and
+the release check on made-up locks and trees.
 
 ## Building
 
@@ -265,9 +292,22 @@ stub), `firmware/`, `microcode/` and `kernel.manifest`.
 Unlike a kernel compiled here, the release is the package's own (`6.18.63-0-lts`),
 `source=` names the package and its version, there is no builder, layout or
 configuration hash, and `scripts/kernel-check` (an arm64 compile's checks) doesn't
-apply. The release doesn't follow the firmware: a lock refresh that moves only
-`linux-firmware` gives a different `firmware/` (and `kernel.manifest`) under the same
-release name.
+apply. The release doesn't name the firmware, so the firmware and microcode packages
+move only together with `linux-lts` (the lock refresh holds them otherwise; "Locks"
+above), and a tree never changes under one release.
+
+**One release, one tree.** `scripts/kernel-release-check KERNEL_DIR` compares the
+export's tree (the sha256 of the content manifest of `modules/<release>/`, owners as
+0:0, hard links not counted) with every published tree of the same release, and fails,
+naming both, when they differ: the registry's `images-kernel:release-<release>`
+(docs/registry.md, "Releases"), and with `--artifacts DIR` the artifacts folder's
+`modules/<release>.manifest` and the newest release folder of each target (which must
+have that manifest when it carries the release). `scripts/build` runs it on every build
+(the registry unless `--no-registry`), CI on every kernel export (`kernel` and `build`
+workflows), and `scripts/registry publish` refuses a kernel whose release is published
+with another tree. It applies to every kernel; a compiled one's release already follows
+its firmware (`cfg6`). The x86-64 kernel isn't published to the registry yet (no x86-64
+target), so for it the check compares with artifacts folders only, until it is.
 
 `scripts/test-boot-qemu-x86_64.sh` (CI: boot-qemu's `boot-qemu-x86_64` job, with KVM)
 boots the PC's base, this kernel and the initramfs built for x86-64 in

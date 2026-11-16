@@ -154,10 +154,14 @@ RUN --mount=type=bind,source=stages/kernel-lts,target=/run/stage \
     --mount=type=bind,source=scripts/apk-stage.sh,target=/run/apk-stage.sh \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
+# A lock refresh (LOCK=refresh) only records what the stage installed: the newest
+# packages, whose firmware may not be the licenses' tag yet (scripts/lock.sh moves the
+# tag afterwards, scripts/kernel-lock.sh), so the tree is laid out only on a check build.
 ARG LINUX_FIRMWARE_TAG
 RUN --mount=type=bind,source=scripts/kernel-package.sh,target=/run/kernel-package.sh \
     --mount=type=bind,from=firmware-licenses-pc,source=/out,target=/run/firmware-licenses \
-    FIRMWARE_TAG=$LINUX_FIRMWARE_TAG sh /run/kernel-package.sh linux-lts /boot/vmlinuz-lts
+    if [ "$LOCK" = refresh ]; then mkdir -p /out; \
+    else FIRMWARE_TAG=$LINUX_FIRMWARE_TAG sh /run/kernel-package.sh linux-lts /boot/vmlinuz-lts; fi
 
 FROM kernel-${KERNEL} AS kernel
 FROM scratch AS kernel-export

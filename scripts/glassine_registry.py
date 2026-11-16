@@ -9,6 +9,7 @@ one. Only docker buildx talks to the registry.
     lookup(export, key, run)                 published under key? digest and annotations
     pull(export, ref, dest, platform, ...)   the export's files at ref (pinned by digest) into dest
     publish(export, key, src, ...)           push src's files as <package>:<key>
+    lookup_release(release)                  the kernel tree published under a release, if any
     contexts(export, keys, pulled)           --build-context flags for the pulled exports it reads
     plan(keys, use_registry)                 per export: pull <ref>@<digest>, or build here and why
     git_fetch(gitdir, url, commit, step)     a fetch of a git input with a time limit and tries
@@ -95,6 +96,55 @@ def lookup(export, key, timeout=LOOKUP_TIMEOUT):
     return {'state': 'published', 'ref': f'{package(export)}@{digest}', 'digest': digest, 'annotations': ann}
 
 
+RELEASE_TAG = 'release-'
+
+
+def release_ref(release):
+    """<prefix>/images-kernel:release-<release>: the first kernel export published under
+    that release (docs/registry.md, "Releases"); None when the release can't be a tag."""
+    tag = RELEASE_TAG + release
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}', tag):
+        return None
+    return f'{package("kernel-export")}:{tag}'
+
+
+def lookup_release(release, timeout=LOOKUP_TIMEOUT):
+    """The kernel tree published under release: {'state': 'published', 'tree', 'ref'} with
+    the release.tree annotation (scripts/kernel-release-check's tree id), or {'state':
+    'missing' | 'error', 'why'} as lookup answers."""
+    ref = release_ref(release)
+    if ref is None:
+        return {'state': 'error', 'why': f'release {release!r} isn\'t a registry tag'}
+    try:
+        p = subprocess.run(['docker', 'buildx', 'imagetools', 'inspect', '--raw', ref],
+                           capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {'state': 'error', 'why': f'registry unreachable: no answer in {timeout} s'}
+    except OSError as e:
+        return {'state': 'error', 'why': f'registry unreachable: {e}'}
+    err = p.stderr.decode(errors='replace')
+    if p.returncode != 0:
+        low = err.lower()
+        if re.search(r'not found|manifest unknown|name unknown|404', low):
+            return {'state': 'missing', 'why': 'no kernel published under this release'}
+        if re.search(r'unauthorized|denied|forbidden|401|403', low):
+            return {'state': 'missing', 'why': 'not published, or not public (the registry refused to read it)'}
+        return {'state': 'error', 'why': f'registry unreachable: {_last(err) or "exit " + str(p.returncode)}'}
+    try:
+        man = json.loads(p.stdout)
+    except ValueError:
+        return {'state': 'error', 'why': 'the registry gave no manifest'}
+    ann = {k[len(ANNOTATION):].lower(): v for k, v in (man.get('annotations') or {}).items()
+           if k.lower().startswith(ANNOTATION)}
+    if ann.get('export') != 'kernel-export' or ann.get('release') != release \
+            or not re.fullmatch(r'[0-9a-f]{64}', ann.get('release.tree', '')):
+        return {'state': 'error', 'why': f'{ref}: its annotations name export {ann.get("export")!r}, '
+                                          f'release {ann.get("release")!r}, tree {ann.get("release.tree")!r}'}
+    digest = 'sha256:' + hashlib.sha256(p.stdout).hexdigest()
+    return {'state': 'published', 'tree': ann['release.tree'], 'key': ann.get('key', ''),
+            'ref': f'{package("kernel-export")}@{digest}'}
+
+
 def trees(annotations):
     """{<commit ARG in upper case>: tree} from a published export's annotations (the
     registry may give annotation names in lower case)."""
@@ -178,12 +228,13 @@ def pull(export, ref, dest, platform, work, run=simple_run, timeout=PULL_TIMEOUT
     return f'pulling {export} from {ref} failed after {tries} tries: {why}'
 
 
-def publish(export, key, src, platform, work, annotations=None, run=simple_run, timeout=1800):
+def publish(export, key, src, platform, work, annotations=None, run=simple_run, timeout=1800, tags=()):
     """Push the files of src as <package>:<key>, unless that key is published already
     (it is never published again). One layer, the files as they are in src (modes,
     times), no provenance or SBOM, so the tag is a single manifest. annotations go on
-    the manifest beside format, export and key. Returns ('published' | 'present',
-    <ref>@<digest>), or raises RuntimeError."""
+    the manifest beside format, export and key; tags are further tags of the same
+    manifest, pushed with it (a kernel's release-<release>). Returns ('published' |
+    'present', <ref>@<digest>), or raises RuntimeError."""
     have = lookup(export, key)
     if have['state'] == 'published':
         return 'present', have['ref']
@@ -194,7 +245,8 @@ def publish(export, key, src, platform, work, annotations=None, run=simple_run, 
     with open(df, 'w') as f:
         f.write('FROM scratch\nCOPY . /\n')
     ann = {'format': FORMAT, 'export': export, 'key': key, **(annotations or {})}
-    out = [f'type=image,name={package(export)}:{key},push=true,oci-mediatypes=true',
+    names = ','.join([f'{package(export)}:{key}'] + [f'{package(export)}:{t}' for t in tags])
+    out = [f'type=image,"name={names}",push=true,oci-mediatypes=true',
            f'annotation.org.opencontainers.image.source={SOURCE}']
     out += [f'annotation.{ANNOTATION}{k}={v}' for k, v in sorted(ann.items())]
     rc, log = run(['docker', 'buildx', 'build', '--progress=plain', '--no-cache', '--platform', platform,
