@@ -32,6 +32,21 @@ harness's made-up one:
      boot-success step's healthy mark (boot's glassine-loader-mark, in the base's
      glassine-deploy) cleared the loader's count, and the power-off's shutdown step
      wrote nothing more.
+  5. the loader's limit, end to end (with the release's loader only; QTEST_LIMIT=0
+     skips it). A test script in the deployment's upper layer (local.d, written from the
+     host and removed after its one run) installs a second kernel set with the running
+     system's own glassine-bootimg (the base command line + the console, so its id
+     differs) and reboots into its trial: boot 3, an unmarked start that ends in an
+     orderly reboot, so the shutdown step takes it out of the count (unmarked 0 again).
+     Boot 4: the trial, which glassine-bootimg-promote accepts: default = the new set,
+     previous = the installer's. Boots 5 to 7: the new default, stopped (QEMU quit)
+     before the boot-success step can accept it: the loader counts 1, 2, 3. Boot 8: at
+     3, the loader starts the previous set (started_why=limit); it is accepted, so the
+     healthy mark and glassine-bootimg rollback --limit make it the default again:
+     default = the installer's set, previous = the failed one, unmarked=0, and
+     state/kernel lists the failed kernel. Boot 9: the loader starts the new default
+     with started_why=default; powered off before the accept (a real poweroff after an
+     unmarked start), the shutdown step takes it out of the count again (unmarked=0).
 
   Without a release loader, or with --direct-kernel (QTEST_DIRECT_KERNEL=1): step 3 only
   shows the firmware starting the entry, and OVMF then starts the set's vmlinuz with its
@@ -250,9 +265,10 @@ def loader_record(cw, disk, bootp):
     return best or {}
 
 
-def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, then=0):
+def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, then=0, quit=False):
     """One start of the kernel set; QEMU ends by itself (-no-reboot), or, `then` seconds
-    after `until` is on the console, the guest's power button is pressed (QMP).
+    after `until` is on the console, the guest's power button is pressed (QMP), or with
+    `quit` QEMU stops at once (a start that ends without any shutdown).
     `vmlinuz` None: from the disk alone, the firmware's boot entry (the loader), on the
     machine the install ran on (the installer harness's devices, so the entry's device
     path holds); else OVMF starts `vmlinuz` directly (-kernel/-initrd)."""
@@ -279,7 +295,7 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
             time.sleep(then)
             s = socket.socket(socket.AF_UNIX)
             s.connect(str(qmp))
-            for m in ({'execute': 'qmp_capabilities'}, {'execute': 'system_powerdown'}):
+            for m in ({'execute': 'qmp_capabilities'}, {'execute': 'quit' if quit else 'system_powerdown'}):
                 s.sendall(json.dumps(m).encode() + b'\n')
                 time.sleep(1)
             s.close()
@@ -293,15 +309,168 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
     for x in text.splitlines():
         if any(k in x for k in ('glassine-first-start:', 'glassine-deploy-accept:', 'glassine-boot:', 'glassine-switch:',
                                 'efi: EFI v', 'boot modules:', 'LOADER_START', 'START_KERNEL', 'SECURE_BOOT',
-                                'MESSAGE ', 'PANIC ', 'StartImage')):
+                                'MESSAGE ', 'PANIC ', 'StartImage', 'glassine-loader-mark:', 'qtest-limit:')):
             print('    ' + x.strip(), flush=True)
     return g.p.returncode, text
+
+
+QTEST_SCRIPT = r"""#!/bin/sh
+# test-pc-release-qemu's limit run: a second kernel set, then the reboot into its trial
+# the console, not the kernel log: once the system is up, the kernel log isn't on it
+say() { echo "qtest-limit: $*" > /dev/console; }
+b=/etc/glassine-bootimg/board.conf
+grep -q '^CMDLINE=.*console=ttyS0' "$b" || sed -i 's/^CMDLINE="\(.*\)"$/CMDLINE="\1 console=ttyS0 loglevel=7"/' "$b"
+say "board CMDLINE: $(grep '^CMDLINE=' "$b")"
+n=0
+while :; do
+    out=$(glassine-bootimg install "$(uname -r)" 2>&1); rc=$?
+    [ $rc = 6 ] && [ $n -lt 120 ] || break
+    sleep 2; n=$((n + 2))
+done
+say "install: exit $rc: $(echo "$out" | tail -n 4 | tr '\n' ' ')"
+[ $rc = 0 ] || exit 0
+# the reboot after this service's start returned (it hands the reboot to init)
+setsid sh -c 'sleep 5; echo "qtest-limit: reboot-test" > /dev/console; out=$(glassine-bootimg reboot-test 2>&1) || echo "qtest-limit: reboot-test failed: $out" > /dev/console' </dev/null >/dev/null 2>&1 &
+"""
+
+
+def upper(disk, datap, dep, put=None, drop=()):
+    """Files in deployment `dep`'s live upper layer (switch/) on glassine-userdata, read
+    by the overlay at its next mount: put = {path: (bytes, mode) or ('->', target)}."""
+    l = loop(disk, datap, ro=False)
+    try:
+        os.makedirs('/u', exist_ok=True)
+        sh('mount', '-t', 'ext4', l, '/u')
+        try:
+            up = Path(f'/u/media/glassine/deployments/{dep}/switch')
+            for rel, v in (put or {}).items():
+                f = up / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                if f.is_symlink() or f.exists():
+                    f.unlink()
+                if v[0] == '->':
+                    f.symlink_to(v[1])
+                else:
+                    f.write_bytes(v[0])
+                    f.chmod(v[1])
+            for rel in drop:
+                (up / rel).unlink(missing_ok=True)
+        finally:
+            sh('umount', '/u')
+    finally:
+        sh('losetup', '-d', l)
+
+
+def pool_put(disk, sysp, put):
+    """Files on glassine-system (the pool's top level), written while the guest is off:
+    put = {path: bytes}."""
+    l = loop(disk, sysp, ro=False)
+    try:
+        os.makedirs('/s', exist_ok=True)
+        sh('mount', '-t', 'btrfs', l, '/s')
+        try:
+            for rel, b in put.items():
+                f = Path('/s') / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(b)
+        finally:
+            sh('umount', '/s')
+    finally:
+        sh('losetup', '-d', l)
+
+
+def kernel_state(disk, sysp):
+    """state/kernel on glassine-system, read-only."""
+    l = loop(disk, sysp)
+    try:
+        os.makedirs('/s', exist_ok=True)
+        sh('mount', '-t', 'btrfs', '-o', 'ro', l, '/s')
+        try:
+            return kv('/s/state/kernel')
+        finally:
+            sh('umount', '/s')
+    finally:
+        sh('losetup', '-d', l)
+
+
+def limit_run(args, cw, disk, bootp, sysp, datap, dep, kid, vars_fd):
+    """Step 5: the loader's limit, end to end (see the module's docstring)."""
+    def rec(n):
+        r = loader_record(cw, disk, bootp)
+        print(f'    loader record after boot {n}: seq={r.get("seq")} unmarked={r.get("unmarked")} default={r.get("default")} '
+              f'previous={r.get("previous")} started={r.get("started")} started_why={r.get("started_why")} '
+              f'request={r.get("request")} trial={r.get("trial")}', flush=True)
+        return r
+
+    # glassine-bootimg install takes the initramfs from the pool's boot/initramfs/, which
+    # `glassine-deploy receive --boot` fills on a device. A release pool has no boot/
+    # files and receive --boot doesn't exist yet, so this test supplies the release's
+    # initramfs and its build manifest itself: a fresh install can't do this step alone.
+    arts = json.loads((args.release / 'release.json').read_text())['artifacts']
+    ird = arts['initramfs']['identity']
+    irm = args.initramfs_dir / f'{ird}.manifest' if args.initramfs_dir else None
+    if not irm or not irm.is_file():
+        res(False, f'step 5: no manifest of initramfs {ird} (--initramfs-dir: the build\'s boot/initramfs/; QTEST_LIMIT=0 skips the step)')
+        return
+    pool_put(disk, sysp, {f'boot/initramfs/{ird}.cpio.gz': (args.release / arts['initramfs']['file']).read_bytes(),
+                          f'boot/initramfs/{ird}.manifest': irm.read_bytes()})
+    upper(disk, datap, dep, {'etc/local.d/qtest-limit.start': (QTEST_SCRIPT.encode(), 0o755),
+                             'etc/runlevels/default/local': ('->', '/etc/init.d/local')})
+    # boot 3: the second set installed, then the reboot into its trial (orderly)
+    rc, text = boot_set(args, cw, 3, disk, None, None, '', vars_fd)
+    upper(disk, datap, dep, drop=('etc/local.d/qtest-limit.start',))
+    res(f'START_KERNEL {kid} ' in text, f'boot 3: the loader started the default set {kid}')
+    res('qtest-limit: install: exit 0' in text and 'reboot-test failed' not in text,
+        'boot 3: glassine-bootimg installed a second kernel set and rebooted into its trial')
+    r = rec(3)
+    k2 = r.get('trial', '')
+    res(bool(k2) and k2 != kid and r.get('request') == 'trial', f'after boot 3: the record names the new set {k2} as the trial, request=trial')
+    # the shutdown step's line (its service's stop writes it on the console)
+    res(r.get('unmarked') == '0' and 'this start taken out of the count (unmarked 1 -> 0)' in text,
+        f'after boot 3: the unmarked start ended in an orderly reboot, the shutdown step took it out of the count (unmarked={r.get("unmarked")})')
+    if not k2:
+        return
+    # boot 4: the trial, promoted
+    rc, text = boot_set(args, cw, 4, disk, None, None, '', vars_fd, until='glassine-deploy-accept: checking', then=args.accept_wait)
+    res(f'START_KERNEL {k2} ' in text, f'boot 4: the loader started the trial set {k2}')
+    r = rec(4)
+    res(r.get('default') == k2 and r.get('previous') == kid and not r.get('trial') and r.get('unmarked') == '0',
+        f'after boot 4: the trial promoted: default {r.get("default")}, previous {r.get("previous")}, unmarked={r.get("unmarked")}')
+    if r.get('default') != k2:
+        return
+    # boots 5 to 7: the new default, never accepted (stopped before the boot-success step)
+    for n in (5, 6, 7):
+        rc, text = boot_set(args, cw, n, disk, None, None, '', vars_fd, until='glassine-deploy-accept: checking', then=5, quit=True)
+        r = rec(n)
+        res(f'START_KERNEL {k2} ' in text and r.get('started') == k2 and r.get('started_why') == 'default'
+            and r.get('unmarked') == str(n - 4),
+            f'boot {n}: the default set {k2} started, stopped before its accept: unmarked={r.get("unmarked")} (want {n - 4})')
+    # boot 8: the limit: the previous set, accepted, the rollback
+    rc, text = boot_set(args, cw, 8, disk, None, None, '', vars_fd, until='glassine-deploy-accept: checking', then=args.accept_wait)
+    res(f'START_KERNEL {kid} ' in text, f'boot 8: at the limit the loader started the previous set {kid}')
+    r = rec(8)
+    res(r.get('started') == kid and r.get('started_why') == 'limit', f'after boot 8: started={r.get("started")} started_why={r.get("started_why")} (limit)')
+    res(r.get('default') == kid and r.get('previous') == k2 and r.get('unmarked') == '0',
+        f'after boot 8: accepted: default = the previous set {r.get("default")}, previous = the failed {r.get("previous")}, unmarked={r.get("unmarked")}')
+    k = kernel_state(disk, sysp)
+    print(f'    state/kernel after boot 8: {k}', flush=True)
+    res(k.get('current_img') == kid and k.get('previous_img') == k2 and k.get('failed_img') == k2 and not k.get('writing'),
+        'after boot 8: state/kernel: the previous kernel current again, the failed one listed as failed')
+    # boot 9: the new default, by default; powered off before its accept
+    rc, text = boot_set(args, cw, 9, disk, None, None, '', vars_fd, until='glassine-deploy-accept: checking', then=5)
+    res(f'START_KERNEL {kid} ' in text, f'boot 9: the loader started the new default set {kid}')
+    r = rec(9)
+    res(r.get('started') == kid and r.get('started_why') == 'default', f'after boot 9: started={r.get("started")} started_why={r.get("started_why")} (default)')
+    res(rc == 0 and r.get('unmarked') == '0' and 'this start taken out of the count (unmarked 1 -> 0)' in text,
+        f'after boot 9: a poweroff before the accept: the shutdown step took the start out of the count (unmarked={r.get("unmarked")}, qemu exit {rc})')
 
 
 def main():
     ap = argparse.ArgumentParser()
     for a in ('installer', 'binary', 'release', 'work', 'cache'):
         ap.add_argument('--' + a, type=Path, required=True)
+    ap.add_argument('--initramfs-dir', type=Path, default=None,
+                    help="the build's boot/initramfs/ (its manifests): step 5 needs the release initramfs's")
     ap.add_argument('--boot-timeout', type=int, default=900)
     ap.add_argument('--direct-kernel', action='store_true', default=os.environ.get('QTEST_DIRECT_KERNEL') == '1',
                     help='start the kernel set with -kernel/-initrd, not through the release\'s loader')
@@ -437,6 +606,8 @@ def main():
               f'started={lr2.get("started")} started_why={lr2.get("started_why")}', flush=True)
         res(lr2.get('started') == kid, f'after boot 2: the loader record names the set it started ({lr2.get("started")})')
         res(lr2.get('unmarked') == '0', f'after boot 2: the accepted start marked healthy, unmarked=0 ({lr2.get("unmarked")})')
+        if os.environ.get('QTEST_LIMIT', '1') != '0':
+            limit_run(args, cw, disk, bootp, sysp, datap, dep, kid, vars_fd)
     for p in cw.glob('*.img'):
         p.unlink()
     print(f'test-pc-release-qemu: {len(FAILS)} failed' + ''.join(f'\n  {f}' for f in FAILS), flush=True)
