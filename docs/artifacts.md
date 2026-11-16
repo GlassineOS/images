@@ -148,7 +148,7 @@ taken. The manifest never enters a base.
 | `trial_reasons` | why it is a trial, space-separated: `local:<input>`, `arg:<NAME>` (differs from the Dockerfile's default; never for the commit of an input marked `local`, which `local:<input>` covers), `dirty`, `clean-unknown` |
 | `unmerged` | the inputs whose commits are not on their branch, space-separated; a local checkout's commit that its repository doesn't have (not pushed) is among them |
 | `locks` | the base manifest's `locks` |
-| `lock.<stage>` | sha256 of `stages/<stage>/lock`, for every locked stage the base and the boot image are built from |
+| `lock.<stage>` | sha256 of the stage's lock for the target's architecture (`stages/<stage>/lock` for arm64, `stages/<stage>/lock.x86_64` for x86-64), for every locked stage the base and the boot image are built from |
 | `arg.<NAME>` | every build argument in effect: the Dockerfile's defaults with the overrides applied (`DEVICE` is the target) |
 | `input.<input>.commit` | a git input's commit; `<input>` is its commit argument (`LINUX_SDM660`, `DTB_COMMIT`, `BOOT_COMMIT`) |
 | `input.<input>.tree` | that commit's tree (when no export built here fetched the commit, the tree a pulled export's annotation names, docs/registry.md) |

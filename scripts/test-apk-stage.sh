@@ -6,7 +6,9 @@
 # as a package the stage names), nothing is left in /tmp, the world names the
 # packages without a pin and matches a refresh build's, LOCK=refresh installs the
 # newest and upgrades what the stage starts with; refused with "refresh the locks": a lock line no repository offers (nothing
-# installed), a lock that misses a package the stage pulls in, a lock line nothing needs.
+# installed), a lock that misses a package the stage pulls in, a lock line nothing needs,
+# a stage with only the other architecture's lock (lock is aarch64's, lock.<arch> any
+# other's: the container's architecture picks).
 #   scripts/test-apk-stage.sh     exit 0 = all checks pass
 set -eu
 P=$(cd "$(dirname "$0")/.." && pwd)
@@ -33,9 +35,12 @@ cp -a /lib/apk/db /base-db; cp /etc/apk/world /base-world
 base=$(awk -F: "/^P:/{p=\$2} /^V:/{print p \"=\" \$2}" /lib/apk/db/installed)
 reset() { apk del -q app lib extra .glassine-lock >/dev/null 2>&1 || :
 	rm -rf /lib/apk/db; cp -a /base-db /lib/apk/db; cp /base-world /etc/apk/world; }
-# a stage directory: packages $1, lock = the base set + $2
+# the lock file of this architecture, and one of another
+LF=lock; OF=lock.x86_64
+[ "$(apk --print-arch)" = aarch64 ] || { LF=lock.$(apk --print-arch); OF=lock; }
+# a stage directory: packages $1, its lock = the base set + $2
 stage() { rm -rf /run/stage; mkdir -p /run/stage; echo "$1" > /run/stage/packages
-	printf "%s\n" $base $2 | LC_ALL=C sort > /run/stage/lock; }
+	printf "%s\n" $base $2 | LC_ALL=C sort > /run/stage/$LF; }
 run() { reset; sh /s/apk-stage.sh > /root/out 2>&1; }
 inst() { awk -F: "/^P:/{p=\$2} /^V:/{print p \"=\" \$2}" /lib/apk/db/installed | grep -qx "$1"; }
 
@@ -77,6 +82,11 @@ check "a lock line nothing needs: refused" "[ $rc != 0 ] && grep -q \"^-extra=1-
 stage "" "lib=1-r0"
 run && rc=0 || rc=$?
 check "a package dropped from the stage but still locked: refused" "[ $rc != 0 ] && grep -q \"^-lib=1-r0\" /root/out"
+
+stage app "app=1-r0 lib=1-r0"
+mv /run/stage/$LF /run/stage/$OF
+run && rc=0 || rc=$?
+check "only the other architecture'"'"'s lock: refused, naming the missing file" "[ $rc != 0 ] && grep -q \"no lock for this stage on .*($LF)\" /root/out && ! inst app=1-r0"
 
 [ "$fails" = 0 ] && echo "all checks pass" || { echo "$fails failed"; exit 1; }
 '

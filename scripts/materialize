@@ -353,12 +353,19 @@ def main(argv):
     # the pins (FR-016) and what this build changed against them (FR-017)
     over = dict(o['arg'])
     over['DEVICE'] = target
-    chain = glassine_pins.locked(glassine_pins.chain(dockerfile, target, over), stages_dir)
+    # the target's architecture picks its stages' lock files (lock, lock.x86_64)
+    tlines = read(os.path.join(repo, 'targets', target, 'target')).decode().splitlines()
+    arch = next((ln[5:] for ln in tlines if ln.startswith('arch=')), '') or 'arm64'
+    try:
+        lf = glassine_pins.lock_file(arch)
+    except ValueError as e:
+        raise Fail(f'{repo}/targets/{target}/target: {e}')
+    chain = glassine_pins.locked(glassine_pins.chain(dockerfile, target, over), stages_dir, arch)
     if not chain:
-        raise Fail(f'{dockerfile}: the chain of {target} has no stage with a lock')
-    locks = glassine_pins.locks_digest(chain, stages_dir)
-    all_locked = glassine_pins.locked(
-        glassine_pins.reachable(dockerfile, [glassine_pins.BASE_STAGE, 'boot-export'], over), stages_dir)
+        raise Fail(f'{dockerfile}: the chain of {target} has no stage with a lock ({lf})')
+    locks = glassine_pins.locks_digest(chain, stages_dir, arch)
+    all_locked = [(n, os.path.join(stages_dir, n, lf)) for n in glassine_pins.locked(
+        glassine_pins.reachable(dockerfile, [glassine_pins.BASE_STAGE, 'boot-export'], over), stages_dir, arch)]
     args = glassine_pins.build_args(dockerfile, over)
     defaults = glassine_pins.build_args(dockerfile, {'DEVICE': target})
     inputs = glassine_pins.branches(dockerfile)
@@ -454,8 +461,7 @@ def run(o, tar, kdir, target, adir, start, t_start, locks, all_locked, stages_di
              ('images_commit', info.get('images_commit', '')), ('images_clean', info.get('images_clean', '')),
              ('trial', 'yes' if why else 'no'), ('trial_reasons', ' '.join(why)),
              ('unmerged', info.get('unmerged', '')), ('locks', locks)]
-        m += [(f'lock.{s}', glassine_pins.sha256_file(os.path.join(stages_dir, s, 'lock')))
-              for s in all_locked]
+        m += [(f'lock.{s}', glassine_pins.sha256_file(path)) for s, path in all_locked]
         m += [(f'arg.{a}', v) for a, v in args.items()]
         for i, branch in inputs.items():
             m += [(f'input.{i}.commit', args.get(i, '')), (f'input.{i}.tree', info.get(f'input.{i}.tree', '')),
