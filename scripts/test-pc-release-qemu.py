@@ -18,7 +18,7 @@ harness's made-up one:
      assembled from the release's parts, the loader record, the splash, and one new
      firmware boot entry, first;
   3. the machine from its disk alone: the firmware starts that entry, the release's
-     loader (GlassineOS/loader: its LOADER_START line), which starts the default set
+     loader (GlassineOS/loader: its LOADER_START line with the pinned version), which starts the default set
      (START_KERNEL) from its record. One change to the installed disk, so that Linux
      reaches the serial log: the set's command line gets console=ttyS0 loglevel=7, with
      set.rec's check line and the loader record's default_rec made again (console_on);
@@ -38,7 +38,7 @@ harness's made-up one:
 
 Every result is a line "QTEST ok|FAIL ..."; exit 0 when none failed.
 """
-import argparse, hashlib, json, os, shutil, socket, subprocess, sys, time
+import argparse, hashlib, json, os, re, shutil, socket, subprocess, sys, time
 from pathlib import Path
 
 MIB, GIB = 1 << 20, 1 << 30
@@ -407,8 +407,10 @@ def main():
         vm, ir = None, None
     rc, text = boot_set(args, cw, 1, disk, vm, ir, cmdline, vars_fd)
     if not direct:
-        ver = s['doc']['artifacts']['boot-loader'].get('file', '')
-        res('LOADER_START x86_64' in text, f'boot 1: the release\'s loader ({ver}) started from the firmware\'s entry')
+        bl = s['doc']['artifacts']['boot-loader']
+        m = re.search(r'/download/v([^/]+)/', bl.get('url', ''))
+        want = 'LOADER_START x86-64' + (f' {m.group(1)}' if m else '')
+        res(want in text, f'boot 1: the release\'s loader ({bl.get("url") or bl.get("file")}) started from the firmware\'s entry: "{want}"')
         res(f'START_KERNEL {kid} ' in text, f'boot 1: the loader started the default set {kid}')
     res('efi: EFI v' in text, 'boot 1: started by UEFI firmware')
     res('first deployment' in text and 'selected' in text, 'boot 1: the first start selected the first deployment')
@@ -425,9 +427,9 @@ def main():
     res(rc == 0, f'boot 2: powered off by its power button (qemu exit {rc})')
     disk_check(2, disk, by, base_id, krel, dep)
     if not direct:
-        # nothing on a PC marks a start healthy yet (board.conf HANDOFF is empty: boot's
-        # glassine-kernel has no uefi hand-off), so each start counts as unmarked; at 3
-        # the loader would start the previous set. Shown, not checked.
+        # the unmarked count: whether the accepted start was marked healthy in the
+        # loader record (boot's uefi hand-off, in the base's glassine-deploy) is shown,
+        # not checked; unmarked, the loader starts the previous set at 3.
         lr2 = loader_record(cw, disk, bootp)
         print(f'QTEST info the loader record after boot 2: seq={lr2.get("seq")} unmarked={lr2.get("unmarked")} '
               f'started={lr2.get("started")} started_why={lr2.get("started_why")}', flush=True)
