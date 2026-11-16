@@ -10,6 +10,9 @@
 # aarch64, every device-* stage with no lock at all (a new device on another
 # architecture is named here once). A device's chain is its FROM line back to the Alpine
 # image (device-onyx-noteair: alpine, glassine-common, eink, device-onyx-noteair).
+# x86_64 also applies the kernel package's rule (scripts/kernel-lock.sh): kernel-lts's
+# firmware and microcode keep their locked versions unless linux-lts moves, and when it
+# moves, LINUX_FIRMWARE_TAG and LINUX_FIRMWARE_TAG_COMMIT in the Dockerfile follow them.
 # Needs docker buildx; builds natively on that architecture, through QEMU elsewhere.
 set -eu
 cd "$(dirname "$0")/.."
@@ -39,6 +42,10 @@ chain() {
 }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# the kernel package's lock before the refresh: its firmware and microcode keep their
+# versions unless the kernel package moves (scripts/kernel-lock.sh)
+kl=stages/kernel-lts/$lf
+[ $arch != x86_64 ] || [ ! -f "$kl" ] || cp "$kl" "$tmp/kernel-lts.old"
 b() { docker buildx build -q --platform $plat --build-arg LOCK=refresh "$@" . >/dev/null; }
 record() {	# record STAGE: its installed set from the tar export into its lock file
 	tar -xOf "$tmp/$1.tar" lib/apk/db/installed \
@@ -63,3 +70,10 @@ for s in $extra; do
 	b --no-cache-filter "$s" --target "$s" -o "type=tar,dest=$tmp/$s.tar"
 	record "$s"
 done
+# x86-64: the kernel package's firmware and microcode move only with it (GlassineOS/boot's
+# docs/kernel-artifacts.md, "A distribution's kernel"); when it moves, the licenses' tag
+# in the Dockerfile moves with them
+if [ $arch = x86_64 ]; then
+	sh scripts/kernel-lock.sh hold "$tmp/kernel-lts.old" "$kl" >&2
+	sh scripts/kernel-lock.sh tag "$kl" Dockerfile >&2
+fi

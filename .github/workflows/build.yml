@@ -79,6 +79,8 @@ jobs:
             grep -v '^firmware=' "$m"
             echo "firmware: $(sed -n 's/^firmware=//p' "$m" | wc -w) files; $(du -sh "${m%/*}/firmware" | cut -f1) in firmware/, $(du -sh "${m%/*}" | cut -f1) in all"
           done
+          # one release, one tree (the registry's release-<release>, once one is published)
+          scripts/kernel-release-check /tmp/kernel
       - name: The initramfs for x86-64 (boot's build-initramfs.sh, arch-neutral)
         run: |
           docker buildx build --progress=plain --platform linux/amd64 \

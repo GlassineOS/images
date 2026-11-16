@@ -97,6 +97,8 @@ jobs:
             m=/tmp/merged/$t; mkdir -p "$m"
             for e in kernel-export dtb-export initramfs-export boot-export; do cp -a "/tmp/out/$t/$e/." "$m/"; done
             scripts/kernel-check "$m"
+            # one release, one tree: the registry's release-<release>, if published
+            scripts/kernel-release-check "$m"
             scripts/boot-check "$m" "$t"
             /tmp/device-files/device-files "$m"
           done

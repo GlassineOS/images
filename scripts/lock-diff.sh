@@ -6,7 +6,9 @@
 # OLD_DIR and NEW_DIR hold lock files (any names); packages are compared across all of
 # them. OUT_FLAG (optional) gets "security" (a change brings a fix from Alpine's secdb),
 # "gone" (a version OLD_DIR names is no longer offered by Alpine's or our repository, so
-# builds of the current locks fail) or "routine". Runs in an Alpine container (needs apk
+# builds of the current locks fail; also a line NEW_DIR holds for the kernel package,
+# scripts/kernel-lock.sh, that is no longer offered) or "routine". Lines held for the
+# kernel get a table of their own, with the fixes their newer versions would bring. Runs in an Alpine container (needs apk
 # for version comparison, jq, wget). ARCH (optional): the architecture whose
 # repositories the locks are checked against, as apk names it (x86_64); default the
 # container's. Run once per architecture, each on that architecture's lock files only.
@@ -41,8 +43,21 @@ for r in main community; do
 done | jq -r '.packages[].pkg as $p | $p.secfixes // {} | to_entries[]
 	| select(.key | test("^[0-9]")) | "\($p.name) \(.key) \(.value | join(","))"' > "$t/secfixes"
 
+# held: a kernel package's firmware or microcode kept at its locked version because the
+# kernel package didn't move (scripts/kernel-lock.sh) while Alpine offers another one.
+# Alpine keeps only its newest version, so a held line is gone too unless our
+# repository has it: a gone held line breaks the kernel's build until the kernel moves
+# "name locked alpine" for such lines of the new locks
+awk -F: '/^P:/{p=$2} /^V:/{print p, $2}' "$t/alpine" | LC_ALL=C sort -u > "$t/alpine-v"
+awk -F= '$1 ~ /^(linux-firmware-.*|amd-ucode|intel-ucode)$/ {print $1, $2}' "$t/new" \
+	| awk 'NR == FNR {a[$1] = $2; next} ($1 in a) && a[$1] != $2 {print $1, $2, a[$1]}' "$t/alpine-v" - > "$t/held"
+: > "$t/heldgone"
+while read -r p o n; do
+	grep -qx "$p=$o" "$t/offered" || echo "$p=$o" >> "$t/heldgone"
+done < "$t/held"
+
 security=routine
-[ ! -s "$t/gone" ] || security=gone
+[ ! -s "$t/gone" ] && [ ! -s "$t/heldgone" ] || security=gone
 : > "$t/sec"
 while read -r p o n; do
 	[ "$o" != - ] && [ "$n" != - ] || continue
@@ -55,6 +70,17 @@ while read -r p o n; do
 	done >> "$t/sec"
 done < "$t/changes"
 [ ! -s "$t/sec" ] || security=security
+# what a held line's newer version would fix (it waits for the kernel; no PR kind of its own)
+: > "$t/heldsec"
+while read -r p o n; do
+	origin=$(awk -v p="$p" '$1 == p {print $2; exit}' "$t/origins")
+	origin=${origin:-$p}
+	awk -v o="$origin" '$1 == o {print $2, $3}' "$t/secfixes" | while read -r fix cves; do
+		if [ "$(apk version -t "$o" "$fix")" = "<" ] && [ "$(apk version -t "$fix" "$n")" != ">" ]; then
+			echo "$p $cves"
+		fi
+	done >> "$t/heldsec"
+done < "$t/held"
 
 echo "Refreshed locks (\`scripts/lock.sh\`): $(wc -l < "$t/changes") packages changed."
 echo
@@ -71,6 +97,19 @@ if [ -s "$t/gone" ]; then
 	echo "**Locked versions no longer offered** (builds of the current locks fail until this merges):"
 	echo
 	sed 's/^/- `/; s/$/`/' "$t/gone"
+	echo
+fi
+if [ -s "$t/held" ]; then
+	echo "**Held for the kernel** (its firmware and microcode move only with the kernel package;"
+	echo "they move at its next version):"
+	echo
+	echo "| Package | Locked | Alpine offers | Locked version offered | Fixes waiting |"
+	echo "|---|---|---|---|---|"
+	while read -r p o n; do
+		off=yes; grep -qx "$p=$o" "$t/heldgone" && off="**no**: the kernel's build fails until the kernel moves"
+		fx=$(awk -v p="$p" '$1 == p && $2 != "" {printf "%s%s", s, $2; s = ","}' "$t/heldsec")
+		echo "| \`$p\` | $o | $n | $off | ${fx:--} |"
+	done < "$t/held"
 	echo
 fi
 echo "| Package | Was | Now |"

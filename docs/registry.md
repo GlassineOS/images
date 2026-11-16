@@ -52,6 +52,28 @@ cache (`mode=max`), at `ghcr.io/glassineos/images-cache:<export>`.
 `GLASSINE_REGISTRY` replaces `ghcr.io/glassineos` in every name above (tests point it
 at a local registry).
 
+## Releases
+
+A kernel's tree never changes under one release (GlassineOS/boot's
+`docs/kernel-artifacts.md`), but keys aren't releases: another key (a lock line the tree
+doesn't depend on, a recipe change) can give the same release. So the kernel export
+carries two more annotations and, the first time its release is published, one more tag:
+
+- `org.glassine.release`: the release (`modules/<release>/`);
+- `org.glassine.release.tree`: its tree id, the sha256 of the content manifest of
+  `modules/<release>/` (`scripts/tree-manifest.py`) with every owner written `0:0` and no
+  hard-link marks (`scripts/kernel-release-check --tree`);
+- the tag `release-<release>` on `ghcr.io/glassineos/images-kernel`, pushed with the
+  key's tag when no export of that release is published yet. It is never moved: a later
+  key with the same release and the same tree is published under its key only.
+
+`scripts/registry publish` refuses a kernel export whose release is published with
+another tree, or when the registry can't tell; `scripts/kernel-release-check` (in
+`scripts/build` and the `kernel` and `build` workflows) fails the build before that.
+Exports published before these annotations have no release tag, so they aren't
+compared. An export without `modules/<release>/kernel.manifest` (a test's stand-in) gets
+neither.
+
 ## Keys
 
 An export's key is the sha256 (64 hex digits, lower case) of a text that holds every
@@ -92,7 +114,7 @@ in.<export>=<key>            ... sorted by export
   |---|---|---|
   | `JOBS` | every key | parallel jobs: the same output |
   | `KCACHE` | every key | the id of the kernel's cache mount: an empty mount gives the same bytes |
-  | `LOCK` | every key | check or refresh: a build that passes the check installs exactly the lock, which is in the key |
+  | `LOCK` | every key | check or refresh: a build that passes the check installs exactly the lock, which is in the key (a refresh build is never published; `kernel-lts` lays out no tree in it) |
   | `LINUX_FIRMWARE` | every key | where the firmware is downloaded from: each file is pinned by its checksum |
   | `BOOT` | every key | where GlassineOS/boot is fetched from: the commit fixes the content, and no output names the address |
   | `LINUX` | `dtb-export` | `kernel.manifest` names the kernel's repository (`source=`), a device tree's record doesn't |

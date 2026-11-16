@@ -123,7 +123,7 @@ export FAKE_REG="$O/reg" FAKE_REG_LOG="$O/reg.log" GLASSINE_REGISTRY=fake.exampl
 # --- a git copy of this checkout (tracked and untracked files, not the ignored ones)
 R=$O/repo; mkdir -p "$R"
 (cd "$P" && git ls-files -z --cached --others --exclude-standard | tar --null -T - -cf - 2>/dev/null) | tar -C "$R" -xf -
-for c in kernel-check boot-check; do
+for c in kernel-check kernel-release-check boot-check; do
 	printf 'import sys\nprint("args:", *sys.argv[1:])\nprint("stub: 0 failure(s)")\n' > "$R/scripts/$c"
 done
 rg() { git -C "$R" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
@@ -540,7 +540,7 @@ kill $HOLD 2>/dev/null || true
 check "registry, all published: the build reaches materialize (exit 4 at the held lock)" '[ "$(rc regpull)" = 4 ]'
 check "registry, all published: four pulls, pinned by digest" '[ "$(grep -c -- "-f .*pull-[a-z]*-export.Dockerfile" "$FAKE_BUILD_LOG")" = 4 ]'
 check "registry, all published: no kernel-side export built"  '! grep -q -- "--target [a-z]*-export" "$FAKE_BUILD_LOG" || [ "$(grep -c -- "--target" "$FAKE_BUILD_LOG")" = 1 ]'
-check "registry, all published: checks run on the pulled exports" 'has regpull "build: kernel-check: stub" && has regpull "build: boot-check: stub"'
+check "registry, all published: checks run on the pulled exports" 'has regpull "build: kernel-check: stub" && has regpull "build: kernel-release-check: stub" && has regpull "build: boot-check: stub"'
 [ "$(rc regpull)" = 4 ] || show regpull
 PF=--preflight-only
 # the registry down too: nothing can be pulled or built

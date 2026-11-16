@@ -16,8 +16,11 @@
 # licenses beside it: the files of /run/firmware-licenses (WHENCE and the license files,
 # which the packages don't carry). FIRMWARE_TAG names the upstream tag those licenses
 # are from; every installed linux-firmware package (and amd-ucode, built from the same
-# source) must be that version, or the build fails (a lock refresh that moves them needs
-# the licenses of the new tag). A package's symlinks become hard links to their targets
+# source) must be that version, or the build fails. They move only with the kernel
+# package (the release doesn't name them): scripts/lock.sh holds them otherwise and, when
+# the kernel package moves, moves the tag with them (scripts/kernel-lock.sh); and
+# scripts/kernel-release-check refuses a tree that differs under a published release.
+# A package's symlinks become hard links to their targets
 # (a kernel's tree holds only files and directories; hard links keep the size). Without
 # firmware in /lib/firmware, firmware/ is empty and no licenses are needed.
 # microcode/ holds the early microcode archives the packages installed in /boot
@@ -62,7 +65,7 @@ if [ -n "$(find /lib/firmware -mindepth 1 ! -type d 2>/dev/null | head -n 1)" ];
 			v=${pv#"${pv%-*-r*}"-}
 			case $v in "$FIRMWARE_TAG"-r*) ;; *) echo "$pv" ;; esac
 		done)
-	[ -z "$bad" ] || die "linux-firmware packages that aren't version $FIRMWARE_TAG (the licenses' tag; move LINUX_FIRMWARE_TAG and LINUX_FIRMWARE_TAG_COMMIT with them): $(echo $bad)"
+	[ -z "$bad" ] || die "linux-firmware packages that aren't version $FIRMWARE_TAG (the licenses' tag; they move only with the kernel package, and scripts/lock.sh moves LINUX_FIRMWARE_TAG and LINUX_FIRMWARE_TAG_COMMIT with them): $(echo $bad)"
 	cp -a /lib/firmware/. "$o/firmware/"
 	find "$o/firmware" -type l | while IFS= read -r l; do
 		t=$(readlink -f "$l") || die "${l#"$o/"}: a symlink that doesn't resolve"
