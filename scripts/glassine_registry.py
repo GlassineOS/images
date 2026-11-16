@@ -38,8 +38,10 @@ def package(export):
     return f'{prefix()}/images-{name}'
 
 
-def cache_ref(export):
-    return f'{prefix()}/images-cache:{export}'
+def cache_ref(export, arch=''):
+    """<prefix>/images-cache:<export>, or :<export>-<arch> for an architecture other than
+    arm64's (docs/registry.md)."""
+    return f'{prefix()}/images-cache:{export}' + (f'-{arch}' if arch else '')
 
 
 def simple_run(cmd, timeout, stdin=None):
