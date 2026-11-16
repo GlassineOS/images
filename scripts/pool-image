@@ -77,8 +77,9 @@ boot image, and no ram-environment or partition-layout:
                    the layout's commit, in a container of the target's architecture):
                    kind cpio-gz
   splash           a plain picture of one colour (release.conf SPLASH_WIDTH,
-                   SPLASH_HEIGHT, SPLASH_COLOR), boot's splash format 1, run-length:
-                   kind glassine-splash
+                   SPLASH_HEIGHT, SPLASH_COLOR) in the target's pixel layout
+                   (SPLASH_LAYOUT: grey8 for a grey panel, rgb888 or bgrx for colour),
+                   boot's image format 2, run-length: kind glassine-splash
   boot-loader      the target's pin (BOOT_LOADER_URL, _SHA256), when it has one: kind
                    efi-application
 and, beside what the installer reads (readers ignore unknown keys): target, build,
@@ -284,22 +285,32 @@ def crc32(b):
     return zlib.crc32(b) & 0xffffffff
 
 
-def splash(width, height, color):
-    """A splash of boot's format 1 (docs/boot-partition.md, "The image format"): kind 0,
-    width x height pixels of one colour, made for a mode of that size, the background the
-    same colour, run-length encoded."""
+# boot's pixel layouts (docs/boot-partition.md, "The image format"): field value, bytes
+LAYOUTS = {'bgrx': (1, 4), 'rgb888': (2, 3), 'grey8': (3, 1)}
+
+
+def splash(width, height, color, layout):
+    """A splash of boot's image format 2 (docs/boot-partition.md, "The image format"):
+    kind 0, width x height pixels of one colour in the target's pixel layout (grey8 for a
+    grey panel, the luma of the colour), made for a mode of that size, the background the
+    same colour, run-length encoded (compression 1, no filter)."""
     import struct
-    if not (1 <= width <= 16384 and 1 <= height <= 16384) or width * height * 4 > 32 << 20 \
+    if layout not in LAYOUTS:
+        raise Fail(f'splash layout {layout!r}: one of {", ".join(sorted(LAYOUTS))}')
+    if not (1 <= width <= 16384 and 1 <= height <= 16384) or width * height > 8 << 20 \
             or not 0 <= color <= 0xffffff:
         raise Fail(f'splash {width} x {height}, colour {color:#x}: past the format\'s limits')
-    px = struct.pack('<I', color)            # blue, green, red, one unused byte
+    code, _ = LAYOUTS[layout]
+    r, g, b = color >> 16, (color >> 8) & 255, color & 255
+    px = {'bgrx': bytes([b, g, r, 0]), 'rgb888': bytes([r, g, b]),
+          'grey8': bytes([(77 * r + 150 * g + 29 * b + 128) >> 8])}[layout]
     n, runs = width * height, bytearray()
     while n:
         k = min(n, 129)
         runs += bytes([k + 126]) + px if k >= 2 else bytes([0]) + px
         n -= k
     payload = bytes(runs)
-    head = b'GLSPLASH' + struct.pack('<HHIIIIIIIQI', 1, 0, width, height, width, height, 1, color, 1,
+    head = b'GLSPLASH' + struct.pack('<HHIIIIIIHHQI', 2, 0, width, height, width, height, code, color, 1, 0,
                                      len(payload), crc32(payload))
     return head + struct.pack('<I', crc32(head)) + b'\0' * 8 + payload
 
@@ -369,12 +380,13 @@ def pc_parts(o, adir, repo, target, tconf, m, brec, boot_dir, work):
         raise Fail('build-boot-modules.sh failed')
     parts['boot-modules'] = (os.path.join(bm, 'boot-modules.cpio.gz'), 'cpio-gz', {})
     conf = os.path.join(repo, 'targets', target, 'release.conf')
-    sw, sh_, sc = (shell_conf(conf, k) for k in ('SPLASH_WIDTH', 'SPLASH_HEIGHT', 'SPLASH_COLOR'))
-    if sw or sh_ or sc:
+    sw, sh_, sc, sl = (shell_conf(conf, k) for k in ('SPLASH_WIDTH', 'SPLASH_HEIGHT', 'SPLASH_COLOR', 'SPLASH_LAYOUT'))
+    if sw or sh_ or sc or sl:
         try:
-            pic = splash(int(sw), int(sh_), int(sc, 16))
+            pic = splash(int(sw), int(sh_), int(sc, 16), sl)
         except (TypeError, ValueError):
-            raise Fail(f'{conf}: SPLASH_WIDTH, SPLASH_HEIGHT (decimal) and SPLASH_COLOR (0xRRGGBB) go together')
+            raise Fail(f'{conf}: SPLASH_WIDTH, SPLASH_HEIGHT (decimal), SPLASH_COLOR (0xRRGGBB) and '
+                       'SPLASH_LAYOUT (grey8, rgb888 or bgrx) go together')
         sp = os.path.join(work, 'default.gspl')
         with open(sp, 'wb') as f:
             f.write(pic)
