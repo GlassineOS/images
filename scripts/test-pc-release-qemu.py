@@ -361,6 +361,24 @@ def upper(disk, datap, dep, put=None, drop=()):
         sh('losetup', '-d', l)
 
 
+def pool_put(disk, sysp, put):
+    """Files on glassine-system (the pool's top level), written while the guest is off:
+    put = {path: bytes}."""
+    l = loop(disk, sysp, ro=False)
+    try:
+        os.makedirs('/s', exist_ok=True)
+        sh('mount', '-t', 'btrfs', l, '/s')
+        try:
+            for rel, b in put.items():
+                f = Path('/s') / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(b)
+        finally:
+            sh('umount', '/s')
+    finally:
+        sh('losetup', '-d', l)
+
+
 def kernel_state(disk, sysp):
     """state/kernel on glassine-system, read-only."""
     l = loop(disk, sysp)
@@ -384,6 +402,18 @@ def limit_run(args, cw, disk, bootp, sysp, datap, dep, kid, vars_fd):
               f'request={r.get("request")} trial={r.get("trial")}', flush=True)
         return r
 
+    # glassine-bootimg install takes the initramfs from the pool's boot/initramfs/, which
+    # `glassine-deploy receive --boot` fills on a device. A release pool has no boot/
+    # files and receive --boot doesn't exist yet, so this test supplies the release's
+    # initramfs and its build manifest itself: a fresh install can't do this step alone.
+    arts = json.loads((args.release / 'release.json').read_text())['artifacts']
+    ird = arts['initramfs']['identity']
+    irm = args.initramfs_dir / f'{ird}.manifest' if args.initramfs_dir else None
+    if not irm or not irm.is_file():
+        res(False, f'step 5: no manifest of initramfs {ird} (--initramfs-dir: the build\'s boot/initramfs/; QTEST_LIMIT=0 skips the step)')
+        return
+    pool_put(disk, sysp, {f'boot/initramfs/{ird}.cpio.gz': (args.release / arts['initramfs']['file']).read_bytes(),
+                          f'boot/initramfs/{ird}.manifest': irm.read_bytes()})
     upper(disk, datap, dep, {'etc/local.d/qtest-limit.start': (QTEST_SCRIPT.encode(), 0o755),
                              'etc/runlevels/default/local': ('->', '/etc/init.d/local')})
     # boot 3: the second set installed, then the reboot into its trial (orderly)
@@ -439,6 +469,8 @@ def main():
     ap = argparse.ArgumentParser()
     for a in ('installer', 'binary', 'release', 'work', 'cache'):
         ap.add_argument('--' + a, type=Path, required=True)
+    ap.add_argument('--initramfs-dir', type=Path, default=None,
+                    help="the build's boot/initramfs/ (its manifests): step 5 needs the release initramfs's")
     ap.add_argument('--boot-timeout', type=int, default=900)
     ap.add_argument('--direct-kernel', action='store_true', default=os.environ.get('QTEST_DIRECT_KERNEL') == '1',
                     help='start the kernel set with -kernel/-initrd, not through the release\'s loader')
