@@ -114,7 +114,7 @@ in.<export>=<key>            ... sorted by export
   |---|---|---|
   | `JOBS` | every key | parallel jobs: the same output |
   | `KCACHE` | every key | the id of the kernel's cache mount: an empty mount gives the same bytes |
-  | `LOCK` | every key | check or refresh: a build that passes the check installs exactly the lock, which is in the key |
+  | `LOCK` | every key | check or refresh: a build that passes the check installs exactly the lock, which is in the key (a refresh build is never published; `kernel-lts` lays out no tree in it) |
   | `LINUX_FIRMWARE` | every key | where the firmware is downloaded from: each file is pinned by its checksum |
   | `BOOT` | every key | where GlassineOS/boot is fetched from: the commit fixes the content, and no output names the address |
   | `LINUX` | `dtb-export` | `kernel.manifest` names the kernel's repository (`source=`), a device tree's record doesn't |

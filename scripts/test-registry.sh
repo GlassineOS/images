@@ -307,6 +307,39 @@ timeout 300 "$C/scripts/registry" publish "$TARGET" "$P2" > "$O/pubagain.out" 2>
 check "registry publish: again: already published, not pushed"   '[ $prc = 0 ] && grep -q "kernel-export: already published" "$O/pubagain.out" && ! grep -q "docker buildx build" "$O/pubagain.out"'
 check "registry publish: its annotations name the inputs' trees" 'python3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); import glassine_registry as r; a = r.lookup(\"kernel-export\", sys.argv[2]); sys.exit(0 if r.trees(a[\"annotations\"]) == {\"LINUX_SDM660\": \"t\"} else 1)" "$P/scripts" "$K2"'
 
+# a kernel export with a release (modules/<release>/kernel.manifest): its first key is
+# also tagged release-<release>; a later key with the same tree is published and leaves
+# the tag; another tree under the release is refused (docs/registry.md, "Releases")
+KR=7.1-fake
+rm -rf "$P2/kernel-export"; mkdir -p "$P2/kernel-export/modules/$KR/kernel"
+printf 'format=1\nrelease=%s\n' $KR > "$P2/kernel-export/modules/$KR/kernel.manifest"
+echo one > "$P2/kernel-export/modules/$KR/kernel/a.ko"; find "$P2/kernel-export" -exec touch -h -d @0 {} +
+relkey() {	# relkey N: a new kernel key (a committed stage change), set up as built and confirmed
+	echo "# change $1" >> "$C/stages/kernel-sdm660/build.config"
+	git -C "$C" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -am "change $1"
+	"$C/scripts/registry" keys "$TARGET" > "$O/keys$1.list"
+	RK=$(grep '^kernel-export ' "$O/keys$1.list" | cut -d' ' -f2)
+	while read -r e key; do
+		case $e in
+		kernel-export) echo "$e $key built" ;;
+		*) echo "$e $key localhost:$PORT/glassineos/images-x@sha256:$(printf %064d 0)" ;;
+		esac
+	done < "$O/keys$1.list" > "$P2/plan"
+	echo "kernel-export $RK same" > "$P2/reproduced"
+}
+rel() { python3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); import glassine_registry as r; x = r.lookup_release(sys.argv[2]); print(x['state'], x.get('key'), x.get('tree'))" "$P/scripts" $KR; }
+TREE=$(python3 -I "$P/scripts/kernel-release-check" --tree "$P2/kernel-export" | cut -d' ' -f2)
+relkey 3; K3=$RK
+timeout 300 "$C/scripts/registry" publish "$TARGET" "$P2" > "$O/pubrel1.out" 2>&1 && prc=0 || prc=$?
+check "registry publish: a kernel's first key is tagged release-<release>, with its tree" '[ $prc = 0 ] && [ "$(rel)" = "published $K3 $TREE" ]'
+relkey 4; K4=$RK
+timeout 300 "$C/scripts/registry" publish "$TARGET" "$P2" > "$O/pubrel2.out" 2>&1 && prc=0 || prc=$?
+check "registry publish: another key, the same tree: published, the tag not moved" '[ $prc = 0 ] && grep -q "kernel-export: published" "$O/pubrel2.out" && [ "$(rel)" = "published $K3 $TREE" ]'
+echo two > "$P2/kernel-export/modules/$KR/kernel/a.ko"; touch -h -d @0 "$P2/kernel-export/modules/$KR/kernel/a.ko"
+relkey 5
+timeout 300 "$C/scripts/registry" publish "$TARGET" "$P2" > "$O/pubrel3.out" 2>&1 && prc=0 || prc=$?
+check "registry publish: another tree under a published release: refused, exit 1" '[ $prc = 1 ] && grep -q "kernel-export: NOT published: release $KR is published .* a tree never changes under one release" "$O/pubrel3.out"'
+
 # the registry stopped: no answer, told apart from not published
 docker stop "$REG" >/dev/null
 python3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); import glassine_registry as r; print(r.lookup('kernel-export', '0' * 64, timeout=20))" "$P/scripts" > "$O/down.out" 2>&1 || true
