@@ -16,7 +16,9 @@
 # 3. A registry (registry:2 on this computer, a docker-container builder on the host's
 #    network): a fake export is published, found under its key with its annotations,
 #    pulled back by digest with the same files (paths, types, modes, contents; times 0),
-#    not published again, a missing key and a stopped registry tell apart; scripts/
+#    not published again, a missing key and a stopped registry tell apart; a kernel's
+#    release tag; the PC's kernel (targets/uefi-pc) pulled by the key of a held lock that
+#    names a version no repository offers, refused when built from the repositories; scripts/
 #    registry status, exports (all four pulled), and publish (only what a rebuild
 #    confirmed, never from a checkout with changes).
 #
@@ -339,6 +341,37 @@ echo two > "$P2/kernel-export/modules/$KR/kernel/a.ko"; touch -h -d @0 "$P2/kern
 relkey 5
 timeout 300 "$C/scripts/registry" publish "$TARGET" "$P2" > "$O/pubrel3.out" 2>&1 && prc=0 || prc=$?
 check "registry publish: another tree under a published release: refused, exit 1" '[ $prc = 1 ] && grep -q "kernel-export: NOT published: release $KR is published .* a tree never changes under one release" "$O/pubrel3.out"'
+
+# the PC's kernel (targets/uefi-pc: exports=kernel-export, Alpine's linux-lts): a held
+# lock keeps its key, so the build pulls the published export and never asks Alpine for
+# the held versions; here the lock names a version no repository offers
+cg() { git -C "$C" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
+UL=$C/stages/kernel-lts/lock.x86_64
+"$C/scripts/registry" keys uefi-pc > "$O/ukeys1.list"
+check "uefi-pc: the kernel export is its only registry export"     '[ "$(cut -d" " -f1 "$O/ukeys1.list")" = kernel-export ]'
+U1=$(cut -d' ' -f2 "$O/ukeys1.list")
+# a refresh where only the firmware and microcode moved: the hold gives the same lock back
+sed 's/^\(linux-firmware-[^=]*\)=.*/\1=29990101-r0/; s/^intel-ucode=.*/intel-ucode=29990101-r0/' "$UL" > "$O/refreshed"
+sh "$C/scripts/kernel-lock.sh" hold "$UL" "$O/refreshed" > "$O/uhold.out"
+cp "$O/refreshed" "$UL"
+check "uefi-pc: only firmware moved: held, the same lock, the same key" 'grep -q "^kernel held" "$O/uhold.out" && [ -z "$(git -C "$C" status --porcelain)" ] && [ "$("$C/scripts/registry" keys uefi-pc | cut -d" " -f2)" = "$U1" ]'
+# the stand-in: a held version Alpine has dropped (no repository offers it)
+sed -i 's/^linux-firmware-intel=.*/linux-firmware-intel=19990101-r0/' "$UL"
+cg commit -q -am "a held version no repository offers"
+U2=$("$C/scripts/registry" keys uefi-pc | cut -d' ' -f2)
+UR=6.18.0-0-lts
+mkdir -p "$O/ufake/modules/$UR"; printf 'format=1\nrelease=%s\n' $UR > "$O/ufake/modules/$UR/kernel.manifest"
+echo vmlinuz > "$O/ufake/modules/$UR/vmlinuz"; find "$O/ufake" -exec touch -h -d @0 {} +
+python3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); import glassine_registry as r; print(r.publish('kernel-export', sys.argv[2], sys.argv[3], 'linux/amd64', sys.argv[4]))" \
+	"$P/scripts" "$U2" "$O/ufake" "$O/w" > "$O/upub.out" 2>&1 || true
+timeout 300 "$C/scripts/registry" exports uefi-pc "$O/uout" > "$O/uexp.out" 2>&1 && urc=0 || urc=$?
+check "uefi-pc: an unchanged lock with a dropped version: pulled by its key, nothing built" '[ $urc = 0 ] && grep -q "^kernel-export $U2 localhost:$PORT/glassineos/images-kernel@sha256:" "$O/uout/plan" && [ "$(cat "$O/uout/kernel-export/modules/$UR/vmlinuz")" = vmlinuz ] && ! grep -q -- "--target kernel-export" "$O/uexp.out"'
+# without the registry the same lock is built from the repositories, and fails on the line
+timeout 600 "$C/scripts/registry" exports uefi-pc "$O/uout2" --no-registry > "$O/uexp2.out" 2>&1 && urc=0 || urc=$?
+check "uefi-pc: the same lock built from the repositories: refused, naming the held line" '[ $urc != 0 ] && grep -q "linux-firmware-intel=19990101-r0 *offered:" "$O/uexp2.out"'
+# linux-lts moves: another key, not published, so it is built (and everything moves with it)
+sed -i 's/^linux-lts=.*/linux-lts=6.18.99-r0/' "$UL"; cg commit -q -am "linux-lts moved"
+check "uefi-pc: linux-lts moved: another key, not published" '[ "$("$C/scripts/registry" keys uefi-pc | cut -d" " -f2)" != "$U2" ] && "$C/scripts/registry" status uefi-pc | grep -q "not published"'
 
 # the registry stopped: no answer, told apart from not published
 docker stop "$REG" >/dev/null

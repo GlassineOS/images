@@ -72,8 +72,10 @@ jobs:
           done
       - name: The kernel package's export (KERNEL=lts)
         run: |
-          docker buildx build --progress=plain --platform linux/amd64 --build-arg KERNEL=lts \
-            --target kernel-export -o type=local,dest=/tmp/kernel .
+          # as the registry gives it (targets/uefi-pc): pulled when its key is published, so
+          # a held kernel-lts lock builds even when Alpine no longer offers a held version
+          scripts/registry exports uefi-pc /tmp/kout
+          mv /tmp/kout/kernel-export /tmp/kernel
           # the manifest without its firmware list (one name@sha256-16 per firmware file)
           for m in /tmp/kernel/modules/*/kernel.manifest; do
             grep -v '^firmware=' "$m"

@@ -367,7 +367,7 @@ def _file_entries(repo, rel):
     return [e for _, e in sorted(out, key=lambda t: t[0].encode())]
 
 
-def export_keys(dockerfile, repo, over=None, arch='arm64'):
+def export_keys(dockerfile, repo, over=None, arch='arm64', exports=None):
     """Each registry export's key and what went into it:
     {export: {'key', 'text', 'stages', 'takes', 'args', 'inputs', 'fetches'}}.
 
@@ -384,7 +384,9 @@ def export_keys(dockerfile, repo, over=None, arch='arm64'):
       in.<export>=<key>          the key of each registry export it takes in
     args: every build argument its own stages declare or name in FROM (also those left
     out of the key); inputs: the git inputs (commit arguments) in the key; fetches: the git inputs
-    building the export here fetches (also those left out of its key)."""
+    building the export here fetches (also those left out of its key). exports: the
+    exports to key (default REGISTRY_EXPORTS; a target may have fewer, see
+    scripts/registry)."""
     over = dict(over or {})
     args, _ = pins(dockerfile, over)
     st = stages(dockerfile, args)
@@ -435,6 +437,7 @@ def export_keys(dockerfile, repo, over=None, arch='arm64'):
                   'fetches': [i for i in gits if i in names]}
         return out[e]['key']
 
-    for e in REGISTRY_EXPORTS:
+    exports = list(exports or REGISTRY_EXPORTS)
+    for e in exports:
         key(e)
-    return {e: out[e] for e in REGISTRY_EXPORTS}
+    return {e: out[e] for e in exports}

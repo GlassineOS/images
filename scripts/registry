@@ -79,15 +79,41 @@ def run_shown(cmd, timeout):
     return rc, ''.join(tail)
 
 
-def target_arch(target):
+# a target file's arch as the platform names it (linux/<arch>)
+ARCHES = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}
+
+
+def target_rec(target):
     path = os.path.join(REPO, 'targets', target, 'target')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', target) or not os.path.isfile(path):
         sys.exit(f'registry: no target {target!r} (no {path})')
     with open(path) as f:
         rec = dict(line.rstrip('\n').split('=', 1) for line in f if '=' in line and not line.startswith('#'))
-    if not re.fullmatch(r'[a-z0-9]+', rec.get('arch', '')):
-        sys.exit(f'registry: {path}: no arch')
-    return rec['arch']
+    if rec.get('arch', '') not in ARCHES:
+        sys.exit(f'registry: {path}: no arch, or not one of {" ".join(sorted(ARCHES))}')
+    ex = rec.get('exports', '').split() or EXPORTS
+    bad = [e for e in ex if e not in EXPORTS]
+    if bad:
+        sys.exit(f'registry: {path}: exports= names {" ".join(bad)}, not one of {" ".join(EXPORTS)}')
+    rec['exports'] = [e for e in EXPORTS if e in ex]
+    return rec
+
+
+def target_arch(target):
+    return ARCHES[target_rec(target)['arch']]
+
+
+def target_exports(target):
+    """The registry exports of a target: its target file's exports= (a PC's kernel only),
+    default all four."""
+    return target_rec(target)['exports']
+
+
+def cache_arch(target):
+    """The layer cache's architecture suffix: none for arm64 (the first target's names
+    stay), -<arch> for any other, so two architectures don't evict each other's cache."""
+    a = target_arch(target)
+    return '' if a == 'arm64' else a
 
 
 def parse(argv, npos, flags=(), values=()):
@@ -121,8 +147,12 @@ def parse(argv, npos, flags=(), values=()):
 
 
 def keys_for(target, o):
+    rec = target_rec(target)
     over = {**o['args'], 'DEVICE': target}
-    return glassine_pins.export_keys(DOCKERFILE, REPO, over, target_arch(target)), over
+    # the kernel stage the target boots (kernel-<kernel>), unless --build-arg sets it
+    if rec.get('kernel') and 'KERNEL' not in o['args']:
+        over['KERNEL'] = rec['kernel']
+    return glassine_pins.export_keys(DOCKERFILE, REPO, over, target_arch(target), rec['exports']), over
 
 
 def read_table(path):
@@ -146,6 +176,9 @@ def write_table(path, rows):
 def build_cmd(target, arch, o, export, extra=()):
     cmd = ['docker', 'buildx', 'build', '--progress=plain', '--platform', f'linux/{arch}',
            '--build-arg', f'DEVICE={target}']
+    k = target_rec(target).get('kernel')
+    if k and 'KERNEL' not in o['args']:
+        cmd += ['--build-arg', f'KERNEL={k}']
     for k, v in o['args'].items():
         cmd += ['--build-arg', f'{k}={v}']
     return cmd + list(extra) + ['--target', export]
@@ -156,10 +189,10 @@ def cmd_keys(argv):
     keys, _ = keys_for(target, o)
     if o['explain']:
         if o['explain'] not in keys:
-            sys.exit(f'registry: no export {o["explain"]} (one of {", ".join(EXPORTS)})')
+            sys.exit(f'registry: no export {o["explain"]} (one of {", ".join(keys)})')
         sys.stdout.write(keys[o['explain']]['text'])
         return 0
-    for e in EXPORTS:
+    for e in keys:
         say(f'{e} {keys[e]["key"]}')
     return 0
 
@@ -168,7 +201,7 @@ def cmd_status(argv):
     o, (target,) = parse(argv, 1)
     keys, _ = keys_for(target, o)
     p = reg.plan(keys)
-    for e in EXPORTS:
+    for e in list(keys):
         say(f'{e} {keys[e]["key"]} ' + (p[e]['pull'] if p[e]['pull'] else f'not published: {p[e]["why"]}'))
     return 0
 
@@ -181,8 +214,8 @@ def cmd_exports(argv):
     os.makedirs(out, exist_ok=True)
     work = os.path.join(out, '.work')
     p = reg.plan(keys, use_registry=not o['no_registry'])
-    pulled = {e: p[e]['pull'] for e in EXPORTS if p[e]['pull']}
-    for e in EXPORTS:
+    pulled = {e: p[e]['pull'] for e in list(keys) if p[e]['pull']}
+    for e in list(keys):
         say(f'registry: {e} key {keys[e]["key"]}: ' + (f'pull {pulled[e]}' if e in pulled
                                                        else f'build here ({p[e]["why"]})'))
     # the trees of the git inputs: from the pulled exports, or fetched (only the inputs
@@ -190,12 +223,12 @@ def cmd_exports(argv):
     args, _ = glassine_pins.pins(DOCKERFILE, over)
     repos = glassine_pins.repos(DOCKERFILE)
     tree = {}
-    for e in EXPORTS:
+    for e in list(keys):
         if e in pulled:
             for i in keys[e]['inputs']:
                 if p[e]['trees'].get(i):
                     tree[i] = p[e]['trees'][i]
-    need = sorted({i for e in EXPORTS if e not in pulled for i in keys[e]['fetches']})
+    need = sorted({i for e in list(keys) if e not in pulled for i in keys[e]['fetches']})
     for i in need:
         url, commit = args[repos[i]], args[i]
         gd = os.path.join(work, 'git', i)
@@ -211,7 +244,7 @@ def cmd_exports(argv):
         tree[i] = r.stdout.strip()
     write_table(os.path.join(out, 'trees'), [(i, tree[i]) for i in sorted(tree)])
     rows = []
-    for e in EXPORTS:
+    for e in list(keys):
         dest = os.path.join(out, e)
         if e in pulled:
             why = reg.pull(e, pulled[e], dest, f'linux/{arch}', work, run=run_shown, log=say)
@@ -222,7 +255,7 @@ def cmd_exports(argv):
         shutil.rmtree(dest, ignore_errors=True)
         extra = reg.contexts(e, keys, pulled)
         if not o['no_registry']:
-            extra += ['--cache-from', f'type=registry,ref={reg.cache_ref(e)}']
+            extra += ['--cache-from', f'type=registry,ref={reg.cache_ref(e, cache_arch(target))}']
         extra += [x for c in o['cache_from'] for x in ('--cache-from', c)]
         if o['cache_to']:
             extra += ['--cache-to', o['cache_to']]
@@ -255,13 +288,13 @@ def cmd_reproduce(argv):
     arch = target_arch(target)
     keys, _ = keys_for(target, o)
     plan = read_table(os.path.join(out, 'plan'))
-    if set(plan) != set(EXPORTS):
+    if set(plan) != set(keys):
         sys.exit(f'registry: {out}/plan doesn\'t list every export; run registry exports first')
-    for e in EXPORTS:
+    for e in list(keys):
         if plan[e][0] != keys[e]['key']:
             sys.exit(f'registry: {out}/plan: {e} has key {plan[e][0]}, this checkout gives {keys[e]["key"]}')
-    pulled = {e: plan[e][1] for e in EXPORTS if plan[e][1] != 'built'}
-    todo = [e for e in EXPORTS if o['all'] or e not in pulled]
+    pulled = {e: plan[e][1] for e in list(keys) if plan[e][1] != 'built'}
+    todo = [e for e in list(keys) if o['all'] or e not in pulled]
     timeout = int(os.environ.get('BUILD_TIMEOUT', '14400'))
     salt = 'kernel-repro-' + os.urandom(6).hex()
     rows, rc_all = [], 0
@@ -336,7 +369,7 @@ def cmd_publish(argv):
     rep = read_table(os.path.join(out, 'reproduced'))
     tree = {k: v[0] for k, v in read_table(os.path.join(out, 'trees')).items()}
     rc = 0
-    for e in EXPORTS:
+    for e in list(keys):
         if e not in plan or plan[e][0] != keys[e]['key']:
             sys.exit(f'registry: {out}/plan: {e} isn\'t this checkout\'s (key {keys[e]["key"]})')
         if plan[e][1] != 'built':
@@ -381,14 +414,14 @@ def cmd_cache(argv):
     pulled = {e: v[1] for e, v in plan.items() if v[1:2] != ['built']}
     timeout = int(os.environ.get('BUILD_TIMEOUT', '14400'))
     rc = 0
-    for e in EXPORTS:
+    for e in list(keys):
         if e in pulled or e not in plan:
             continue
         extra = reg.contexts(e, keys, pulled)
         extra += [x for c in o['cache_from'] for x in ('--cache-from', c)]
-        extra += ['--cache-to', f'type=registry,ref={reg.cache_ref(e)},mode=max', '-o', 'type=cacheonly']
+        extra += ['--cache-to', f'type=registry,ref={reg.cache_ref(e, cache_arch(target))},mode=max', '-o', 'type=cacheonly']
         r, _ = run_shown(build_cmd(target, arch, o, e, extra) + [REPO], timeout)
-        say(f'registry: {e}: layer cache ' + ('exported to ' + reg.cache_ref(e) if r == 0 else f'not exported (exit {r})'))
+        say(f'registry: {e}: layer cache ' + ('exported to ' + reg.cache_ref(e, cache_arch(target)) if r == 0 else f'not exported (exit {r})'))
         rc |= 1 if r else 0
     return rc
 
