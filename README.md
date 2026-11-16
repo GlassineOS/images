@@ -254,7 +254,8 @@ stub), `firmware/`, `microcode/` and `kernel.manifest`.
   Raspberry Pi sources Alpine adds to `brcm/` and `cypress/` (pinned by checksum). The build fails when the packages' version isn't
   that tag (`LINUX_FIRMWARE_TAG`), so a lock refresh that moves `linux-firmware` needs
   the new tag's licenses. `kernel.manifest`'s `firmware` lists every file
-  (`name@sha256-16`), as a compiled kernel's does.
+  (`name@sha256-16`; a space in a name as `%20`, a `%` as `%25`), as a compiled
+  kernel's does.
 - **microcode/** holds the early microcode archives (`intel-ucode.img`,
   `amd-ucode.img`) and their licenses. The kernel loads microcode only early, from an
   uncompressed archive in front of the initramfs; nothing puts them there yet (the
