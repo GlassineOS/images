@@ -316,7 +316,8 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
 
 QTEST_SCRIPT = r"""#!/bin/sh
 # test-pc-release-qemu's limit run: a second kernel set, then the reboot into its trial
-say() { echo "<5>qtest-limit: $*" > /dev/kmsg; }
+# the console, not the kernel log: once the system is up, the kernel log isn't on it
+say() { echo "qtest-limit: $*" > /dev/console; }
 b=/etc/glassine-bootimg/board.conf
 grep -q '^CMDLINE=.*console=ttyS0' "$b" || sed -i 's/^CMDLINE="\(.*\)"$/CMDLINE="\1 console=ttyS0 loglevel=7"/' "$b"
 say "board CMDLINE: $(grep '^CMDLINE=' "$b")"
@@ -326,10 +327,10 @@ while :; do
     [ $rc = 6 ] && [ $n -lt 120 ] || break
     sleep 2; n=$((n + 2))
 done
-say "install: exit $rc: $(echo "$out" | tail -n 2 | tr '\n' ' ')"
+say "install: exit $rc: $(echo "$out" | tail -n 4 | tr '\n' ' ')"
 [ $rc = 0 ] || exit 0
 # the reboot after this service's start returned (it hands the reboot to init)
-setsid sh -c 'sleep 5; out=$(glassine-bootimg reboot-test 2>&1) || echo "<5>qtest-limit: reboot-test failed: $out" > /dev/kmsg' </dev/null >/dev/null 2>&1 &
+setsid sh -c 'sleep 5; echo "qtest-limit: reboot-test" > /dev/console; out=$(glassine-bootimg reboot-test 2>&1) || echo "qtest-limit: reboot-test failed: $out" > /dev/console' </dev/null >/dev/null 2>&1 &
 """
 
 
@@ -394,7 +395,8 @@ def limit_run(args, cw, disk, bootp, sysp, datap, dep, kid, vars_fd):
     r = rec(3)
     k2 = r.get('trial', '')
     res(bool(k2) and k2 != kid and r.get('request') == 'trial', f'after boot 3: the record names the new set {k2} as the trial, request=trial')
-    res(r.get('unmarked') == '0' and 'taken out of the count' in text,
+    # the shutdown step's line (its service's stop writes it on the console)
+    res(r.get('unmarked') == '0' and 'this start taken out of the count (unmarked 1 -> 0)' in text,
         f'after boot 3: the unmarked start ended in an orderly reboot, the shutdown step took it out of the count (unmarked={r.get("unmarked")})')
     if not k2:
         return
@@ -429,7 +431,7 @@ def limit_run(args, cw, disk, bootp, sysp, datap, dep, kid, vars_fd):
     res(f'START_KERNEL {kid} ' in text, f'boot 9: the loader started the new default set {kid}')
     r = rec(9)
     res(r.get('started') == kid and r.get('started_why') == 'default', f'after boot 9: started={r.get("started")} started_why={r.get("started_why")} (default)')
-    res(rc == 0 and r.get('unmarked') == '0' and 'taken out of the count' in text,
+    res(rc == 0 and r.get('unmarked') == '0' and 'this start taken out of the count (unmarked 1 -> 0)' in text,
         f'after boot 9: a poweroff before the accept: the shutdown step took the start out of the count (unmarked={r.get("unmarked")}, qemu exit {rc})')
 
 
