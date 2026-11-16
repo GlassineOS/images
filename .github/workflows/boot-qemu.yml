@@ -108,6 +108,8 @@ jobs:
         run: scripts/pc-release --artifacts "$RUNNER_TEMP/artifacts" --no-parent --out "$RUNNER_TEMP/uefi-pc-release"
       - name: the installer installs it on a blank virtual PC, which starts it
         run: sh scripts/test-pc-release-qemu.sh "$RUNNER_TEMP/uefi-pc-release"
+        env:
+          QTEST_INITRAMFS_DIR: ${{ runner.temp }}/artifacts/boot/initramfs
       - name: the release folder, for the publish job (main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
