@@ -87,14 +87,19 @@ done
 # --- the guest: QEMU in a container with the tools of the installer's harness
 KVM=''; [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && KVM='--device /dev/kvm'
 mkdir -p "$O/work" "$O/cache"
+# the build's initramfs manifests (step 5 puts the release's initramfs in the pool): the
+# artifacts folder holding the release (ARTIFACTS/<target>/releases/<build>), else
+# QTEST_INITRAMFS_DIR
+IRD=${QTEST_INITRAMFS_DIR:-$REL/../../../boot/initramfs}
+IRM=''; [ -d "$IRD" ] && IRM="-v $(cd "$IRD" && pwd):/m:ro"
 rc=0
-# shellcheck disable=SC2086  # KVM: one option and its value, or nothing
-docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 -e QTEST_ACCEPT_WAIT="${QTEST_ACCEPT_WAIT:-240}" -e QTEST_DIRECT_KERNEL="${QTEST_DIRECT_KERNEL:-}" \
-	-v "$I":/i:ro -v "$REL":/r:ro -v "$P/scripts":/s:ro -v "$O":/o "$ALPINE" sh -c '
+# shellcheck disable=SC2086  # KVM, IRM: one option and its value, or nothing
+docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 -e QTEST_ACCEPT_WAIT="${QTEST_ACCEPT_WAIT:-240}" -e QTEST_DIRECT_KERNEL="${QTEST_DIRECT_KERNEL:-}" -e QTEST_LIMIT="${QTEST_LIMIT:-1}" \
+	$IRM -v "$I":/i:ro -v "$REL":/r:ro -v "$P/scripts":/s:ro -v "$O":/o "$ALPINE" sh -c '
 apk add -q --no-progress python3 qemu-system-x86_64 ovmf sgdisk dosfstools mtools squashfs-tools \
 	btrfs-progs e2fsprogs e2fsprogs-extra util-linux coreutils >/dev/null || exit 1
 python3 /s/test-pc-release-qemu.py --installer /i --binary /i/target/release/glassine-install --release /r \
-	--work /o/work --cache /o/cache
+	--work /o/work --cache /o/cache $([ -d /m ] && echo --initramfs-dir /m)
 ' 2>&1 | tee "$O/qemu.log" || :
 grep -q '^test-pc-release-qemu: 0 failed' "$O/qemu.log" || rc=1
 cp "$O"/work/*.log "$O/" 2>/dev/null || :
