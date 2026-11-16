@@ -31,6 +31,10 @@ Options:
   --margin MIB       free space left in the pool image beyond what it allocates
                      (default 64)
   --repo DIR         the checkout with the Dockerfile and targets/ (default: this one)
+  --kernel DIR       a target without a boot image (a PC) only, and required there: its
+                     kernel-export (DIR/modules/<release>/), the build's release; the
+                     kernel set's files are taken from it and checked against the
+                     artifacts' modules/<release>.manifest
 
 The base role is one btrfs file system, made in a privileged container
 (scripts/pool-image-container.sh, loop device on a tmpfs, like materialize): mkfs.btrfs
@@ -56,6 +60,27 @@ release.json (release_format 1):
   partition-layout the target's pin (LAYOUT_URL, LAYOUT_SHA256): kind gpt-recipe,
                    min_partition_bytes = its size
   recovery         with --recovery: kind raw-image, min_partition_bytes = its size
+A target without a boot image (its target file's exports= has no boot-export: a PC,
+GlassineOS/boot docs/boot-partition.md) gets the parts of a kernel set instead of the
+boot image, and no ram-environment or partition-layout:
+  kernel           modules/<release>/vmlinuz (the EFI stub): kind efi-kernel, cmdline =
+                   the board's CMDLINE, release; min_partition_bytes by spec 002 FR-019a
+                   for a boot partition of files: 3 kernel sets + 2 recovery images + 2 x
+                   32 MiB of splash, all twice, + 8 MiB, a whole MiB (a release without a
+                   recovery counts each as one kernel set: room for one a later release
+                   brings)
+  initramfs        the build's initramfs (boot/initramfs/): kind initramfs, identity
+  board            targets/TARGET/board.conf, the same file as the base's
+                   /etc/glassine-bootimg/board.conf (checked): kind board-conf
+  microcode-<name> each modules/<release>/microcode/<name>-ucode.img: kind cpio
+  boot-modules     GlassineOS/boot's build-boot-modules.sh on the kernel's tree (boot at
+                   the layout's commit, in a container of the target's architecture):
+                   kind cpio-gz
+  splash           a plain picture of one colour (release.conf SPLASH_WIDTH,
+                   SPLASH_HEIGHT, SPLASH_COLOR), boot's splash format 1, run-length:
+                   kind glassine-splash
+  boot-loader      the target's pin (BOOT_LOADER_URL, _SHA256), when it has one: kind
+                   efi-application
 and, beside what the installer reads (readers ignore unknown keys): target, build,
 trial, trial_reasons, missing (the roles this folder doesn't supply) and per role where
 it came from. A pinned file is fetched from its URL (or taken from --boot-loader /
@@ -74,6 +99,9 @@ import glassine_pins  # noqa: E402
 
 BUILD_ID = re.compile(r'(\d{8}-\d{6})(?:-(\d+))?')
 ROLES = ['base', 'kernel', 'ram-environment', 'boot-loader', 'partition-layout', 'recovery']
+# a target without a boot image (a PC): the kernel set's parts (microcode-<name> as found)
+PC_ROLES = ['base', 'kernel', 'initramfs', 'board', 'boot-modules', 'splash', 'boot-loader', 'recovery']
+MIB = 1 << 20
 # the roles a target pins in targets/<target>/release.conf: (role, key prefix, option)
 PINNED = [('boot-loader', 'BOOT_LOADER', 'boot_loader'), ('partition-layout', 'LAYOUT', 'layout')]
 SHA = re.compile(r'[0-9a-f]{64}')
@@ -201,6 +229,170 @@ def entry(path, rel, kind, minimum, **extra):
     return e
 
 
+def target_conf(repo, target):
+    """The target file's keys (targets/<target>/target)."""
+    path = os.path.join(repo, 'targets', target, 'target')
+    if not os.path.isfile(path):
+        raise Fail(f'{path}: no such target')
+    with open(path) as f:
+        return dict(ln.rstrip('\n').split('=', 1) for ln in f if '=' in ln and not ln.startswith('#'))
+
+
+def board_cmdline(path):
+    """CMDLINE of a board.conf as every reader of a kernel set reads it (boot's
+    docs/boot-partition.md, "The command line"): one line, CMDLINE="<text>" or
+    CMDLINE=<word>, no backslash, $, backtick or further quote; words separated by
+    single spaces."""
+    found = []
+    with open(path) as f:
+        for line in f.read().split('\n'):
+            t = line.lstrip()
+            if t.startswith('export '):
+                t = t[7:].lstrip()
+            if t.startswith('CMDLINE=') or t.startswith('CMDLINE '):
+                found.append(line)
+    if len(found) != 1:
+        raise Fail(f'{path}: {"no" if not found else "more than one"} CMDLINE line')
+    v = found[0][len('CMDLINE='):] if found[0].startswith('CMDLINE=') else None
+    bad = re.compile(r'[\\$`"\']')
+    if v is not None and v.startswith('"') and v.endswith('"') and len(v) >= 2 and not bad.search(v[1:-1]):
+        v = v[1:-1]
+    elif v is None or not v or bad.search(v) or re.search(r'\s', v):
+        raise Fail(f'{path}: {found[0]!r} isn\'t CMDLINE="<text>" or CMDLINE=<word>')
+    if v != ' '.join(v.split()) or any(not c.isprintable() for c in v):
+        raise Fail(f'{path}: CMDLINE {v!r} isn\'t words separated by single spaces')
+    for k in ('glassine.system=', 'glassine.userdata=', 'glassine.img=', 'glassine.deploy.once='):
+        if any(w.startswith(k) for w in v.split()):
+            raise Fail(f'{path}: CMDLINE holds {k}, which the kernel set\'s writer adds')
+    return v
+
+
+def tree_sums(path):
+    """{path: sha256} of the regular files of a content manifest (scripts/tree-manifest.py)."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            w = line.split(' ')
+            if len(w) >= 6 and w[1] == '-':
+                p = w[0][2:] if w[0].startswith('./') else w[0]
+                out[p] = w[5].strip()
+    return out
+
+
+def crc32(b):
+    import zlib
+    return zlib.crc32(b) & 0xffffffff
+
+
+def splash(width, height, color):
+    """A splash of boot's format 1 (docs/boot-partition.md, "The image format"): kind 0,
+    width x height pixels of one colour, made for a mode of that size, the background the
+    same colour, run-length encoded."""
+    import struct
+    if not (1 <= width <= 16384 and 1 <= height <= 16384) or width * height * 4 > 32 << 20 \
+            or not 0 <= color <= 0xffffff:
+        raise Fail(f'splash {width} x {height}, colour {color:#x}: past the format\'s limits')
+    px = struct.pack('<I', color)            # blue, green, red, one unused byte
+    n, runs = width * height, bytearray()
+    while n:
+        k = min(n, 129)
+        runs += bytes([k + 126]) + px if k >= 2 else bytes([0]) + px
+        n -= k
+    payload = bytes(runs)
+    head = b'GLSPLASH' + struct.pack('<HHIIIIIIIQI', 1, 0, width, height, width, height, 1, color, 1,
+                                     len(payload), crc32(payload))
+    return head + struct.pack('<I', crc32(head)) + b'\0' * 8 + payload
+
+
+def board_archive_len(conf_len):
+    """The length of boot's board archive for a board.conf of conf_len bytes."""
+    n = 0
+    for name, size in (('etc', 0), ('etc/glassine-boot', 0), ('etc/glassine-boot/board.conf', conf_len),
+                       ('TRAILER!!!', 0)):
+        n += 110 + len(name) + 1
+        n = (n + 3) // 4 * 4 + size
+        n = (n + 3) // 4 * 4
+    return n
+
+
+def pc_parts(o, adir, repo, target, tconf, m, brec, boot_dir, work):
+    """The kernel set's parts of a target without a boot image: {role: (path, kind, extra)}
+    in a work directory, and the boot partition's least size."""
+    rel = m['kernel_release']
+    kroot = os.path.join(os.path.abspath(o['kernel']), 'modules', rel)
+    if not os.path.isdir(kroot):
+        raise Fail(f'--kernel {o["kernel"]}: no modules/{rel}/ (the build\'s release)')
+    sums = tree_sums(os.path.join(adir, 'modules', rel + '.manifest'))
+    parts = {}
+
+    def tree_file(sub, role, kind, **extra):
+        p = os.path.join(kroot, sub)
+        if sums.get(sub) is None or not os.path.isfile(p) or glassine_pins.sha256_file(p) != sums[sub]:
+            raise Fail(f'{role}: {p} is not the file modules/{rel}.manifest names')
+        parts[role] = (p, kind, extra)
+
+    tree_file('vmlinuz', 'kernel', 'efi-kernel', release=rel)
+    names = sorted(n for n in sums if re.fullmatch(r'microcode/[a-z0-9]+-ucode\.img', n))
+    for n in names:
+        tree_file(n, 'microcode-' + n.split('/')[1][:-len('-ucode.img')], 'cpio')
+    ird = m.get('initramfs', '')
+    irec = record(os.path.join(adir, 'boot', 'initramfs', ird + '.manifest'))
+    ipath = os.path.join(adir, 'boot', 'initramfs', ird + '.cpio.gz')
+    checked(ipath, irec['sha256'], f'initramfs {ird}')
+    parts['initramfs'] = (ipath, 'initramfs', {'identity': ird})
+    board = os.path.join(repo, 'targets', target, 'board.conf')
+    if not os.path.isfile(board):
+        raise Fail(f'{board}: a target without a boot image needs its board.conf (the board role)')
+    cmdline = board_cmdline(board)
+    in_base = tree_sums(os.path.join(adir, target, 'bases', m['base'], 'tree.manifest'))
+    if in_base.get('etc/glassine-bootimg/board.conf') != glassine_pins.sha256_file(board):
+        raise Fail(f'{board} is not the base\'s /etc/glassine-bootimg/board.conf: the kernel set and '
+                   f'the booted system would read other board keys')
+    parts['board'] = (board, 'board-conf', {})
+    parts['kernel'][2]['cmdline'] = cmdline
+    # the boot modules, by boot's own script on the kernel's tree
+    if not os.path.isfile(os.path.join(boot_dir, 'build-boot-modules.sh')):
+        raise Fail(f'boot at {boot_dir}: no build-boot-modules.sh')
+    plat = {'x86_64': 'amd64', 'amd64': 'amd64', 'aarch64': 'arm64', 'arm64': 'arm64'}.get(tconf.get('arch', ''))
+    if not plat:
+        raise Fail(f'targets/{target}/target: arch={tconf.get("arch")} is not one this knows')
+    bm = os.path.join(work, 'bm')
+    os.makedirs(bm)
+    cmd = ['docker', 'run', '--rm', '--platform', f'linux/{plat}', '-v', f'{kroot}:/k/{rel}:ro',
+           '-v', f'{boot_dir}:/b:ro', '-v', f'{bm}:/o', '-e', f'REL={rel}',
+           '-e', f'HOST_UID={os.getuid()}', '-e', f'HOST_GID={os.getgid()}',
+           os.environ.get('MATERIALIZE_IMAGE', 'alpine:3.24'), 'sh', '-euc',
+           'apk add -q --no-progress kmod cpio gzip xz zstd >/dev/null; '
+           'sh /b/build-boot-modules.sh "/k/$REL" /o/boot-modules.cpio.gz; chown "$HOST_UID:$HOST_GID" /o/*']
+    print(f'pool-image: boot modules of {rel} (boot\'s build-boot-modules.sh)')
+    if subprocess.run(cmd).returncode != 0:
+        raise Fail('build-boot-modules.sh failed')
+    parts['boot-modules'] = (os.path.join(bm, 'boot-modules.cpio.gz'), 'cpio-gz', {})
+    conf = os.path.join(repo, 'targets', target, 'release.conf')
+    sw, sh_, sc = (shell_conf(conf, k) for k in ('SPLASH_WIDTH', 'SPLASH_HEIGHT', 'SPLASH_COLOR'))
+    if sw or sh_ or sc:
+        try:
+            pic = splash(int(sw), int(sh_), int(sc, 16))
+        except (TypeError, ValueError):
+            raise Fail(f'{conf}: SPLASH_WIDTH, SPLASH_HEIGHT (decimal) and SPLASH_COLOR (0xRRGGBB) go together')
+        sp = os.path.join(work, 'default.gspl')
+        with open(sp, 'wb') as f:
+            f.write(pic)
+        parts['splash'] = (sp, 'glassine-splash', {})
+    # the boot partition's least size (spec 002 FR-019a): the kernel set as the installer
+    # assembles it (microcode, initramfs, board archive, boot modules, each at a multiple
+    # of 4), three of them, two recovery images, two splashes of 32 MiB, all twice, + 8 MiB
+    initrd = 0
+    for size in [os.path.getsize(parts[r][0]) for r in ['microcode-' + n.split('/')[1][:-len('-ucode.img')]
+                                                      for n in names] + ['initramfs']] \
+            + [board_archive_len(os.path.getsize(board)), os.path.getsize(parts['boot-modules'][0])]:
+        initrd = (initrd + 3) // 4 * 4 + size
+    kset = os.path.getsize(parts['kernel'][0]) + initrd + 4096        # + set.rec
+    rec = os.path.getsize(o['recovery']) if o['recovery'] and os.path.isfile(o['recovery']) else kset
+    least = 2 * (3 * kset + 2 * rec + 64 * MIB) + 8 * MIB
+    return parts, (least + MIB - 1) // MIB * MIB
+
+
 def usage():
     print(__doc__, file=sys.stderr)
     sys.exit(2)
@@ -208,12 +400,12 @@ def usage():
 
 def parse(argv):
     o = {'build': None, 'ramenv': None, 'recovery': None, 'boot_loader': None, 'layout': None, 'boot': None, 'boot_commit': None, 'out': None, 'margin': '64',
-         'repo': os.path.dirname(HERE)}
+         'repo': os.path.dirname(HERE), 'kernel': None}
     pos = []
     it = iter(argv)
     for a in it:
         if a in ('--build', '--ramenv', '--recovery', '--boot-loader', '--layout', '--boot', '--boot-commit',
-                 '--out', '--margin', '--repo'):
+                 '--out', '--margin', '--repo', '--kernel'):
             v = next(it, None)
             if v is None:
                 usage()
@@ -247,14 +439,30 @@ def main(argv):
     checked(os.path.join(adir, stream), brec['stream_sha256'], f'base {base}')
     mstream = os.path.join('modules', rel + '.btrfs.zst')
     checked(os.path.join(adir, mstream), m['modules_stream_sha256'], f'modules {rel}')
-    bimg = os.path.join(adir, 'bootimg', img + '.img')
-    brec_img = record(os.path.join(adir, 'bootimg', img + '.manifest'))
-    if brec_img.get('kernel') != rel:
-        raise Fail(f'boot image {img} carries kernel {brec_img.get("kernel")}, the build {rel}')
-    checked(bimg, brec_img['sha256'], f'boot image {img}')
-    part = shell_conf(os.path.join(repo, 'targets', target, 'board.conf'), 'PART_SIZE')
-    if not part or not part.isdigit() or os.path.getsize(bimg) > int(part):
-        raise Fail(f'targets/{target}/board.conf: no PART_SIZE, or the boot image is larger')
+    tconf = target_conf(repo, target)
+    texp = tconf.get('exports', '').split()
+    pc = bool(texp) and 'boot-export' not in texp
+    if pc:
+        # a target without a boot image: the kernel set's parts (pc_parts), no boot image
+        if img or not m.get('initramfs'):
+            raise Fail(f'build {bid}: a build of {target} names no boot image and its initramfs '
+                       f'(bootimg={img!r}, initramfs={m.get("initramfs")!r})')
+        if not o['kernel']:
+            raise Fail(f'{target} has no boot image: --kernel DIR (its kernel-export) is needed')
+        for opt in ('ramenv', 'layout', 'recovery'):
+            if o[opt]:
+                raise Fail(f'--{opt.replace("_", "-")}: {target} has none in its releases yet')
+    else:
+        if o['kernel']:
+            raise Fail(f'--kernel: {target} has a boot image, which carries its kernel')
+        bimg = os.path.join(adir, 'bootimg', img + '.img')
+        brec_img = record(os.path.join(adir, 'bootimg', img + '.manifest'))
+        if brec_img.get('kernel') != rel:
+            raise Fail(f'boot image {img} carries kernel {brec_img.get("kernel")}, the build {rel}')
+        checked(bimg, brec_img['sha256'], f'boot image {img}')
+        part = shell_conf(os.path.join(repo, 'targets', target, 'board.conf'), 'PART_SIZE')
+        if not part or not part.isdigit() or os.path.getsize(bimg) > int(part):
+            raise Fail(f'targets/{target}/board.conf: no PART_SIZE, or the boot image is larger')
 
     ramenv = export(o['ramenv'], 'ramenv', target, 'ram environment') if o['ramenv'] else None
     recovery = None
@@ -301,11 +509,16 @@ def main(argv):
             p = pinned(conf, role, key, o[opt], work)
             if p:
                 pins[role] = p
-        if 'boot-loader' in pins and (not abl_part or not abl_part.isdigit()
-                                      or os.path.getsize(pins['boot-loader'][0]) > int(abl_part)):
+        if pc and 'partition-layout' in pins:
+            raise Fail(f'{conf}: LAYOUT_*: a PC lays its partitions out from its description')
+        if not pc and 'boot-loader' in pins and (not abl_part or not abl_part.isdigit()
+                                                 or os.path.getsize(pins['boot-loader'][0]) > int(abl_part)):
             raise Fail(f'{conf}: no BOOT_LOADER_PART_SIZE, or the boot loader is larger')
-        print(f'pool-image: build {bid}: base {base}, kernel {rel}, boot image {img}; '
-              f'layout by boot {boot_commit[:12]}')
+        if pc:
+            parts, boot_least = pc_parts(o, adir, repo, target, tconf, m, brec, boot_dir, work)
+        print(f'pool-image: build {bid}: base {base}, kernel {rel}, '
+              + (f'initramfs {m["initramfs"]} (a kernel set)' if pc else f'boot image {img}')
+              + f'; layout by boot {boot_commit[:12]}')
 
         os.makedirs(os.path.join(stage, 'o'))
         cmd = ['docker', 'run', '--rm', '--privileged',
@@ -336,10 +549,22 @@ def main(argv):
                              kernel_release=rel, layout_boot_commit=boot_commit)
         if arts['base']['sha256'] != res['sha256'] or arts['base']['size'] != int(res['size']):
             raise Fail('the pool image changed after the container hashed it')
-        k_rel = f'kernel/{img}.img'
-        link_or_copy(bimg, os.path.join(stage, k_rel))
-        arts['kernel'] = entry(os.path.join(stage, k_rel), k_rel, 'raw-image', int(part),
-                               bootimg=img, kernel_release=rel)
+        if pc:
+            for role, (path, kind, extra) in parts.items():
+                name = {'kernel': 'vmlinuz', 'initramfs': f'{m["initramfs"]}.cpio.gz', 'board': 'board.conf',
+                        'boot-modules': 'boot-modules.cpio.gz', 'splash': 'default.gspl'}.get(role)
+                r_ = f'kernel/{rel}/{name or os.path.basename(path)}' if role == 'kernel' or role.startswith(
+                    'microcode-') else f'{role}/{name}'
+                link_or_copy(path, os.path.join(stage, r_))
+                arts[role] = entry(os.path.join(stage, r_), r_, kind, boot_least if role == 'kernel' else None,
+                                   **extra)
+                if arts[role]['min_partition_bytes'] is None:
+                    del arts[role]['min_partition_bytes']
+        else:
+            k_rel = f'kernel/{img}.img'
+            link_or_copy(bimg, os.path.join(stage, k_rel))
+            arts['kernel'] = entry(os.path.join(stage, k_rel), k_rel, 'raw-image', int(part),
+                                   bootimg=img, kernel_release=rel)
         if ramenv:
             r_rel = f'ram-environment/{ramenv[0]}.img'
             link_or_copy(ramenv[1], os.path.join(stage, r_rel))
@@ -349,7 +574,10 @@ def main(argv):
         for role, (path, url) in pins.items():
             rel_ = f'{role}/{os.path.basename(url.split("?")[0]) or role}'
             link_or_copy(path, os.path.join(stage, rel_))
-            if role == 'boot-loader':
+            if role == 'boot-loader' and pc:
+                arts[role] = entry(os.path.join(stage, rel_), rel_, 'efi-application',
+                                   os.path.getsize(path), url=url)
+            elif role == 'boot-loader':
                 arts[role] = entry(os.path.join(stage, rel_), rel_, 'raw-image', int(abl_part), url=url)
             else:
                 arts[role] = entry(os.path.join(stage, rel_), rel_, 'gpt-recipe', os.path.getsize(path), url=url)
@@ -360,7 +588,7 @@ def main(argv):
             extra = {'recovery': recovery[0], 'kernel_release': recovery[2].get('kernel', '')} if recovery[0] else {}
             arts['recovery'] = entry(os.path.join(stage, c_rel), c_rel, 'raw-image', os.path.getsize(recovery[1]),
                                      **extra)
-        missing = [r for r in ROLES if r not in arts]
+        missing = [r for r in (PC_ROLES if pc else ROLES) if r not in arts]
         doc = {'release_format': 1, 'target': target, 'build': bid, 'trial': bool(why),
                'trial_reasons': why, 'missing': missing, 'artifacts': arts}
         with open(os.path.join(stage, 'release.json'), 'w') as f:

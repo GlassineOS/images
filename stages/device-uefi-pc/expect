@@ -1,0 +1,10 @@
+# What this device's finished tree must say (scripts/validate.sh, the validation stage):
+# FILE KEY=VALUE per line, FILE read the way its programs read it. The partitions the
+# installed system's first start and its initramfs use: GlassineOS/installer's names
+# (devices/uefi-pc.toml), in deploy.conf and in the board keys alike.
+/etc/glassine/deploy.conf SYSTEM_DEV=/dev/disk/by-partlabel/glassine-system
+/etc/glassine/deploy.conf USERDATA_DEV=/dev/disk/by-partlabel/glassine-userdata
+/etc/glassine/deploy.conf USERDATA_RESERVE_KIB=0
+/etc/glassine-bootimg/board.conf ROOT_PART=glassine-system
+/etc/glassine-bootimg/board.conf USERDATA_PART=glassine-userdata
+/etc/glassine-bootimg/board.conf ROOT_LAYOUT=deployments

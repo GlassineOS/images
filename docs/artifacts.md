@@ -158,7 +158,8 @@ taken. The manifest never enters a base.
 | `export.<export>.key` | the key of each registry export (`kernel-export`, `dtb-export`, `initramfs-export`, `boot-export`), docs/registry.md |
 | `export.<export>.from` | where that export came from: `<package>@sha256:<digest>`, the published export pulled under its key (the digest the registry gave for the key, which the pull was checked against), or `built` when it was built on this computer |
 | `kernel_release` | the kernel release |
-| `bootimg` | the boot image id |
+| `bootimg` | the boot image id; empty for a target without a boot image (a PC: its target file's `exports=` has no `boot-export`), whose build record has no `boot.manifest` or `select` beside it |
+| `initramfs` | only without a boot image: the initramfs the kernel set takes, `<commit12>@<id>` under `boot/initramfs/` |
 | `boot_commit` | the GlassineOS/boot commit the initramfs is built from |
 | `stream`, `stream_sha256` | the base's full stream, as a path under `<artifacts>`, and its sha256 |
 | `delta`, `delta_sha256` | the base's delta, the same way, or empty |
@@ -219,6 +220,41 @@ releases/<build-id>/
 ├── partition-layout/<name>          the partition layout the target pins
 └── recovery/<id>.img                with --recovery: the recovery, for recovery
 ```
+
+A target without a boot image (a PC: its target file's `exports=` has no
+`boot-export`) needs `--kernel DIR`, its kernel export, and has the parts of a kernel
+set (GlassineOS/boot's `docs/boot-partition.md`) in place of the boot image, and no
+RAM environment or partition layout:
+
+```
+releases/<build-id>/
+├── release.json
+├── base/<base-id>.pool.img                 base: the glassine-system partition's first contents
+├── kernel/<release>/vmlinuz                kernel: the EFI stub (cmdline, release)
+├── kernel/<release>/<name>-ucode.img       microcode-<name>: each early microcode archive
+├── initramfs/<commit12>@<id>.cpio.gz       initramfs (identity)
+├── board/board.conf                        board: targets/<target>/board.conf
+├── boot-modules/boot-modules.cpio.gz       boot-modules: boot's build-boot-modules.sh
+├── splash/default.gspl                     splash: a plain picture (release.conf SPLASH_*)
+└── boot-loader/<name>                      the boot loader the target pins, when it pins one
+```
+
+Every file but the board, the boot modules and the splash is checked against what the
+build recorded: `vmlinuz` and the microcode against `modules/<release>.manifest`, the
+initramfs against its record, and the board against the base's
+`/etc/glassine-bootimg/board.conf` (`tree.manifest`), so the kernel set and the booted
+system read the same board keys. The boot modules are made from the kernel export by
+boot at the layout's commit, in a container of the target's architecture.
+
+| Role (PC) | kind | min_partition_bytes |
+|---|---|---|
+| `base` | `btrfs-pool-image` | as above |
+| `kernel` | `efi-kernel` | spec 002's rule for a boot partition of files: three kernel sets (the kernel and the `initrd` the installer assembles from these parts), two recovery images, two splashes of 32 MiB, all twice, + 8 MiB, a whole MiB. Without a recovery, each recovery image counts as one kernel set |
+| `initramfs`, `board`, `microcode-<name>`, `boot-modules`, `splash` | `initramfs`, `board-conf`, `cpio`, `cpio-gz`, `glassine-splash` | none (parts of the boot partition's files) |
+| `boot-loader` | `efi-application` | its size |
+
+`kernel` also states `cmdline` (the board's `CMDLINE`) and `release`; `initramfs` states
+`identity`. `missing` lists `boot-loader` while the target pins none and `recovery`.
 
 **Pinned roles.** The boot loader and the partition layout aren't built here.
 `targets/<target>/release.conf` pins each by URL and SHA-256 (`BOOT_LOADER_URL`,

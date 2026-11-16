@@ -200,5 +200,85 @@ check "grown to min_partition_bytes as the first start does" "grep -q '^grown=[0
 check "B's incremental stream receives onto A inside the image: read-only, B's received UUID" "grep -qx delta=received '$L' && grep -qx b_ro=true '$L' && grep -qx \"b_ruuid=\$(v received_uuid '$A/fixture/bases/$IDB/record')\" '$L'"
 check "B's content: the changed file, its base manifest; A unchanged" "grep -qx b_config=two '$L' && grep -qx a_config=one '$L' && grep -qx b_manifest=same '$L' && grep -qx blob=same '$L'"
 
+# --- a target without a boot image (a PC): the kernel set's parts
+# A fixture PC target (exports=kernel-export) and its kernel export: vmlinuz, two microcode
+# archives and a modules tree that builds btrfs, ext4 and overlay in (depmod's files made
+# in a container), so boot's build-boot-modules.sh gives an archive with an empty load list.
+mkdir -p "$R/targets/pcfix"
+printf 'busybox=1.0-r0\n' > "$R/stages/base0/lock.x86_64"
+printf 'FROM base0 AS device-pcfix\n' >> "$R/Dockerfile"
+printf 'arch=x86_64\nkernel=fake\nexports=kernel-export\n' > "$R/targets/pcfix/target"
+printf 'ROOT_PART=glassine-system\nCMDLINE="quiet panic=10"\n' > "$R/targets/pcfix/board.conf"
+printf 'SPLASH_WIDTH=320\nSPLASH_HEIGHT=200\nSPLASH_COLOR=0x102030\n' > "$R/targets/pcfix/release.conf"
+PK=$O/pk; PREL=6.18.0-0-fake
+mkdir -p "$PK/modules/$PREL/microcode" "$PK/boot/initramfs"
+head -c 100000 /dev/urandom > "$PK/modules/$PREL/vmlinuz"
+head -c 3001 /dev/urandom > "$PK/modules/$PREL/microcode/intel-ucode.img"
+head -c 2002 /dev/urandom > "$PK/modules/$PREL/microcode/amd-ucode.img"
+printf 'format=1\nrelease=%s\nprovides=\nfeatures=\n' $PREL > "$PK/modules/$PREL/kernel.manifest"
+PIRD=0123456789ab@0000000000000003
+echo pc-ird > "$PK/boot/initramfs/$PIRD.cpio.gz"
+printf 'format=1\ncommit=%s\nsha256=%s\nneeds=\nfeatures=\n' $BOOT_COMMIT "$(sha256sum < "$PK/boot/initramfs/$PIRD.cpio.gz" | cut -c1-64)" \
+	> "$PK/boot/initramfs/$PIRD.manifest"
+docker run --rm -v "$O":/o -v "$R/targets/pcfix/board.conf":/board.conf:ro -e HOST="$(id -u):$(id -g)" -e PREL=$PREL alpine:3.24 sh -euc '
+apk add -q --no-progress kmod >/dev/null
+mkdir -p /t/lib/modules/$PREL
+printf "kernel/fs/btrfs/btrfs.ko\nkernel/fs/ext4/ext4.ko\nkernel/fs/overlayfs/overlay.ko\n" > /t/lib/modules/$PREL/modules.builtin
+depmod -b /t $PREL
+cp /t/lib/modules/$PREL/modules.* /o/pk/modules/$PREL/
+mkdir -p /r/etc/glassine-bootimg /r/lib/apk/db && cd /r
+printf "P:busybox\nV:1.0-r0\n\n" > lib/apk/db/installed
+cp /board.conf etc/glassine-bootimg/board.conf
+tar --numeric-owner -cf /o/pc.tar $(ls -A)
+chown -R "$HOST" /o/pk /o/pc.tar'
+M --time 2026-01-03T10:00:00Z --no-parent "$O/pc.tar" "$PK" pcfix "$A"
+BP=$A/pcfix/builds/20260103-100000
+check "materialize, a PC target: the build names no boot image and names its initramfs" "[ -z \"\$(v bootimg '$BP/manifest')\" ] && [ \"\$(v initramfs '$BP/manifest')\" = '$PIRD' ] && [ ! -e '$BP/boot.manifest' ]"
+PI --build 20260103-100000 --boot "$BOOT" --out "$O/rel-pcx" "$A" pcfix > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a PC target without --kernel: exit 1, named" "[ $rc = 1 ] && grep -q -- '--kernel DIR' '$O/o' && [ ! -e '$O/rel-pcx' ]"
+out=$(PI --build 20260103-100000 --boot "$BOOT" --kernel "$PK" --out "$O/rel-pc" "$A" pcfix 2>&1) && rc=0 || rc=$?
+echo "$out" | sed 's/^/    /'
+check "pool-image, a PC target: exit 0" "[ $rc = 0 ]"
+python3 -I - "$O/rel-pc" "$PK/modules/$PREL" "$R/targets/pcfix/board.conf" "$PIRD" "$PREL" > "$O/json.log" 2>&1 <<'EOF' && jrc=0 || jrc=$?
+import hashlib, json, os, re, struct, sys, zlib
+d, kdir, board, ird, rel = sys.argv[1:]
+r = json.load(open(os.path.join(d, 'release.json')))
+a = r['artifacts']
+for role, e in a.items():
+    b = open(os.path.join(d, e['file']), 'rb').read()
+    assert len(b) == e['size'] and hashlib.sha256(b).hexdigest() == e['sha256'], role
+assert sorted(a) == ['base', 'board', 'boot-modules', 'initramfs', 'kernel', 'microcode-amd', 'microcode-intel', 'splash'], sorted(a)
+assert r['missing'] == ['boot-loader', 'recovery'], r['missing']
+k = a['kernel']
+assert k['kind'] == 'efi-kernel' and k['release'] == rel and k['cmdline'] == 'quiet panic=10', k
+assert open(os.path.join(d, k['file']), 'rb').read() == open(f'{kdir}/vmlinuz', 'rb').read()
+assert k['min_partition_bytes'] % (1 << 20) == 0 and k['min_partition_bytes'] >= 2 * 64 << 20, k
+for n in ('amd', 'intel'):
+    m = a[f'microcode-{n}']
+    assert m['kind'] == 'cpio' and os.path.basename(m['file']) == f'{n}-ucode.img', m
+    assert open(os.path.join(d, m['file']), 'rb').read() == open(f'{kdir}/microcode/{n}-ucode.img', 'rb').read()
+assert a['initramfs']['identity'] == ird and a['initramfs']['kind'] == 'initramfs', a['initramfs']
+assert open(os.path.join(d, a['board']['file']), 'rb').read() == open(board, 'rb').read() and a['board']['kind'] == 'board-conf'
+assert a['boot-modules']['kind'] == 'cpio-gz'
+s = open(os.path.join(d, a['splash']['file']), 'rb').read()
+assert s[:8] == b'GLSPLASH' and struct.unpack_from('<HHII', s, 8) == (1, 0, 320, 200), s[:32]
+assert zlib.crc32(s[:52]) == struct.unpack_from('<I', s, 52)[0] and zlib.crc32(s[64:]) == struct.unpack_from('<I', s, 48)[0]
+n, i, p = 0, 0, s[64:]
+while i < len(p):
+    c = p[i]; n += c + 1 if c < 128 else c - 126; i += 1 + ((c + 1) * 4 if c < 128 else 4)
+    assert c < 128 or p[i - 4:i] == struct.pack('<I', 0x102030)
+assert i == len(p) and n == 320 * 200, (i, len(p), n)
+assert a['base']['kind'] == 'btrfs-pool-image' and a['base']['kernel_release'] == rel
+print('kernel set: min boot partition', k['min_partition_bytes'])
+EOF
+sed 's/^/    /' "$O/json.log"
+check "release.json, a PC target: the kernel set's parts, the board, the splash, boot-loader and recovery missing" "[ $jrc = 0 ]"
+cp "$R/targets/pcfix/board.conf" "$O/board.saved"; echo 'CMDLINE="other"' > "$R/targets/pcfix/board.conf"
+PI --build 20260103-100000 --boot "$BOOT" --kernel "$PK" --out "$O/rel-pcy" "$A" pcfix > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a PC target whose board.conf isn't the base's: exit 1, named" "[ $rc = 1 ] && grep -q \"is not the base's\" '$O/o' && [ ! -e '$O/rel-pcy' ]"
+cp "$O/board.saved" "$R/targets/pcfix/board.conf"; echo tampered >> "$PK/modules/$PREL/vmlinuz"
+PI --build 20260103-100000 --boot "$BOOT" --kernel "$PK" --out "$O/rel-pcz" "$A" pcfix > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a PC kernel that isn't the build's modules tree: exit 1, named" "[ $rc = 1 ] && grep -q 'kernel: .* is not the file modules/' '$O/o' && [ ! -e '$O/rel-pcz' ]"
+
 rm -rf "$O"
 echo "$fails failed"; [ $fails = 0 ]
