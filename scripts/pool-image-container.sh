@@ -9,6 +9,8 @@
 #   BASE      the base id                   RUUID    its received UUID (the base record)
 #   STREAM    its full stream, under /a     RELEASE  the kernel release (modules/<RELEASE>)
 #   MSTREAM   the modules stream, under /a  MARGIN   bytes left free beyond what is allocated
+#   BOOTFILES the base's boot/ files, paths under /a (boot/dtb/<device>@<id>.dtb, boot/initramfs/
+#             <commit12>@<id>.cpio.gz, each with its .manifest), checked by pool-image
 #   IMG       the largest pool tried (the first try is the streams' size + 256 MiB)
 #   TMPFS     tmpfs size                    HOST_UID, HOST_GID  owner of the outputs
 # Outputs in /o: pool.img, result (key=value: size, sha256, used_*, min_partition_bytes).
@@ -62,10 +64,15 @@ layout_ok() {
 	[ -n "$(ruuid $P/modules/"$RELEASE")" ] || die "modules/$RELEASE has no received UUID"
 	[ -f $P/state/format ] || die "no state/format"
 	[ -e $P/state/install ] || die "no install marker state/install"
+	# boot/: exactly the base's boot files, each the build's bytes
+	have=$(cd $P && find boot -type f | sort | tr '\n' ' ')
+	want=$(printf '%s\n' $BOOTFILES | sort | tr '\n' ' ')
+	[ "$have" = "$want" ] || die "boot/ holds $have, not $want"
+	for f in $BOOTFILES; do cmp -s "/a/$f" "$P/$f" || die "$f in the pool is not the build's"; done
 }
 
 # fill SIZE: a pool of SIZE bytes, laid out by boot's init, with the base and the modules
-# received; 1 when they don't fit. btrfs sizes its chunks by the file system's size (a
+# received and the base's boot/ files; 1 when they don't fit. btrfs sizes its chunks by the file system's size (a
 # tenth of it, up to 1 GiB data / 256 MiB metadata), and a shrink can't make a chunk
 # smaller: so the pool starts at about what it holds, not at the partition's size. Never
 # mixed block groups: they would stay for good, also after the first start grows it.
@@ -91,6 +98,14 @@ fill() {
 	receive "/a/$STREAM" $P/bases "$BASE" || return 1; U1=$(used)
 	receive "/a/$MSTREAM" $P/modules "$RELEASE" || return 1; U2=$(used)
 	[ -n "$U1" ] && [ -n "$U2" ] || die "no used bytes from btrfs filesystem usage"
+
+	# the base's boot/ files, as glassine-deploy receive --boot keeps them (boot's
+	# docs/kernel-artifacts.md, "On the system partition"): file and manifest, read back
+	for f in $BOOTFILES; do
+		mkdir -p "$P/${f%/*}" && cp "/a/$f" "$P/$f.new" && chmod 644 "$P/$f.new" || { say "boot/: $f did not fit"; return 1; }
+		sync; cmp -s "/a/$f" "$P/$f.new" || die "$f: the read-back is not the build's"
+		mv "$P/$f.new" "$P/$f"
+	done
 }
 
 tick
@@ -110,7 +125,7 @@ say "state/format: $(cat $P/state/format | tr '\n' ' ')"
 tock "mkfs + init + receive"
 
 layout_ok
-say "base $BASE: read-only, received UUID $RUUID; modules/$RELEASE"
+say "base $BASE: read-only, received UUID $RUUID; modules/$RELEASE; $(printf '%s ' $BOOTFILES)"
 
 # 4. shrink to what is allocated + MARGIN, a whole MiB (at least 256 MiB); the first start grows it to the partition
 tick
