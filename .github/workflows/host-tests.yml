@@ -6,7 +6,8 @@
 # tmpfs, and one BuildKit tar export of a fixture tree) and scripts/test-pool-image.sh (the
 # installer's release folder, the pool image and a delta received into it) and
 # scripts/test-apk-stage.sh (a stage's locked install, in an Alpine container on a
-# made-up repository).
+# made-up repository) and scripts/test-kernel-lock.sh (a distribution kernel's firmware
+# held with it by the lock refresh, and one release, one tree).
 name: host-tests
 on:
   pull_request:
@@ -30,6 +31,11 @@ on:
       - scripts/kernel-check
       - scripts/apk-stage.sh
       - scripts/test-apk-stage.sh
+      - scripts/lock.sh
+      - scripts/lock-diff.sh
+      - scripts/kernel-lock.sh
+      - scripts/kernel-release-check
+      - scripts/test-kernel-lock.sh
       - Dockerfile
       - targets/**
       - .github/workflows/host-tests.yml
@@ -55,6 +61,11 @@ on:
       - scripts/kernel-check
       - scripts/apk-stage.sh
       - scripts/test-apk-stage.sh
+      - scripts/lock.sh
+      - scripts/lock-diff.sh
+      - scripts/kernel-lock.sh
+      - scripts/kernel-release-check
+      - scripts/test-kernel-lock.sh
       - Dockerfile
       - targets/**
       - .github/workflows/host-tests.yml
@@ -98,3 +109,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: sh scripts/test-apk-stage.sh
+  kernel-lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh scripts/test-kernel-lock.sh

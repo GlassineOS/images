@@ -201,6 +201,13 @@ times = {os.lstat(os.path.join(d, n)).st_mtime for d, ds, fs in os.walk(os.path.
 print('times', sorted(times))
 bad = ref.split('@')[0] + '@sha256:' + '0' * 64
 print('baddigest', r.pull('kernel-export', bad, os.path.join(o, 'bad'), 'linux/arm64', w, tries=1))
+# a kernel's release tag, pushed with its key's (docs/registry.md, "Releases")
+print('norelease', r.lookup_release('7.0-fake')['state'])
+k2 = '%064d' % 6
+st2, ref2 = r.publish('kernel-export', k2, x, 'linux/arm64', w, {'release': '7.0-fake', 'release.tree': 'b' * 64},
+                      tags=('release-7.0-fake',))
+rel = r.lookup_release('7.0-fake')
+print('release', rel['state'], rel.get('tree') == 'b' * 64, rel.get('ref') == ref2, rel.get('key') == k2)
 EOF
 sed 's/^/     | /' "$O/reg.out"
 q() { grep -q -- "$1" "$O/reg.out"; }
@@ -212,6 +219,8 @@ check "registry: pulled by digest"                               'q "^pull None$
 check "registry: the pulled files are the published ones"        'q "^compare 0 "'
 check "registry: every pulled time is 0, as in an export"        'q "^times \[0.0\]$"'
 check "registry: a digest the registry doesn't have fails the pull" 'q "^baddigest pulling kernel-export from .*failed after 1 tries"'
+check "registry: a release never published: missing"             'q "^norelease missing$"'
+check "registry: release-<release> is the key's manifest, with its tree" 'q "^release published True True True$"'
 
 # scripts/registry on a git copy of this checkout: status, exports, publish
 C=$O/clean; copy "$C"

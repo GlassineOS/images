@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""One release, one tree (GlassineOS/boot's docs/kernel-artifacts.md): fails when a kernel
+release that is already published has another tree than this build's.
+
+    scripts/kernel-release-check KERNEL_DIR [--artifacts DIR] [--no-registry]
+    scripts/kernel-release-check --tree KERNEL_DIR      # print release and tree id only
+
+KERNEL_DIR holds a kernel export: modules/<release>/ with its kernel.manifest. Its tree
+id is the sha256 of the content manifest of modules/<release>/ (scripts/tree-manifest.py)
+with every owner written 0:0 and no hard-link marks, so a tree reads the same whoever
+exported it and through an image.
+
+Published means:
+- the registry: <prefix>/images-kernel:release-<release> (docs/registry.md, "Releases"),
+  whose release.tree annotation is the tree id. No answer from the registry fails (it
+  can't tell); --no-registry skips it.
+- with --artifacts DIR: DIR/modules/<release>.manifest (the content manifest of the
+  modules subvolume a build made there, which every release folder made from DIR
+  carries), and the newest release folder of each target, DIR/<target>/releases/<id>/:
+  when its kernel names this release, DIR must have that manifest to compare with.
+
+A distribution's kernel (a PC's linux-lts) keeps its release while its firmware could
+change: the lock refresh holds the firmware with the kernel package
+(scripts/kernel-lock.sh), and this check catches what gets past it. Exit 0: no published
+tree under the release, or the same one; 1: another tree, or it can't tell; 2: usage.
+"""
+import hashlib, json, os, subprocess, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+
+def fail(msg):
+    print(f'kernel-release-check: {msg}', file=sys.stderr)
+    sys.exit(1)
+
+
+def normalize(text):
+    """A content manifest with owners 0:0 and the hard-link marks (=<first>) left out."""
+    out = []
+    for line in text.splitlines():
+        f = line.split(' ')
+        if len(f) < 6:
+            fail(f'not a content manifest line: {line!r}')
+        f[2] = '0:0'
+        start = 7 if f[1] == 'l' else 6     # a symlink's "-> target" is two fields
+        f = f[:start] + [x for x in f[start:] if not x.startswith('=')]
+        out.append(' '.join(f) + '\n')
+    return ''.join(out)
+
+
+def tree(kdir):
+    """(release, normalized manifest, tree id) of KERNEL_DIR's one release."""
+    mdir = os.path.join(kdir, 'modules')
+    rels = sorted(os.listdir(mdir)) if os.path.isdir(mdir) else []
+    if len(rels) != 1:
+        fail(f'{mdir}: expected one release, found {len(rels)} ({" ".join(rels)})')
+    rel = rels[0]
+    if not os.path.isfile(os.path.join(mdir, rel, 'kernel.manifest')):
+        fail(f'{mdir}/{rel}: no kernel.manifest')
+    p = subprocess.run([sys.executable, '-I', os.path.join(HERE, 'tree-manifest.py'), os.path.join(mdir, rel)],
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        fail(f'tree-manifest.py failed: {p.stderr.strip()}')
+    man = normalize(p.stdout)
+    return rel, man, hashlib.sha256(man.encode()).hexdigest()
+
+
+def newest_releases(adir):
+    """{target: (release folder, its kernel's release)} for the newest release folder of
+    each target in adir."""
+    out = {}
+    for t in sorted(os.listdir(adir)) if os.path.isdir(adir) else []:
+        rdir = os.path.join(adir, t, 'releases')
+        if t.startswith('.') or not os.path.isdir(rdir):
+            continue
+        ids = sorted(x for x in os.listdir(rdir) if not x.startswith('.') and not x.endswith('.tmp')
+                     and os.path.isfile(os.path.join(rdir, x, 'release.json')))
+        if not ids:
+            continue
+        d = os.path.join(rdir, ids[-1])
+        try:
+            with open(os.path.join(d, 'release.json')) as f:
+                doc = json.load(f)
+            krel = (doc.get('artifacts') or {}).get('kernel', {}).get('kernel_release', '')
+        except (OSError, ValueError, AttributeError) as e:
+            fail(f'{d}/release.json: unreadable ({e})')
+        out[t] = (d, krel)
+    return out
+
+
+def main(argv):
+    if len(argv) == 2 and argv[0] == '--tree':
+        rel, _, tid = tree(argv[1])
+        print(f'{rel} {tid}')
+        return 0
+    adir, registry, pos = None, True, []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == '--artifacts' and i + 1 < len(argv):
+            adir = argv[i + 1]; i += 2; continue
+        if a == '--no-registry':
+            registry = False
+        elif a.startswith('-'):
+            print(__doc__, file=sys.stderr); return 2
+        else:
+            pos.append(a)
+        i += 1
+    if len(pos) != 1:
+        print(__doc__, file=sys.stderr)
+        return 2
+    rel, man, tid = tree(pos[0])
+    why = (f'a tree never changes under one release: a change of the kernel\'s files (its '
+           f'firmware or microcode included) needs a new release; for a distribution\'s '
+           f'kernel that is a new version of its package, and its firmware and microcode '
+           f'move only with it (scripts/kernel-lock.sh)')
+    seen = []
+    if adir is not None:
+        ref = os.path.join(adir, 'modules', rel + '.manifest')
+        if os.path.isfile(ref):
+            with open(ref) as f:
+                have = normalize(f.read())
+            if have != man:
+                diff = [l for l in set(have.splitlines()) ^ set(man.splitlines())]
+                fail(f'release {rel}: {ref} holds another tree (tree {hashlib.sha256(have.encode()).hexdigest()[:16]}, '
+                     f'this build {tid[:16]}; {len(diff)} lines differ, e.g. {sorted(diff)[:3]}); {why}')
+            seen.append(ref)
+        for t, (d, krel) in newest_releases(adir).items():
+            if krel == rel and not os.path.isfile(ref):
+                fail(f'release {rel}: the release folder {d} carries it, but {ref} is missing, '
+                     f'so its tree can\'t be compared')
+    if registry:
+        import glassine_registry as reg
+        r = reg.lookup_release(rel)
+        if r['state'] == 'error':
+            fail(f'release {rel}: can\'t tell whether the registry has it: {r["why"]} '
+                 f'(--no-registry to compare only with an artifacts folder)')
+        if r['state'] == 'published':
+            if r['tree'] != tid:
+                fail(f'release {rel}: published in the registry ({r["ref"]}, key {r["key"]}) with tree '
+                     f'{r["tree"]}, this build has {tid}; {why}')
+            seen.append(r['ref'])
+    print(f'kernel-release-check: {rel}: tree {tid}' +
+          (f', the same as {", ".join(seen)}' if seen else ', not published yet'))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
