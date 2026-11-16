@@ -327,3 +327,35 @@ pin), wrong pinned bytes and an unpinned target's `--boot-loader` refused, the m
 roles of a target without pins, the image read-only (the base read-only with its received UUID, the modules, the marker),
 and, on a copy grown to `min_partition_bytes`, a delta made by materialize (a base and
 its child) received onto the base inside the image.
+
+## Published PC releases
+
+On `main`, boot-qemu's `pc-release` job makes the generic x86-64 UEFI PC's release folder
+(`scripts/pc-release`) and tests it (`scripts/test-pc-release-qemu.sh`); the
+`pc-release-publish` job then publishes that folder, as it was tested, as a GitHub
+Release of this repository (`scripts/pc-release-publish`):
+
+| | |
+|---|---|
+| tag | `uefi-pc-<base-id>` (the `base` role's `base`), at the tested commit |
+| kind | prerelease (GlassineOS is unreviewed) |
+| `release.json` | the folder's, byte for byte: read it to see the roles' sizes before downloading |
+| `uefi-pc-release.tar.zst` | the whole folder under one directory `uefi-pc-<base-id>/` (tar: names sorted, owner 0:0, time 0; zstd) |
+| `SHA256SUMS` | sha256 of both |
+
+The URL of each is `https://github.com/GlassineOS/images/releases/download/uefi-pc-<base-id>/<name>`.
+After unpacking, `release.json`'s per-role sha256 check every file (docs: "Releases").
+
+- **One tag, one set of bytes.** A tag that is published already is left alone when its
+  `release.json` names the same sha256 for every role; when they differ (the same base
+  with another kernel, initramfs or loader on the same day), the job fails rather than
+  replace it. A trial is never published.
+- **Whole or not at all.** The release is made as a draft and published only once every
+  asset is up; a draft a cancelled run left is deleted first.
+- **Size.** GitHub's limit is 2 GiB per asset; the job fails on a larger archive.
+- **Retention.** Only the newest three published `uefi-pc-*` releases are kept; older
+  ones are deleted with their tags. A URL holds for as long as its release is among the
+  three: readers find the current ones by listing the repository's releases and taking
+  the newest whose tag starts with `uefi-pc-`.
+
+The Note Air's release folders are not published as GitHub Releases.

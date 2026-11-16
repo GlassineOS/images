@@ -9,10 +9,12 @@
 # first start grows the pool, formats userdata and selects the first deployment, which
 # boots and is accepted.
 # The pc-release job: the generic x86-64 UEFI PC's release folder (scripts/pc-release,
-# the kernel from the registry), installed by GlassineOS/installer's main branch on a
-# blank virtual PC and started through its first start into the first deployment
+# the kernel from the registry), installed by GlassineOS/installer (the commit in
+# scripts/test-pc-release-qemu.installer) on a blank virtual PC and started from its disk
+# through the firmware's entry and the loader into the first deployment
 # (scripts/test-pc-release-qemu.sh). On main the folder is kept as the run's artifact
-# uefi-pc-release, the installer's --release-dir.
+# uefi-pc-release, which the pc-release-publish job publishes as the GitHub Release
+# uefi-pc-<base-id> (scripts/pc-release-publish; the newest 3 kept).
 # The x86_64 job (scripts/test-boot-qemu-x86_64.sh): the generic x86-64 UEFI PC's base,
 # Alpine's linux-lts and the initramfs built for x86-64, booted under UEFI firmware
 # (OVMF, the kernel's EFI stub) in qemu-system-x86_64 with KVM, through the same
@@ -106,13 +108,13 @@ jobs:
         run: scripts/pc-release --artifacts "$RUNNER_TEMP/artifacts" --no-parent --out "$RUNNER_TEMP/uefi-pc-release"
       - name: the installer installs it on a blank virtual PC, which starts it
         run: sh scripts/test-pc-release-qemu.sh "$RUNNER_TEMP/uefi-pc-release"
-      - name: the release folder (main only)
+      - name: the release folder, for the publish job (main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
           name: uefi-pc-release
           path: ${{ runner.temp }}/uefi-pc-release
-          retention-days: 30
+          retention-days: 2
           if-no-files-found: error
       - name: logs
         if: always()
@@ -123,3 +125,25 @@ jobs:
             .out/test-pc-release-qemu/*.log
             .out/test-pc-release-qemu/*.json
           if-no-files-found: ignore
+  # The tested folder as a GitHub Release uefi-pc-<base-id> (scripts/pc-release-publish,
+  # docs/artifacts.md "Published PC releases"): the only job with write access.
+  pc-release-publish:
+    needs: pc-release
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: pc-release-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: uefi-pc-release
+          path: ${{ runner.temp }}/uefi-pc-release
+      - name: publish (the newest 3 kept)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/pc-release-publish "$RUNNER_TEMP/uefi-pc-release" --keep 3

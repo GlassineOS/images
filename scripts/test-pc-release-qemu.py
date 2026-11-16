@@ -11,27 +11,34 @@ stick, its disks, its firmware checks), with the release given here in place of 
 harness's made-up one:
 
   1. the stick: the static glassine-install, the installer's uefi-pc description and the
-     release folder. The release has no boot-loader (GlassineOS/loader has no release
-     yet), so the stick's copy gets the harness's placeholder loader as that role (the
-     installer's own test path); every other role is the release's, byte for byte;
+     release folder, byte for byte. A release without a boot-loader gets the harness's
+     placeholder loader as that role on the stick's copy (the installer's own test path);
   2. install --pc on a blank 32 GiB NVMe disk (the description's sizes): it must finish,
      with the partitions, the pool image byte for byte, the kernel set the installer
      assembled from the release's parts, the loader record, the splash, and one new
      firmware boot entry, first;
-  3. the machine from its disk alone: the firmware starts that entry (the placeholder's
-     serial marker);
-  4. the kernel set as the loader would start it: OVMF starts the set's vmlinuz with its
-     initrd and its set.rec command line (-kernel/-initrd; + console=ttyS0 loglevel=7 to
-     see it), the installed disk only. Boot 1 is the first start: it grows the pool,
-     formats glassine-userdata, selects the first deployment and reboots. Boot 2 boots
-     that deployment, which the boot-success step accepts; then the guest is powered
-     off by its power button (ACPI, the base's acpid) --accept-wait seconds (default
-     240, QTEST_ACCEPT_WAIT) after that step's service starts. The disk is checked after
-     each boot; after boot 2 the deployment must be current (accepted), no candidate.
+  3. the machine from its disk alone: the firmware starts that entry, the release's
+     loader (GlassineOS/loader: its LOADER_START line with the pinned version), which starts the default set
+     (START_KERNEL) from its record. One change to the installed disk, so that Linux
+     reaches the serial log: the set's command line gets console=ttyS0 loglevel=7, with
+     set.rec's check line and the loader record's default_rec made again (console_on);
+     every other byte of the set is the installer's. Boot 1 is the first start: it grows
+     the pool, formats glassine-userdata, selects the first deployment and reboots. Boot 2
+     boots that deployment, which the boot-success step accepts; then the guest is
+     powered off by its power button (ACPI, the base's acpid) --accept-wait seconds
+     (default 240, QTEST_ACCEPT_WAIT) after that step's service starts. The disk is
+     checked after each boot; after boot 2 the deployment must be current (accepted), no
+     candidate, and the loader record names the set it started (its unmarked count is
+     shown: nothing on a PC marks a start healthy yet).
+
+  Without a release loader, or with --direct-kernel (QTEST_DIRECT_KERNEL=1): step 3 only
+  shows the firmware starting the entry, and OVMF then starts the set's vmlinuz with its
+  initrd and its set.rec command line directly (-kernel/-initrd; + console=ttyS0
+  loglevel=7), as the loader would start it.
 
 Every result is a line "QTEST ok|FAIL ..."; exit 0 when none failed.
 """
-import argparse, hashlib, json, os, shutil, socket, subprocess, sys, time
+import argparse, hashlib, json, os, re, shutil, socket, subprocess, sys, time
 from pathlib import Path
 
 MIB, GIB = 1 << 20, 1 << 30
@@ -172,17 +179,94 @@ def disk_check(n, disk, by, base_id, krel, first_dep):
     return dep
 
 
+def fat_get(cw, img, path):
+    """A file of the FAT at `img` (mtools' file@@offset), or None."""
+    out = cw / 'fat-get'
+    out.unlink(missing_ok=True)
+    r = subprocess.run(['mcopy', '-n', '-i', img, '::/' + path, str(out)], capture_output=True)
+    return out.read_bytes() if r.returncode == 0 and out.exists() else None
+
+
+def record_text(lines):
+    """A record's bytes (boot-partition.md "Records"): the lines and the check line."""
+    body = ''.join(f'{k}={v}\n' for k, v in lines).encode()
+    return body + b'check=' + hashlib.sha256(body).hexdigest().encode() + b'\n'
+
+
+def record_lines(b):
+    body, sep, last = b.rstrip(b'\n').rpartition(b'\n')
+    body += sep
+    assert last == b'check=' + hashlib.sha256(body).hexdigest().encode(), 'not a valid record'
+    return [tuple(x.split('=', 1)) for x in body.decode().splitlines()]
+
+
+def console_on(R, cw, disk, bootp, sd, key):
+    """The one change this test makes to what the installer wrote: the installed set's
+    command line gets console=ttyS0 loglevel=7 (the board's has no console, so nothing
+    of Linux would reach the serial log), with set.rec's check line and the sha256 the
+    loader record's `<key>_rec` names made again in every slot that names it. The
+    loader starts that set unchanged otherwise (its files, sizes and sums)."""
+    img = f'{disk}@@{bootp[4] * 512}'
+    old = fat_get(cw, img, f'{sd}/set.rec')
+    lines = [(k, v + ' console=ttyS0 loglevel=7' if k == 'cmdline' else v) for k, v in record_lines(old)]
+    new = record_text(lines)
+    (cw / 'set.rec').write_bytes(new)
+    R.run('mcopy', '-o', '-i', img, cw / 'set.rec', f'::/{sd}/set.rec')
+    old_sha, new_sha = hashlib.sha256(old).hexdigest(), hashlib.sha256(new).hexdigest()
+    n = 0
+    for slot in ('glassine/loader.a', 'glassine/loader.b'):
+        b = fat_get(cw, img, slot)
+        if b is None:
+            continue
+        try:
+            sl = record_lines(b)
+        except (AssertionError, ValueError):
+            continue
+        if dict(sl).get(f'{key}_rec') != old_sha:
+            continue
+        size = len(b)
+        b = record_text([(k, new_sha if k == f'{key}_rec' else v) for k, v in sl])
+        b += b'\n' * (size - len(b))
+        (cw / 'slot').write_bytes(b)
+        R.run('mcopy', '-o', '-i', img, cw / 'slot', f'::/{slot}')
+        n += 1
+    return n
+
+
+def loader_record(cw, disk, bootp):
+    """The loader record in use after a start (the valid slot with the higher seq)."""
+    img = f'{disk}@@{bootp[4] * 512}'
+    best = None
+    for slot in ('glassine/loader.a', 'glassine/loader.b'):
+        b = fat_get(cw, img, slot)
+        try:
+            d = dict(record_lines(b)) if b is not None else None
+        except (AssertionError, ValueError):
+            d = None
+        if d and d.get('seq', '').isdigit() and (best is None or int(d['seq']) > int(best['seq'])):
+            best = d
+    return best or {}
+
+
 def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, then=0):
     """One start of the kernel set; QEMU ends by itself (-no-reboot), or, `then` seconds
-    after `until` is on the console, the guest's power button is pressed (QMP)."""
+    after `until` is on the console, the guest's power button is pressed (QMP).
+    `vmlinuz` None: from the disk alone, the firmware's boot entry (the loader), on the
+    machine the install ran on (the installer harness's devices, so the entry's device
+    path holds); else OVMF starts `vmlinuz` directly (-kernel/-initrd)."""
     qmp = cw / f'qmp{n}.sock'
-    cmd = ['qemu-system-x86_64', '-machine', 'q35', '-m', '2048', '-smp', '2', '-accel', 'kvm', '-accel', 'tcg',
-           '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
-           '-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}',
-           '-drive', f'if=pflash,format=raw,unit=1,file={vars_fd}',
-           '-kernel', str(vmlinuz), '-initrd', str(initrd), '-append', cmdline + ' console=ttyS0 loglevel=7',
-           '-drive', f'if=none,id=d0,format=raw,file={disk}', '-device', 'nvme,drive=d0,serial=glassine-ci-0',
-           '-net', 'none', '-qmp', f'unix:{qmp},server=on,wait=off']
+    if vmlinuz is None:
+        cmd = args.R.qemu_cmd(args, None, None, vars_fd, [('nvme', disk)], None, None)
+        cmd[cmd.index('-m') + 1] = '2048'
+        cmd += ['-qmp', f'unix:{qmp},server=on,wait=off']
+    else:
+        cmd = ['qemu-system-x86_64', '-machine', 'q35', '-m', '2048', '-smp', '2', '-accel', 'kvm', '-accel', 'tcg',
+               '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
+               '-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}',
+               '-drive', f'if=pflash,format=raw,unit=1,file={vars_fd}',
+               '-kernel', str(vmlinuz), '-initrd', str(initrd), '-append', cmdline + ' console=ttyS0 loglevel=7',
+               '-drive', f'if=none,id=d0,format=raw,file={disk}', '-device', 'nvme,drive=d0,serial=glassine-ci-0',
+               '-net', 'none', '-qmp', f'unix:{qmp},server=on,wait=off']
     log = cw / f'boot{n}.log'
     R = args.R
     g = R.Guest(cmd, log)
@@ -206,7 +290,8 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
     text = log.read_text(errors='replace')
     for x in text.splitlines():
         if any(k in x for k in ('glassine-first-start:', 'glassine-deploy-accept:', 'glassine-boot:', 'glassine-switch:',
-                                'efi: EFI v', 'boot modules:')):
+                                'efi: EFI v', 'boot modules:', 'LOADER_START', 'START_KERNEL', 'SECURE_BOOT',
+                                'MESSAGE ', 'PANIC ', 'StartImage')):
             print('    ' + x.strip(), flush=True)
     return g.p.returncode, text
 
@@ -216,6 +301,8 @@ def main():
     for a in ('installer', 'binary', 'release', 'work', 'cache'):
         ap.add_argument('--' + a, type=Path, required=True)
     ap.add_argument('--boot-timeout', type=int, default=900)
+    ap.add_argument('--direct-kernel', action='store_true', default=os.environ.get('QTEST_DIRECT_KERNEL') == '1',
+                    help='start the kernel set with -kernel/-initrd, not through the release\'s loader')
     ap.add_argument('--run-timeout', type=int, default=1800)
     ap.add_argument('--accept-wait', type=int, default=int(os.environ.get('QTEST_ACCEPT_WAIT', 240)),
                     help='seconds from the boot-success service\'s start to the power button')
@@ -291,24 +378,40 @@ def main():
     new = [k for k in after if k not in first]
     res(len(new) == 1 and new[0].startswith('Boot'), f'one new firmware boot entry: {new}')
 
-    # 3: the firmware starts the entry (the placeholder while the loader has no release)
-    g = R.Guest(R.qemu_cmd(args, None, None, vars_fd, [('nvme', disk)], None, None), cw / 'serial-firmware.log')
-    try:
-        out = g.until((R.placeholder.MARKER, 'Access Denied', 'No bootable'), args.boot_timeout)
-        try:
-            g.stop(60)
-        except RuntimeError:
-            pass
-    finally:
-        g.p.kill()
-        g.p.wait()
-    res(any(R.placeholder.MARKER in x for x in out) if s['loader_gap'] else True,
-        'the firmware starts the new entry from the disk alone (the placeholder loader\'s marker)')
-
-    # 4: the kernel set, as the loader starts it
     cmdline = sk.get('cmdline', '')
     krel, base_id = arts['kernel'].get('release', ''), arts['base']['base']
-    rc, text = boot_set(args, cw, 1, disk, vml, ird, cmdline, vars_fd)
+    direct = s['loader_gap'] or args.direct_kernel
+    if direct:
+        # 3: the firmware starts the entry (the placeholder, or the release's loader
+        # stopped at its first line)
+        g = R.Guest(R.qemu_cmd(args, None, None, vars_fd, [('nvme', disk)], None, None), cw / 'serial-firmware.log')
+        try:
+            marks = (R.placeholder.MARKER, 'LOADER_START', 'Access Denied', 'No bootable')
+            out = g.until(marks, args.boot_timeout)
+            try:
+                g.stop(60 if s['loader_gap'] else 1)
+            except RuntimeError:
+                pass
+        finally:
+            g.p.kill()
+            g.p.wait()
+        mark = R.placeholder.MARKER if s['loader_gap'] else 'LOADER_START'
+        res(any(mark in x for x in out), f'the firmware starts the new entry from the disk alone ({mark})')
+        # 4: the kernel set, as the loader starts it
+        vm, ir = vml, ird
+    else:
+        # 3, 4: from the disk alone: the firmware starts the entry, the release's loader
+        # starts the set (the console added to its command line, console_on)
+        n = console_on(R, cw, disk, bootp, sd, 'default')
+        res(n >= 1, f'the console on the set\'s command line, the loader record\'s default_rec made again in {n} slot(s)')
+        vm, ir = None, None
+    rc, text = boot_set(args, cw, 1, disk, vm, ir, cmdline, vars_fd)
+    if not direct:
+        bl = s['doc']['artifacts']['boot-loader']
+        m = re.search(r'/download/v([^/]+)/', bl.get('url', ''))
+        want = 'LOADER_START x86-64' + (f' {m.group(1)}' if m else '')
+        res(want in text, f'boot 1: the release\'s loader ({bl.get("url") or bl.get("file")}) started from the firmware\'s entry: "{want}"')
+        res(f'START_KERNEL {kid} ' in text, f'boot 1: the loader started the default set {kid}')
     res('efi: EFI v' in text, 'boot 1: started by UEFI firmware')
     res('first deployment' in text and 'selected' in text, 'boot 1: the first start selected the first deployment')
     res(rc == 0, f'boot 1: rebooted by itself (qemu exit {rc})')
@@ -316,11 +419,21 @@ def main():
     # the boot-success step runs ACCEPT_AFTER (120 s) after the start and logs to the
     # kernel log only (not the console once the system is up): its result is read from
     # the disk afterwards (state/deploy: the deployment current, no candidate)
-    rc, text = boot_set(args, cw, 2, disk, vml, ird, cmdline, vars_fd,
+    rc, text = boot_set(args, cw, 2, disk, vm, ir, cmdline, vars_fd,
                         until='glassine-deploy-accept: checking', then=args.accept_wait)
+    if not direct:
+        res(f'START_KERNEL {kid} ' in text, f'boot 2: the loader started the default set {kid}')
     res(f'deployment {dep}' in text and 'switch_root' in text, f'boot 2: the initramfs started deployment {dep}')
     res(rc == 0, f'boot 2: powered off by its power button (qemu exit {rc})')
     disk_check(2, disk, by, base_id, krel, dep)
+    if not direct:
+        # the unmarked count: whether the accepted start was marked healthy in the
+        # loader record (boot's uefi hand-off, in the base's glassine-deploy) is shown,
+        # not checked; unmarked, the loader starts the previous set at 3.
+        lr2 = loader_record(cw, disk, bootp)
+        print(f'QTEST info the loader record after boot 2: seq={lr2.get("seq")} unmarked={lr2.get("unmarked")} '
+              f'started={lr2.get("started")} started_why={lr2.get("started_why")}', flush=True)
+        res(lr2.get('started') == kid, f'after boot 2: the loader record names the set it started ({lr2.get("started")})')
     for p in cw.glob('*.img'):
         p.unlink()
     print(f'test-pc-release-qemu: {len(FAILS)} failed' + ''.join(f'\n  {f}' for f in FAILS), flush=True)

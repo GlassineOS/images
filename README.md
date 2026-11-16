@@ -213,15 +213,30 @@ with; the base carries the same file), the microcode archives, the boot-modules 
     scripts/pc-release [--artifacts DIR] [--out DIR]
 
 builds that chain (`scripts/build` doesn't build this target): the base, the kernel from
-the registry, the x86-64 initramfs, materialize, then `pool-image --kernel`. The release
-has no boot loader yet (GlassineOS/loader has no release; `targets/uefi-pc/release.conf`
-says where its pin goes) and no recovery (there is no PC recovery kernel), and names
-both under `missing`. `scripts/test-pc-release-qemu.sh` (CI: boot-qemu's `pc-release`
-job, which keeps the folder as the run's artifact `uefi-pc-release` on `main`) has
-GlassineOS/installer's main branch check it and install it with `install --pc` on a
-blank virtual PC (QEMU, OVMF), with the installer harness's placeholder loader standing
-in for the boot loader; the disk then starts the installed kernel set (OVMF starts it
-directly, as the loader would) through the first start into the first deployment.
+the registry, the x86-64 initramfs, materialize, then `pool-image --kernel`. The boot
+loader is GlassineOS/loader's release asset `glassine-loader-x86_64.efi`, pinned in
+`targets/uefi-pc/release.conf`; there is no recovery yet (no PC recovery kernel), which
+the release names under `missing`. `scripts/test-pc-release-qemu.sh` (CI: boot-qemu's
+`pc-release` job) has GlassineOS/installer, at the commit pinned in
+`scripts/test-pc-release-qemu.installer` (bumped by pull request), check it and install
+it with `install --pc` on a blank virtual PC (QEMU, OVMF); the disk then starts from the
+firmware's boot entry through the loader and the installed kernel set, through the first
+start into the first deployment, accepted on its second start.
+
+**Published PC releases.** On `main`, the folder that passed that test is published as
+the GitHub Release `uefi-pc-<base-id>` of this repository (prerelease; boot-qemu's
+`pc-release-publish` job, `scripts/pc-release-publish`). Its assets, under fixed names:
+
+    https://github.com/GlassineOS/images/releases/download/uefi-pc-<base-id>/release.json
+    https://github.com/GlassineOS/images/releases/download/uefi-pc-<base-id>/uefi-pc-release.tar.zst
+    https://github.com/GlassineOS/images/releases/download/uefi-pc-<base-id>/SHA256SUMS
+
+`release.json` is the folder's own; the archive holds the whole folder as
+`uefi-pc-<base-id>/` (`zstd -dc uefi-pc-release.tar.zst | tar -x`, then
+`glassine-install install --pc --release-dir uefi-pc-<base-id>`). The newest three are
+kept; to find them, list the releases whose tag starts with `uefi-pc-`
+(`gh release list -R GlassineOS/images`, or the REST API's `releases`). Details:
+`docs/artifacts.md`, "Published PC releases".
 
 `scripts/test-first-start-qemu.sh` (CI: boot-qemu's `first-start` job) runs the route's
 last step in QEMU: a release of the generic reference base, made by pool-image, written
