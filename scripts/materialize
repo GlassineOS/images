@@ -380,6 +380,12 @@ def main(argv):
     over['DEVICE'] = target
     # the target's architecture picks its stages' lock files (lock, lock.x86_64)
     tlines = read(os.path.join(repo, 'targets', target, 'target')).decode().splitlines()
+    # its kernel stage (kernel=) is its KERNEL, as scripts/registry builds it: a default,
+    # not an override (no trial), where the Dockerfile has that argument
+    tkernel = next((ln[7:] for ln in tlines if ln.startswith('kernel=')), '')
+    tdefaults = {'DEVICE': target}
+    if tkernel and 'KERNEL' not in over and 'KERNEL' in glassine_pins.build_args(dockerfile):
+        over['KERNEL'] = tdefaults['KERNEL'] = tkernel
     arch = next((ln[5:] for ln in tlines if ln.startswith('arch=')), '') or 'arm64'
     try:
         lf = glassine_pins.lock_file(arch)
@@ -392,7 +398,7 @@ def main(argv):
     all_locked = [(n, os.path.join(stages_dir, n, lf)) for n in glassine_pins.locked(
         glassine_pins.reachable(dockerfile, [glassine_pins.BASE_STAGE, 'boot-export'], over), stages_dir, arch)]
     args = glassine_pins.build_args(dockerfile, over)
-    defaults = glassine_pins.build_args(dockerfile, {'DEVICE': target})
+    defaults = glassine_pins.build_args(dockerfile, tdefaults)
     inputs = glassine_pins.branches(dockerfile)
     info = build_info(o['info'], inputs)
     if 'images_commit' not in info:
