@@ -26,7 +26,7 @@ keeps a lock for each (below).
 | `glassine-common` | what every GlassineOS system needs, whatever its display or device |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session and compressed swap with background-app parking (both enabled at boot) |
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration, and its `targets/onyx-noteair/board.conf` as `/etc/glassine-bootimg/board.conf` (the board keys the booted system reads) |
-| `device-uefi-pc` | a generic x86-64 PC that boots by UEFI, on `glassine-common` (no e-ink): the EFI system partition's tools (`dosfstools`), the firmware's boot entries (`efibootmgr`), and the power button (busybox's `acpid`, enabled at boot). Its kernel is `kernel-lts` (below); no firmware |
+| `device-uefi-pc` | a generic x86-64 PC that boots by UEFI, on `glassine-common` (no e-ink): the EFI system partition's tools (`dosfstools`), the firmware's boot entries (`efibootmgr`), and the power button (busybox's `acpid`, enabled at boot). Its kernel is `kernel-lts` (below), which also carries the firmware: the base has none |
 | `device-example` | a made-up device for testing: CI checks that it builds on the generic stages unchanged. Never shipped |
 | `finish` | removes build leftovers: the machine ID, apk's log |
 | `validation` | fails the build on what a base must not carry, including files only a device may supply (waveforms, signed firmware, any firmware; `scripts/device-files.c`, by contents); adds nothing. It reads the final tree, after `finish`, not each stage: a file added in one stage and removed in a later one isn't seen |
@@ -237,34 +237,48 @@ hand it can also run the reproducibility check.
     docker buildx build --platform linux/amd64 --build-arg KERNEL=lts --target kernel-export -o type=local,dest=out .
 
 `kernel-lts` installs Alpine's `linux-lts` as a package, at the version its
-`lock.x86_64` names (with `linux-firmware-none`, the provider of `linux-firmware-any`
-that installs no firmware), and `scripts/kernel-package.sh` lays it out as kernel-export's
+`lock.x86_64` names, with the `linux-firmware` subpackages for common PC hardware (GPUs
+of AMD and Intel, Wi-Fi and Bluetooth of Intel, Qualcomm Atheros, Realtek, Broadcom,
+Cypress and MediaTek, Realtek's Ethernet; `stages/kernel-lts/packages` lists them) and
+the CPU microcode (`linux-firmware-amd-ucode`, `amd-ucode`, `intel-ucode`). Decision
+0016: firmware published for redistribution, as locked distribution packages, never
+committed files. `scripts/kernel-package.sh` lays it out as kernel-export's
 `modules/<release>/`: the modules and depmod's files, the image as `vmlinuz` (the EFI
-stub), an empty `firmware/` and `kernel.manifest`. Unlike a kernel compiled here, the
-release is the package's own (`6.18.63-0-lts`), `source=` names the package and its
-version, there is no builder, layout or configuration hash, and `scripts/kernel-check`
-(an arm64 compile's checks) doesn't apply.
+stub), `firmware/`, `microcode/` and `kernel.manifest`.
+- **firmware/** is what the packages installed in `/lib/firmware` (about 261 MB, already
+  zstd-compressed by Alpine; a package's symlinks become hard links), bound on
+  `/lib/firmware/updates` at boot like any kernel's. The packages carry no license
+  files, so `firmware-licenses-pc` adds them from upstream at the packages' own tag
+  (checked against its pinned commit): `WHENCE` (which license covers which file) and
+  every license file at the top of the tree, plus the Debian copyright files of the two
+  Raspberry Pi sources Alpine adds to `brcm/` and `cypress/` (pinned by checksum). The build fails when the packages' version isn't
+  that tag (`LINUX_FIRMWARE_TAG`), so a lock refresh that moves `linux-firmware` needs
+  the new tag's licenses. `kernel.manifest`'s `firmware` lists every file
+  (`name@sha256-16`), as a compiled kernel's does.
+- **microcode/** holds the early microcode archives (`intel-ucode.img`,
+  `amd-ucode.img`) and their licenses. The kernel loads microcode only early, from an
+  uncompressed archive in front of the initramfs; nothing puts them there yet (the
+  loader's job).
+- NVIDIA's firmware (nouveau) isn't included yet.
+
+Unlike a kernel compiled here, the release is the package's own (`6.18.63-0-lts`),
+`source=` names the package and its version, there is no builder, layout or
+configuration hash, and `scripts/kernel-check` (an arm64 compile's checks) doesn't
+apply. The release doesn't follow the firmware: a lock refresh that moves only
+`linux-firmware` gives a different `firmware/` (and `kernel.manifest`) under the same
+release name.
 
 `scripts/test-boot-qemu-x86_64.sh` (CI: boot-qemu's `boot-qemu-x86_64` job, with KVM)
 boots the PC's base, this kernel and the initramfs built for x86-64 in
 `qemu-system-x86_64` under UEFI firmware (OVMF starts the kernel's EFI stub;
 `-kernel`/`-initrd`, no boot loader) through boot's outside-base harness, the same
 lifecycle and the same `QTEST DONE` as the arm64 test, and checks that every boot
-started under UEFI. Its header says what differs from a real PC.
-
-What the x86-64 chain still waits for, outside this repository:
-- **Our packages for x86-64.** GlassineOS/packages publishes `aarch64/` only, so the
-  `alpine` stage's `glassine-keys` and `glassine-common`'s `glassine-deploy` and
-  `glassine-reboot` have no x86-64 index to come from (pkgs.glassine.org answers 404),
-  and every x86-64 build fails at its first `apk`. The x86-64 locks name the versions the
-  arm64 locks name; they were written against a local build of those three recipes.
-  The publish job keeps earlier versions only for `stages/*/lock`, not `lock.x86_64`.
-- **The initramfs on x86-64.** boot's `build-initramfs.sh` copies `ld-musl-aarch64.so.1`
-  by name at the pinned `BOOT_COMMIT`, so `initramfs-export` fails on x86-64.
-- **Modules before the root.** boot's initramfs loads no modules; on a PC the storage
-  and file system drivers of `linux-lts` are modules, so a real PC can't mount its
-  system partition until the initramfs loads them (the boot test adds a shim for it).
-  With how a PC selects its deployment, GlassineOS/boot's spec 010.
+started under UEFI and loaded all of its boot modules. The kernel set's initramfs is the
+release's initramfs, a board archive (the harness's partition names) and the kernel's
+boot-modules archive (boot's `build-boot-modules.sh`: `linux-lts` builds its disk and
+file system drivers as modules). No stage here assembles a PC's kernel set, so the test
+does; on a PC that is the loader's and the installer's (GlassineOS/boot spec 010). Its
+header says what else differs from a real PC.
 
 ## The registry
 
