@@ -3,4 +3,4 @@
 # Pinned so an installer change can't break this repository's CI unseen. To bump: a
 # pull request here that changes the commit below to a commit on the installer's main;
 # its boot-qemu run (the pc-release job) is the check.
-commit=e44e0e2bcf73c922686aece45d92e636d0801e52
+commit=bc54f130c769e7afc9b61532b5cf3e6789c46c31
