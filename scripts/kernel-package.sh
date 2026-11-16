@@ -33,7 +33,7 @@
 # compiles), and scripts/kernel-check, which checks a compiled arm64 kernel, doesn't
 # apply. image_sha256, modules_sha256 (over the same lines as kernel.sh's, the image
 # and firmware/ left out; microcode/ is in it), firmware (each file of firmware/ as
-# name@sha256-16, sorted by bytes), provides and features (empty) are as kernel.sh
+# name@sha256-16, sorted by bytes; a space in a name as %20, a % as %25), provides and features (empty) are as kernel.sh
 # writes them.
 set -eu
 die() { echo "kernel-package.sh: $*" >&2; exit 1; }
@@ -64,7 +64,7 @@ if [ -n "$(find /lib/firmware -mindepth 1 ! -type d 2>/dev/null | head -n 1)" ];
 		done)
 	[ -z "$bad" ] || die "linux-firmware packages that aren't version $FIRMWARE_TAG (the licenses' tag; move LINUX_FIRMWARE_TAG and LINUX_FIRMWARE_TAG_COMMIT with them): $(echo $bad)"
 	cp -a /lib/firmware/. "$o/firmware/"
-	find "$o/firmware" -type l | while read -r l; do
+	find "$o/firmware" -type l | while IFS= read -r l; do
 		t=$(readlink -f "$l") || die "${l#"$o/"}: a symlink that doesn't resolve"
 		case $t in "$o/firmware/"*) ;; *) die "${l#"$o/"}: a symlink out of firmware/ ($(readlink "$l"))" ;; esac
 		[ -f "$t" ] && [ ! -L "$t" ] || die "${l#"$o/"}: a symlink to no file ($(readlink "$l"))"
@@ -90,9 +90,14 @@ ms=$(cd "$o" && find . -path ./firmware -prune -o -type f ! -path ./vmlinuz -pri
 	| sed 's|^\./||' | LC_ALL=C sort | while read -r f; do printf '%s %s\n' "$f" "$(sha "$f")"; done \
 	| sha256sum | cut -c1-64)
 # firmware this kernel carries, by the names drivers request: name@sha256-16, names
-# relative to firmware/, sorted by bytes (as kernel.sh writes it)
-fw=$(cd "$o/firmware" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while read -r f; do
-	printf '%s@%s\n' "$f" "$(sha "$f" | cut -c1-16)"; done | tr '\n' ' ' | sed 's/ $//')
+# relative to firmware/, sorted by bytes (as kernel.sh writes it). The list is separated
+# by spaces, and a few names have spaces (brcmfmac's board files, named after the
+# machine): a space in a name is written %20, a % as %25
+tab=$(printf '\t') nl=$(printf '\nx'); nl=${nl%x}
+[ -z "$(find "$o/firmware" -name "*$tab*" -o -name "*$nl*")" ] || die "firmware/ has a name with a tab or a newline"
+fw=$(cd "$o/firmware" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do
+	printf '%s@%s\n' "$(printf '%s' "$f" | sed 's/%/%25/g; s/ /%20/g')" "$(sha "$f" | cut -c1-16)"; done \
+	| tr '\n' ' ' | sed 's/ $//')
 cat > "$o/kernel.manifest" <<EOF
 format=1
 release=$rel
