@@ -95,7 +95,15 @@ build() {	# build STAGE OUTPUT [OPTIONS]
 K=$O/k
 build base-export "type=tar,dest=$O/base1.tar"
 build qtest-second "type=tar,dest=$O/base2.tar"
-build kernel-export "type=local,dest=$K" --build-arg KERNEL=lts
+# the kernel as the registry gives it (targets/uefi-pc, docs/registry.md): pulled when
+# published under its key, built here otherwise, so an unchanged kernel-lts lock never
+# needs Alpine to still offer a held firmware version
+tick
+"$P/scripts/registry" exports uefi-pc "$O/reg" > "$O/build-kernel-export.log" 2>&1 \
+	|| { cat "$O/build-kernel-export.log" >&2; echo "test-boot-qemu-x86_64: the kernel export failed" >&2; exit 1; }
+grep '^registry: kernel-export key' "$O/build-kernel-export.log"
+mkdir -p "$K"; cp -a "$O/reg/kernel-export/." "$K/"; rm -rf "$O/reg"
+tock "kernel-export (registry)"
 # a local boot checkout is also the initramfs's source (its boot-src stage)
 if [ -n "${BOOT_CHECKOUT:-}" ]; then
 	mkdir -p "$O/boot-src/src"; cp -a "$H" "$O/boot-src/src/boot"
