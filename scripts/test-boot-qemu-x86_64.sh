@@ -26,11 +26,13 @@
 #
 # What differs from a PC: the initramfs is the release's with two archives appended,
 # the board keys (/etc/glassine-boot/board.conf: the harness's partition names, which
-# a PC's board doesn't define yet) and a shim that loads the kernel's storage and file
-# system modules before boot's init. boot's initramfs loads no modules, and Alpine's
-# linux-lts has those drivers as modules, so a real PC needs that step in boot itself
-# (spec 010). The negative tests (defective bases) are the arm64 test's; they test the
-# base's chain, not the architecture.
+# a PC's board doesn't define yet) and the kernel's boot modules (boot's
+# build-boot-modules.sh: Alpine's linux-lts builds its storage and file system drivers
+# as modules, and boot's init loads them first). On a PC the loader puts the kernel set
+# together (spec 010); here the test does. The kernel's firmware and microcode travel in
+# its modules tree; the microcode isn't put in front of the initramfs (the loader's
+# job). The negative tests (defective bases) are the arm64 test's; they test the base's
+# chain, not the architecture.
 #
 #   scripts/test-boot-qemu-x86_64.sh        exit 0 = the base passed
 #
@@ -145,7 +147,7 @@ M2=$(newest "$A")manifest
 echo "base 1 $(v base "$M1"), full stream $(du -h "$A/$(v stream "$M1")" | cut -f1)"
 echo "base 2 $(v base "$M2"), delta $(du -h "$A/$(v delta "$M2")" | cut -f1)"
 
-# --- the guest: the harness's disk, the kernel, the initramfs with the board and shim ---
+# --- the guest: the harness's disk, the kernel, the initramfs with the board and modules
 G=$O/run; mkdir -p "$G"
 tar -C "$K/modules/$REL" -cf "$G/modules.tar" .
 echo "$REL" > "$G/krel"
@@ -157,9 +159,12 @@ docker run --rm --privileged --platform linux/$NATIVE -e QTEST_BASE=1 -e "QTEST_
 	|| { cat "$O/disk.log" >&2; echo "test-boot-qemu-x86_64: the disk step failed" >&2; exit 1; }
 grep '^disk:' "$O/disk.log" || :
 tock "disk"
-# the board keys (the harness's partition names) and the shim, appended to the initramfs
-# as two more archives; the shim loads the modules (from the kernel's own tree), then
-# execs boot's init, which keeps PID 1
+# the kernel set's initramfs: the release's initramfs, the board keys (the harness's
+# partition names, as a board archive: a PC board has none yet) and the kernel's boot
+# modules (boot's build-boot-modules.sh from the kernel's own tree: its disk and file
+# system drivers, which boot's init loads before it looks for a partition). The kernel
+# unpacks the concatenated archives in order. No stage here assembles a PC's kernel set
+# (that is the loader's and the installer's), so the test does.
 cat > "$G/board.conf" <<'EOF'
 ROOT_PART=system
 ROOT_FSTYPE=btrfs
@@ -169,38 +174,16 @@ USERDATA_PREFIX=media/glassine
 DEFAULT_ROLE_MATCH=''
 EOF
 cp "$K/boot/initramfs/$IRD.cpio.gz" "$G/release.cpio.gz"
-docker run --rm --platform $PLAT -v "$K/modules/$REL":/k:ro -v "$G":/out alpine:3.24 sh -euc '
-apk add -q kmod cpio gzip zstd >/dev/null
-rel=$(cat /out/krel)
-mkdir -p /m/lib/modules /x/lib/qtest /b/etc/glassine-boot
-ln -s /k /m/lib/modules/$rel
-: > /x/lib/qtest/load.list
-# the checksums btrfs needs come by soft dependency (modules.softdep), which --show-depends
-# leaves out: named here by their crypto names
-for m in virtio_pci virtio_blk ext4 crc32c xxhash64 sha256 blake2b-256 btrfs overlay vfat nls_cp437 nls_iso8859_1 nls_utf8; do
-	modprobe -d /m -S "$rel" --show-depends $m | sed -n "s/^insmod \([^ ]*\).*/\1/p"
-done | awk "!seen[\$0]++" | while read -r k; do
-	b=${k##*/}; b=${b%.gz}; b=${b%.zst}; b=${b%.xz}
-	case $k in *.gz) gzip -dc "$k" ;; *.zst) zstd -qdc "$k" ;; *.xz) xz -dc "$k" ;; *) cat "$k" ;; esac > /x/lib/qtest/$b
-	echo "$b" >> /x/lib/qtest/load.list
-done
-echo "shim: $(tr "\n" " " < /x/lib/qtest/load.list)"
-zcat /out/release.cpio.gz | (mkdir -p /r && cd /r && cpio -id --quiet)
-cp /r/init /x/init.glassine
-cat > /x/init <<"EOF"
-#!/bin/busybox sh
-/bin/busybox mount -t proc proc /proc 2>/dev/null
-while read -r m; do /bin/busybox insmod /lib/qtest/$m; done < /lib/qtest/load.list
-/bin/busybox umount /proc
-exec /init.glassine
-EOF
-chmod 755 /x/init /x/init.glassine
+docker run --rm --platform $PLAT -v "$K/modules/$REL":"/k/$REL":ro -v "$H":/p:ro -v "$G":/out alpine:3.24 sh -euc '
+apk add -q kmod cpio gzip >/dev/null
+sh /p/build-boot-modules.sh "/k/$(cat /out/krel)" /out/boot-modules.cpio.gz
+mkdir -p /b/etc/glassine-boot
 install -m 644 /out/board.conf /b/etc/glassine-boot/board.conf
 (cd /b && find . | sort | cpio -o -H newc -R 0:0 --quiet | gzip -9n) > /out/board.cpio.gz
-(cd /x && find . | sort | cpio -o -H newc -R 0:0 --quiet | gzip -9n) > /out/shim.cpio.gz
-cat /out/release.cpio.gz /out/board.cpio.gz /out/shim.cpio.gz > /out/initramfs.cpio.gz
-rm /out/release.cpio.gz /out/board.cpio.gz /out/shim.cpio.gz /out/modules.tar 2>/dev/null || :
+cat /out/release.cpio.gz /out/board.cpio.gz /out/boot-modules.cpio.gz > /out/initramfs.cpio.gz
+rm /out/release.cpio.gz /out/board.cpio.gz /out/boot-modules.cpio.gz /out/modules.tar 2>/dev/null || :
 ' | tee "$O/initramfs.log"
+[ -s "$G/initramfs.cpio.gz" ] || { echo "test-boot-qemu-x86_64: the initramfs step failed" >&2; exit 1; }
 
 # --- the boots ---------------------------------------------------------------------------
 KVM=''
@@ -228,6 +211,11 @@ while [ "$n" -lt "$BOOTS" ]; do
 	grep -a 'QTEST\|glassine-switch:\|glassine-deploy-accept:\|glassine-boot:\|glassine-deploy:' "$O/boot$n.log" | sed 's/\r$//'
 	if grep -aq 'efi: EFI v' "$O/boot$n.log"; then echo "QTEST ok boot $n: started by UEFI firmware ($(grep -a -m1 -o 'efi: EFI v[^ ]* by .*' "$O/boot$n.log" | tr -d '\r'))" | tee "$O/fsck$n.log"
 	else echo "QTEST FAIL boot $n: started by UEFI firmware (no \"efi: EFI v\" line)" | tee "$O/fsck$n.log"; fi
+	# the kernel's boot modules: every one loaded (boot's init: "boot modules: N of M loaded")
+	bm=$(grep -a -m1 -o 'boot modules: [0-9]* of [0-9]* loaded[^\r]*' "$O/boot$n.log" || :)
+	if [ -n "$bm" ] && [ "$(echo "$bm" | awk '{ print $3 }')" = "$(echo "$bm" | awk '{ print $5 }')" ] && [ "$(echo "$bm" | awk '{ print $3 }')" != 0 ]; then
+		echo "QTEST ok boot $n: $bm" | tee -a "$O/fsck$n.log"
+	else echo "QTEST FAIL boot $n: the boot modules loaded (${bm:-no \"boot modules:\" line})" | tee -a "$O/fsck$n.log"; fi
 	if [ $rc = 0 ]; then echo "QTEST ok boot $n: powered off by itself" | tee -a "$O/fsck$n.log"
 	else echo "QTEST FAIL boot $n: powered off by itself (qemu exit $rc; 124 = the limit of $TO s)" | tee -a "$O/fsck$n.log"; fi
 	docker run --rm --privileged --platform linux/$NATIVE -v "$H":/p:ro -v "$G":/out alpine:3.24 \

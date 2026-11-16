@@ -69,16 +69,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      # our own packages these stages install (glassine-keys, glassine-deploy,
-      # glassine-reboot) must be published for x86_64; without the index every x86-64
-      # build fails at its first apk call, so say why first
-      - name: Our repository has x86_64
-        run: |
-          u=https://pkgs.glassine.org/alpine/v3.24/glassine/x86_64/APKINDEX.tar.gz
-          if ! curl -sfIL --retry 3 "$u" >/dev/null; then
-            echo "::error::$u is not published: GlassineOS/packages builds aarch64 only, and the x86-64 chain needs glassine-keys, glassine-deploy and glassine-reboot from it"
-            exit 1
-          fi
       - run: sudo modprobe btrfs
       # KVM for the guest: the runner has /dev/kvm, readable only by its group
       - name: KVM
