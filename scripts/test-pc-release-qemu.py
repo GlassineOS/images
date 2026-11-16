@@ -25,7 +25,9 @@ harness's made-up one:
      see it), the installed disk only. Boot 1 is the first start: it grows the pool,
      formats glassine-userdata, selects the first deployment and reboots. Boot 2 boots
      that deployment, which the boot-success step accepts; then the guest is powered
-     off by its power button (ACPI, the base's acpid). The disk is checked after each.
+     off by its power button (ACPI, the base's acpid) --accept-wait seconds (default
+     240, QTEST_ACCEPT_WAIT) after that step's service starts. The disk is checked after
+     each boot; after boot 2 the deployment must be current (accepted), no candidate.
 
 Every result is a line "QTEST ok|FAIL ..."; exit 0 when none failed.
 """
@@ -170,9 +172,9 @@ def disk_check(n, disk, by, base_id, krel, first_dep):
     return dep
 
 
-def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None):
-    """One start of the kernel set; QEMU ends by itself (-no-reboot), or, once `until`
-    is on the console, the guest's power button is pressed (QMP)."""
+def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, then=0):
+    """One start of the kernel set; QEMU ends by itself (-no-reboot), or, `then` seconds
+    after `until` is on the console, the guest's power button is pressed (QMP)."""
     qmp = cw / f'qmp{n}.sock'
     cmd = ['qemu-system-x86_64', '-machine', 'q35', '-m', '2048', '-smp', '2', '-accel', 'kvm', '-accel', 'tcg',
            '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
@@ -188,7 +190,7 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None):
     try:
         if until:
             lines = g.until(until, args.boot_timeout)
-            time.sleep(5)
+            time.sleep(then)
             s = socket.socket(socket.AF_UNIX)
             s.connect(str(qmp))
             for m in ({'execute': 'qmp_capabilities'}, {'execute': 'system_powerdown'}):
@@ -215,6 +217,8 @@ def main():
         ap.add_argument('--' + a, type=Path, required=True)
     ap.add_argument('--boot-timeout', type=int, default=900)
     ap.add_argument('--run-timeout', type=int, default=1800)
+    ap.add_argument('--accept-wait', type=int, default=int(os.environ.get('QTEST_ACCEPT_WAIT', 240)),
+                    help='seconds from the boot-success service\'s start to the power button')
     args = ap.parse_args()
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(args.installer / 'tests' / 'qemu'))
@@ -309,8 +313,12 @@ def main():
     res('first deployment' in text and 'selected' in text, 'boot 1: the first start selected the first deployment')
     res(rc == 0, f'boot 1: rebooted by itself (qemu exit {rc})')
     dep = disk_check(1, disk, by, base_id, krel, None)
-    rc, text = boot_set(args, cw, 2, disk, vml, ird, cmdline, vars_fd, until=f'glassine-deploy-accept: {dep} accepted')
-    res(f'glassine-deploy-accept: {dep} accepted' in text, f'boot 2: deployment {dep} accepted by the boot-success step')
+    # the boot-success step runs ACCEPT_AFTER (120 s) after the start and logs to the
+    # kernel log only (not the console once the system is up): its result is read from
+    # the disk afterwards (state/deploy: the deployment current, no candidate)
+    rc, text = boot_set(args, cw, 2, disk, vml, ird, cmdline, vars_fd,
+                        until='glassine-deploy-accept: checking', then=args.accept_wait)
+    res(f'deployment {dep}' in text and 'switch_root' in text, f'boot 2: the initramfs started deployment {dep}')
     res(rc == 0, f'boot 2: powered off by its power button (qemu exit {rc})')
     disk_check(2, disk, by, base_id, krel, dep)
     for p in cw.glob('*.img'):

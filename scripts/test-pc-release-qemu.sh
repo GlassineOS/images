@@ -86,7 +86,7 @@ KVM=''; [ -c /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ] && KVM='--device /
 mkdir -p "$O/work" "$O/cache"
 rc=0
 # shellcheck disable=SC2086  # KVM: one option and its value, or nothing
-docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 \
+docker run --rm --privileged $KVM -e PYTHONDONTWRITEBYTECODE=1 -e QTEST_ACCEPT_WAIT="${QTEST_ACCEPT_WAIT:-240}" \
 	-v "$I":/i:ro -v "$REL":/r:ro -v "$P/scripts":/s:ro -v "$O":/o "$ALPINE" sh -c '
 apk add -q --no-progress python3 qemu-system-x86_64 ovmf sgdisk dosfstools mtools squashfs-tools \
 	btrfs-progs e2fsprogs e2fsprogs-extra util-linux coreutils >/dev/null || exit 1
