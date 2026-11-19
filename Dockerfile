@@ -63,7 +63,7 @@ ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-n
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=c7d1d10de12b9db6acd7c6db95bc69b4069a5b89
+ARG BOOT_COMMIT=fe79402b2741c82d7b99498e13c262e6de427b7b
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
