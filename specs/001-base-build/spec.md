@@ -135,8 +135,8 @@ unable to reach a pinned commit,
 
 - **FR-010**: A base's id is `<yyyymmdd>-<tree16>`. `yyyymmdd` is the UTC date of the
   build that first made the base. `tree16` is the first 16 hex digits of the sha256 of
-  the content manifest followed by the base manifest's lines other than `base=`, so a
-  change of `locks`, `needs` or `features` is a different base. The content manifest is
+  the content manifest followed by the base manifest's lines other than `base=` and
+  `version=`, so a change of `locks`, `needs` or `features` is a different base. The content manifest is
   defined in `docs/artifacts.md`: one line per entry with its path, type, owner, mode,
   size (regular files only), content hash, link target or device numbers, the first path
   of its hardlink group, and its extended attributes; no timestamps; sorted and escaped
@@ -146,8 +146,15 @@ unable to reach a pinned commit,
   says so. In another artifacts folder the same tree, built on another day, gets another
   id: a different base with the same files.
 - **FR-012**: The base manifest (`/usr/share/glassine/base.manifest`) is boot's: `format`,
-  `base` (the id), `locks` as boot defines it from the locks of the target's stage chain,
-  and `needs` and `features` from boot's feature table, empty while there is none.
+  `base` (the id), `version` (FR-012a), `locks` as boot defines it from the locks of the
+  target's stage chain, and `needs` and `features` from boot's feature table, empty while
+  there is none.
+- **FR-012a**: A base's version is its image version, a calendar version (decision 0005)
+  with the day as its third part: `YYYY.MM.DD`, the UTC date of the build that first made
+  the base, the date its id starts with. Like the id it is not part of the tree's hash,
+  so a base reused by a later build keeps the version it was made with, and the same
+  tree gives the same id and version within one artifacts folder. Bases made on the same
+  day share a version and differ by id.
 - **FR-013**: A build's id is its UTC start time, `YYYYMMDD-HHMMSS`, with a `-N` suffix if
   that one is taken in the artifacts folder.
 
