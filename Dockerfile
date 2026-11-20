@@ -44,10 +44,10 @@ ARG KERNEL_BUILD_DIGEST=sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebc
 ARG LINUX=https://github.com/GlassineOS/linux
 # Each git input's commit has the branch it follows on the line above it, as
 # "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
-# branch: d7-pmic-watchdog
-ARG LINUX_SDM660=d673c63928e1624b77885f3ccfe5cc8534a1a60f
+# branch: glassine/sdm660-7.3
+ARG LINUX_SDM660=68057162029c31bf4b49122a884c5dc8383060cd
 # the commit device trees build from: a fixed tree ships without a new kernel
-# branch: d7-pmic-watchdog
+# branch: glassine/sdm660-7.3
 ARG DTB_COMMIT=${LINUX_SDM660}
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
