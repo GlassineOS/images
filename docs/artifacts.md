@@ -68,8 +68,8 @@ and are never artifacts.
 - `yyyymmdd`: the UTC date of the build that first made the base.
 - `tree16`: the first 16 hex digits (lower case) of the sha256 of these bytes: the
   content manifest (`tree.manifest`, exactly as below), followed by the base manifest's
-  lines other than its `base=` line, in their order in the base manifest, each ended by
-  a newline. With `format=1` that is `format=1\nlocks=<locks>\nneeds=<needs>\nfeatures=<features>\n`.
+  lines other than its `base=` and `version=` lines, in their order in the base
+  manifest, each ended by a newline. With `format=1` that is `format=1\nlocks=<locks>\nneeds=<needs>\nfeatures=<features>\n`.
   So a change of `locks`, `needs` or `features` is another base.
 
 **Readers treat a base id as an opaque name.** They never parse, sort or compare its
@@ -84,6 +84,14 @@ new subvolume or stream. The base manifest
 (`/usr/share/glassine/base.manifest`, GlassineOS/boot's `docs/kernel-artifacts.md`) is
 written into the base, mode 0644, owner 0:0, before it is made read-only; it is not
 part of the content manifest.
+
+## Image version
+
+A base's `version` in its base manifest is its image version (specs/001-base-build
+FR-012a): `YYYY.MM.DD`, the date its id starts with, so it is made with the base and
+never changes, and a reused base keeps it. The running system and its start menu name a
+base by it (GlassineOS/boot's `glassine-deploy list`, `version`). Bases made on the same
+day share a version and differ by id.
 
 ## The content manifest
 
