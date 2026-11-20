@@ -136,7 +136,7 @@ out=$(M --time 2026-01-01T10:00:00Z --build-info "$O/info" "$O/base1.tar" "$K" f
 echo "$out" | sed 's/^/    /'
 check "new base: exit 0" "[ $rc = 0 ]"
 ID1=$(ls "$T/bases" | head -n 1); B=$T/bases/$ID1; R1=$T/builds/20260101-100000
-check "base id = build date + tree16 (content manifest + base manifest without base=)" "[ '$ID1' = 20260101-\$(cat '$B/tree.manifest' | { cat; grep -v '^base=' '$B/base.manifest'; } | sha256sum | cut -c1-16) ]"
+check "base id = build date + tree16 (content manifest + base manifest without base= and version=)" "[ '$ID1' = 20260101-\$(cat '$B/tree.manifest' | { cat; grep -v -e '^base=' -e '^version=' '$B/base.manifest'; } | sha256sum | cut -c1-16) ]"
 check "build id = the start time" "[ -s '$R1/manifest' ] && [ \"\$(v build '$R1/manifest')\" = 20260101-100000 ]"
 check "base files" "for f in record base.manifest tree.manifest packages base.btrfs.zst; do [ -s '$B'/\$f ] || exit 1; done && ! ls '$B'/base.from-* >/dev/null 2>&1"
 check "build files" "for f in manifest kernel.manifest boot.manifest select; do [ -s '$R1'/\$f ] || exit 1; done"
@@ -144,7 +144,7 @@ check "modules stream and manifest, boot image, dtb, initramfs" "[ -s '$A/module
 check "nothing temporary left, outputs owned by the invoking user" "[ -z \"\$(find '$A' -name '.*' -o -name '*.tmp')\" ] && [ -z \"\$(find '$A' ! -user \$(id -u))\" ]"
 check "copies of the kernel, boot and select records" "cmp -s '$R1/kernel.manifest' '$K/modules/$REL/kernel.manifest' && cmp -s '$R1/boot.manifest' '$K/bootimg/$IMG.manifest' && cmp -s '$R1/select' '$K/select/fixture'"
 check "packages: name=version, sorted" "[ \"\$(cat '$B/packages')\" = \"\$(printf 'busybox=1.0-r0\nfixture-hosts=1.0-r0\nmusl=1.0-r0')\" ]"
-check "base manifest: format, base, locks of the fixture chain, empty needs/features" "[ \"\$(cat '$B/base.manifest')\" = \"\$(printf 'format=1\nbase=%s\nlocks=%s\nneeds=\nfeatures=' '$ID1' $LOCKS)\" ]"
+check "base manifest: format, base, the image version of the build's date (FR-012a), locks of the fixture chain, empty needs/features" "[ \"\$(cat '$B/base.manifest')\" = \"\$(printf 'format=1\nbase=%s\nversion=2026.01.01\nlocks=%s\nneeds=\nfeatures=' '$ID1' $LOCKS)\" ]"
 check "build manifest: format=1 first, every key" "[ \"\$(head -n 1 '$R1/manifest')\" = format=1 ] && for k in build base target tree parent reused uuid received_uuid built images_commit images_clean trial trial_reasons unmerged locks lock.base0 lock.device-fixture arg.DEVICE arg.LOCK arg.BOOT_COMMIT input.BOOT_COMMIT.commit input.BOOT_COMMIT.tree input.BOOT_COMMIT.branch input.BOOT_COMMIT.local builder.kernel-build kernel_release bootimg boot_commit stream stream_sha256 delta delta_sha256 modules_stream modules_stream_sha256; do grep -q \"^\$k=\" '$R1/manifest' || { echo \"    missing \$k\"; exit 1; }; done"
 check "build manifest values" "[ \"\$(v base '$R1/manifest')\" = '$ID1' ] && [ \"\$(v reused '$R1/manifest')\" = no ] && [ -z \"\$(v parent '$R1/manifest')\" ] && [ \"\$(v locks '$R1/manifest')\" = $LOCKS ] && [ \"\$(v lock.base0 '$R1/manifest')\" = \"\$(sha256sum < '$R/stages/base0/lock' | cut -c1-64)\" ] && [ \"\$(v kernel_release '$R1/manifest')\" = $REL ] && [ \"\$(v bootimg '$R1/manifest')\" = $IMG ] && [ \"\$(v boot_commit '$R1/manifest')\" = $BOOT_COMMIT ] && [ \"\$(v input.BOOT_COMMIT.branch '$R1/manifest')\" = main ] && [ \"\$(v input.BOOT_COMMIT.commit '$R1/manifest')\" = $BOOT_COMMIT ] && [ \"\$(v input.BOOT_COMMIT.tree '$R1/manifest')\" = t1 ] && [ \"\$(v stream '$R1/manifest')\" = 'fixture/bases/$ID1/base.btrfs.zst' ] && [ \"\$(v stream_sha256 '$R1/manifest')\" = \"\$(sha256sum < '$B/base.btrfs.zst' | cut -c1-64)\" ]"
 check "build manifest: each export's key and where it came from (specs/003 FR-009)" "[ \"\$(v export.kernel-export.key '$R1/manifest')\" = $EKEY ] && [ \"\$(v export.kernel-export.from '$R1/manifest')\" = $EREF ] && [ \"\$(v export.boot-export.from '$R1/manifest')\" = built ]"
@@ -183,6 +183,7 @@ out=$(M --time 2026-01-02T10:00:00Z --build-info "$O/info" "$O/base1.tar" "$K" f
 echo "$out" | sed 's/^/    /'
 R2=$T/builds/20260102-100000
 check "same tree: exit 0, says reused" "[ $rc = 0 ] && echo \"\$out\" | grep -q 'base $ID1 (reused)'"
+check "same tree: the base keeps the version it was made with" "grep -qx version=2026.01.01 '$B/base.manifest'"
 check "same tree: same base (first build's date), no new base or stream" "[ \"\$(ls '$T/bases')\" = '$ID1' ] && ! echo \"\$out\" | grep -q '^time full stream'"
 check "same tree: its own build record, reused=yes, the base's uuid and stream" "[ \"\$(v reused '$R2/manifest')\" = yes ] && [ \"\$(v base '$R2/manifest')\" = '$ID1' ] && [ \"\$(v uuid '$R2/manifest')\" = \"\$(v uuid '$R1/manifest')\" ] && [ \"\$(v stream_sha256 '$R2/manifest')\" = \"\$(v stream_sha256 '$R1/manifest')\" ]"
 M --time 2026-01-02T10:00:00Z --build-info "$O/info" "$O/base1.tar" "$K" fixture "$A" > /dev/null 2>&1 && rc=0 || rc=$?
@@ -201,6 +202,7 @@ out=$(M --time 2026-01-03T10:00:00Z --build-info "$O/info" "$O/base2.tar" "$K" f
 echo "$out" | sed 's/^/    /'
 R3=$T/builds/20260103-100000; ID2=$(v base "$R3/manifest"); B2=$T/bases/$ID2
 check "B: exit 0, new base, parent = the newest record's base" "[ $rc = 0 ] && [ '$ID2' != '$ID1' ] && [ \"\$(v parent '$R3/manifest')\" = '$ID1' ] && [ \"\$(v parent '$B2/record')\" = '$ID1' ]"
+check "B: the image version of its own build's date" "grep -qx version=2026.01.03 '$B2/base.manifest'"
 check "delta file named with its parent, in both records" "[ -s '$B2/base.from-$ID1.btrfs.zst' ] && [ \"\$(v delta '$B2/record')\" = 'base.from-$ID1.btrfs.zst' ] && [ \"\$(v delta '$R3/manifest')\" = 'fixture/bases/$ID2/base.from-$ID1.btrfs.zst' ] && [ \"\$(v delta_sha256 '$R3/manifest')\" = \"\$(sha256sum < '$B2/base.from-$ID1.btrfs.zst' | cut -c1-64)\" ]"
 written=$(echo "$out" | awk 'f && /^(materialize|time|==)/ { f = 0 } f; /^== delta: files written/ { f = 1 }')
 check "the delta writes only the changed file and the base manifest" "[ \"\$(echo \"\$written\" | sort | tr '\n' ' ')\" = 'etc/config usr/share/glassine/base.manifest ' ]"

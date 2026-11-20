@@ -6,6 +6,8 @@
                                     (FR-019): no /etc/resolv.conf, /etc/hosts only as a
                                     package installed it, and no base manifest yet
     base_tree.py name ROOT ID       the base manifest's base equals ID (the subvolume's name)
+                                    and its version is the image version of ID's date
+                                    (YYYY.MM.DD, FR-012a)
     base_tree.py packages ROOT      the installed packages, name=version, sorted by bytes
                                     (the format of stages/<stage>/lock)
 
@@ -84,7 +86,16 @@ def name(root, ident):
         fails.append(f'/{BASE_MANIFEST}: first line is not format=1')
     if rec.get('base') != ident:
         fails.append(f'/{BASE_MANIFEST}: base={rec.get("base")} is not the subvolume\'s name {ident}')
+    want = image_version(ident)
+    if rec.get('version') != want:
+        fails.append(f'/{BASE_MANIFEST}: version={rec.get("version")} is not {want}, the image version of {ident}')
     return fails
+
+
+def image_version(ident):
+    """The image version of a base id the builder made (<yyyymmdd>-<tree16>): YYYY.MM.DD."""
+    d = ident[:8]
+    return f'{d[:4]}.{d[4:6]}.{d[6:]}' if d.isdigit() and ident[8:9] == '-' else None
 
 
 def packages(root):

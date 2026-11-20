@@ -13,7 +13,7 @@
 #   MODULES   new = make the modules stream; have = /a/modules/RELEASE.btrfs.zst exists
 #   TMPFS     tmpfs size (mount -o size=)   IMG  each btrfs file's size in bytes
 #   HOST_UID, HOST_GID  owner of the outputs
-# Input in STAGE: base.manifest.in (the base manifest's lines other than base=).
+# Input in STAGE: base.manifest.in (the base manifest's lines other than base= and version=).
 # Outputs in STAGE: base/ (tree.manifest, packages, base.manifest, base.btrfs.zst,
 # base.from-PARENT.btrfs.zst) unless the base is reused, modules.btrfs.zst +
 # modules.manifest (MODULES=new), result (key=value: id, tree, reused, uuid, ...).
@@ -84,6 +84,7 @@ tick; mkdir $W/ref; untar $W/ref; tock "extract (reference)"
 python3 -I /s/base_tree.py check $W/ref || die "the export carries build leftovers (FR-020)"
 tick; man $W/ref $O/base/tree.manifest; tock "content manifest"
 # the id's hash: the content manifest, then the base manifest's lines other than base=
+# and version=
 TREE=$(cat $O/base/tree.manifest $O/base.manifest.in | sha256sum | cut -c1-64)
 T16=$(echo "$TREE" | cut -c1-16)
 say "entries: $(wc -l < $O/base/tree.manifest), tree $TREE"
@@ -111,8 +112,14 @@ else
 	say "id: $ID"
 	res id "$ID"; res reused no
 
-	# 3. the base manifest, then the comparison reference with it
-	{ head -n 1 $O/base.manifest.in; echo "base=$ID"; tail -n +2 $O/base.manifest.in; } > $W/base.manifest
+	# 3. the base manifest, then the comparison reference with it. Like base=, its
+	# version= (the image version, YYYY.MM.DD from the date the id starts with,
+	# FR-012a) is outside the id's hash: a reused base keeps the version it was made with
+	VERSION=$(echo "$DATE" | sed -n 's/^\([0-9]\{4\}\)\([0-9][0-9]\)\([0-9][0-9]\)$/\1.\2.\3/p')
+	[ -n "$VERSION" ] || die "DATE=$DATE is not yyyymmdd"
+	say "version: $VERSION"
+	res version "$VERSION"
+	{ head -n 1 $O/base.manifest.in; echo "base=$ID"; echo "version=$VERSION"; tail -n +2 $O/base.manifest.in; } > $W/base.manifest
 	cp $W/base.manifest $O/base/base.manifest
 	put_manifest $W/ref
 	man $W/ref $W/ref.man
