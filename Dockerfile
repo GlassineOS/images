@@ -45,7 +45,7 @@ ARG LINUX=https://github.com/GlassineOS/linux
 # Each git input's commit has the branch it follows on the line above it, as
 # "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
 # branch: glassine/sdm660-7.3
-ARG LINUX_SDM660=c1e08bc321be63d389ce9897612f7ff284695ecc
+ARG LINUX_SDM660=68057162029c31bf4b49122a884c5dc8383060cd
 # the commit device trees build from: a fixed tree ships without a new kernel
 # branch: glassine/sdm660-7.3
 ARG DTB_COMMIT=${LINUX_SDM660}
@@ -63,7 +63,7 @@ ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-n
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=8edce428f9999e402d563849900404cecc0375d5
+ARG BOOT_COMMIT=eb4b269d4d5e77b54e2e16949947370e5a5eaa49
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
