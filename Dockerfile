@@ -48,7 +48,7 @@ ARG LINUX=https://github.com/GlassineOS/linux
 ARG LINUX_SDM660=68057162029c31bf4b49122a884c5dc8383060cd
 # the commit device trees build from: a fixed tree ships without a new kernel
 # branch: glassine/sdm660-7.3
-ARG DTB_COMMIT=${LINUX_SDM660}
+ARG DTB_COMMIT=86d41754372a1fbe65097ea7aa1dacb06e8dd2aa
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
 # the license texts of the PC kernel's linux-firmware packages: upstream's repository at
