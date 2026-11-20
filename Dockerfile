@@ -62,8 +62,8 @@ ARG RPI_BLUEZ_FIRMWARE=https://raw.githubusercontent.com/RPi-Distro/bluez-firmwa
 ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-nonfree/9794282eb9f4a2de1f23b41a738926740e975d83
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
-# branch: d7-pmic-watchdog
-ARG BOOT_COMMIT=a5994036ff871f953c5a9cf2c2767e84f0ebc533
+# branch: main
+ARG BOOT_COMMIT=eb4b269d4d5e77b54e2e16949947370e5a5eaa49
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
