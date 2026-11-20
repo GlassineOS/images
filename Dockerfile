@@ -44,10 +44,10 @@ ARG KERNEL_BUILD_DIGEST=sha256:ff546bc6cc2071c50738a8881c88997645e10b4e11019eebc
 ARG LINUX=https://github.com/GlassineOS/linux
 # Each git input's commit has the branch it follows on the line above it, as
 # "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
-# branch: glassine/sdm660-7.3
-ARG LINUX_SDM660=c1e08bc321be63d389ce9897612f7ff284695ecc
+# branch: d7-pmic-watchdog
+ARG LINUX_SDM660=d673c63928e1624b77885f3ccfe5cc8534a1a60f
 # the commit device trees build from: a fixed tree ships without a new kernel
-# branch: glassine/sdm660-7.3
+# branch: d7-pmic-watchdog
 ARG DTB_COMMIT=${LINUX_SDM660}
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
@@ -62,8 +62,8 @@ ARG RPI_BLUEZ_FIRMWARE=https://raw.githubusercontent.com/RPi-Distro/bluez-firmwa
 ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-nonfree/9794282eb9f4a2de1f23b41a738926740e975d83
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
-# branch: main
-ARG BOOT_COMMIT=8edce428f9999e402d563849900404cecc0375d5
+# branch: d7-pmic-watchdog
+ARG BOOT_COMMIT=a5994036ff871f953c5a9cf2c2767e84f0ebc533
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
