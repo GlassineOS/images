@@ -77,7 +77,8 @@ def sub(a, b):
     return f
 c = '1' * 40
 print('ok   key: the same inputs, the same keys' if keys() == base else 'FAIL key: not deterministic')
-over('the kernel commit (the device tree follows it)', {'LINUX_SDM660': c}, [K, D, B])
+# DTB_COMMIT may be pinned on its own; set it to follow the kernel, as its default does
+over('the kernel commit (the device tree follows it)', {'LINUX_SDM660': c, 'DTB_COMMIT': '${LINUX_SDM660}'}, [K, D, B])
 over('the kernel commit, the device-tree commit kept', {'LINUX_SDM660': c, 'DTB_COMMIT': args['DTB_COMMIT']}, [K, B])
 over('the device-tree commit', {'DTB_COMMIT': c}, [D, B])
 over('the boot commit', {'BOOT_COMMIT': c}, [I, B])
