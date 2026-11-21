@@ -218,15 +218,22 @@ def record_lines(b):
     return [tuple(x.split('=', 1)) for x in body.decode().splitlines()]
 
 
+def with_console(cmdline):
+    """The set's command line with the serial console and the full kernel log, and
+    without `quiet`: the board keeps the console quiet, and OpenRC follows the kernel's
+    `quiet` too, so its lines the test waits for would never reach the serial log."""
+    return ' '.join(w for w in cmdline.split() if w != 'quiet') + ' console=ttyS0 loglevel=7'
+
+
 def console_on(R, cw, disk, bootp, sd, key):
     """The one change this test makes to what the installer wrote: the installed set's
-    command line gets console=ttyS0 loglevel=7 (the board's has no console, so nothing
+    command line gets console=ttyS0 loglevel=7 and loses `quiet` (the board's has no console, so nothing
     of Linux would reach the serial log), with set.rec's check line and the sha256 the
     loader record's `<key>_rec` names made again in every slot that names it. The
     loader starts that set unchanged otherwise (its files, sizes and sums)."""
     img = f'{disk}@@{bootp[4] * 512}'
     old = fat_get(cw, img, f'{sd}/set.rec')
-    lines = [(k, v + ' console=ttyS0 loglevel=7' if k == 'cmdline' else v) for k, v in record_lines(old)]
+    lines = [(k, with_console(v) if k == 'cmdline' else v) for k, v in record_lines(old)]
     new = record_text(lines)
     (cw / 'set.rec').write_bytes(new)
     R.run('mcopy', '-o', '-i', img, cw / 'set.rec', f'::/{sd}/set.rec')
@@ -283,7 +290,7 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
                '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
                '-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={args.ovmf_code}',
                '-drive', f'if=pflash,format=raw,unit=1,file={vars_fd}',
-               '-kernel', str(vmlinuz), '-initrd', str(initrd), '-append', cmdline + ' console=ttyS0 loglevel=7',
+               '-kernel', str(vmlinuz), '-initrd', str(initrd), '-append', with_console(cmdline),
                '-drive', f'if=none,id=d0,format=raw,file={disk}', '-device', 'nvme,drive=d0,serial=glassine-ci-0',
                '-net', 'none', '-qmp', f'unix:{qmp},server=on,wait=off']
     log = cw / f'boot{n}.log'
@@ -322,6 +329,7 @@ QTEST_SCRIPT = r"""#!/bin/sh
 say() { echo "qtest-limit: $*" > /dev/console; }
 b=/etc/glassine-bootimg/board.conf
 grep -q '^CMDLINE=.*console=ttyS0' "$b" || sed -i 's/^CMDLINE="\(.*\)"$/CMDLINE="\1 console=ttyS0 loglevel=7"/' "$b"
+sed -i '/^CMDLINE=/{s/\([" ]\)quiet /\1/g; s/ quiet"/"/}' "$b"
 say "board CMDLINE: $(grep '^CMDLINE=' "$b")"
 n=0
 while :; do
