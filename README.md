@@ -23,7 +23,7 @@ keeps a lock for each (below).
 | Stage | Holds |
 |---|---|
 | `alpine` | Alpine 3.24 and its repositories, plus ours (`glassine-keys`) |
-| `glassine-common` | what every GlassineOS system needs, whatever its display or device |
+| `glassine-common` | what every GlassineOS system needs, whatever its display or device; also its system settings: `/etc/fstab` for a deployment's read-only root, and OpenRC starting and stopping services in parallel (`rc_parallel="YES"` in `/etc/rc.conf`; a service whose stop writes a partition must `need localmount`) |
 | `eink` | any e-ink device: the panel daemons, the compositor with the e-ink output, the keyboard, the desktop session and compressed swap with background-app parking (both enabled at boot) |
 | `device-onyx-noteair` | the Onyx Boox Note Air's packages and system configuration, and its `targets/onyx-noteair/board.conf` as `/etc/glassine-bootimg/board.conf` (the board keys the booted system reads) |
 | `device-uefi-pc` | a generic x86-64 PC that boots by UEFI, on `glassine-common` (no e-ink): the EFI system partition's tools (`dosfstools`), the firmware's boot entries (`efibootmgr`), the power button (busybox's `acpid`, enabled at boot), glassine-deploy's `deploy.conf` and `targets/uefi-pc/board.conf` as `/etc/glassine-bootimg/board.conf`, both naming the installer's partitions (`glassine-system`, `glassine-userdata`). Its kernel is `kernel-lts` (below), which also carries the firmware: the base has none |
