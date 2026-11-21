@@ -63,7 +63,7 @@ ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-n
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=b2c9a47054d5047cf446090ed84d06525f009448
+ARG BOOT_COMMIT=cd0e36bd8cd651aafb9675ae5a0b43db1bced735
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
@@ -235,6 +235,11 @@ RUN --mount=type=bind,source=stages/glassine-common,target=/run/stage \
 # /tmp is a tmpfs: `/` is read-only, and only /etc, /var, /usr/local and /opt are bound
 # writable, so without it nothing could write a temporary file.
 RUN printf '%s\n' 'overlay / overlay bind,ro 0 0' 'tmpfs /tmp tmpfs nosuid,nodev,mode=1777 0 0' > /etc/fstab
+# OpenRC starts and stops services in parallel: on the Note Air a restart reaches the
+# new system's shell ~10 s sooner and a cold start ~6.5 s sooner than one by one, with
+# the same services up. openrc owns the file (protected), hence a RUN; fails if the
+# setting is not where openrc's rc.conf keeps it.
+RUN sed -i 's/^#rc_parallel="NO"$/rc_parallel="YES"/' /etc/rc.conf && grep -qx 'rc_parallel="YES"' /etc/rc.conf
 # busybox-openrc's klogd service runs as the account klogd, which no package makes
 RUN addgroup -S klogd && adduser -S -D -H -h /dev/null -s /sbin/nologin -G klogd -g klogd klogd
 COPY stages/glassine-common/rootfs/ /
