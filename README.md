@@ -424,6 +424,48 @@ in and no modules (`--target recovery-kernel-export`). It has no screen yet. Bui
 `--target recovery-export`; tested by `scripts/test-recovery.sh`;
 [docs/recovery.md](docs/recovery.md).
 
+## The PC installer drive
+
+    scripts/installer-drive [--out DIR] [RELEASE_DIR]
+
+makes one raw disk image (and its `SHA256SUMS`) that a person writes to a USB stick as it
+is ([specs/004-installer-drive](specs/004-installer-drive/spec.md)). Started on a UEFI PC
+with Secure Boot off, it runs a GlassineOS live session (the release's base, read-only,
+with every change in memory) and installs the release it carries with GlassineOS/installer,
+without a network. From a PC release folder (`scripts/pc-release`'s, or a published one
+unpacked; without one, pc-release makes it first) and `glassine-install`, built static at
+the commit in `scripts/test-pc-release-qemu.installer` (`scripts/installer-build.sh`).
+
+| Partition | What |
+|---|---|
+| `glassine-drive-esp` (EFI system, FAT32, 128 MiB) | a boot partition (GlassineOS/boot's `boot-partition.md`) with the release's loader at the removable-media path, the session as its only recovery image and no loader record, so the loader writes nothing to the drive |
+| `glassine-drive-data` (ext4) | `release/<name>/` (the release folder byte for byte), `installer/` (`glassine-install`, `uefi-pc.toml`, its commit), `records/` (the installer's records and backups), 1 GiB free at least |
+
+The session's `initrd` is the release's microcode, initramfs and boot modules, then the
+drive's start archive (`drive/init`, plus `loop.ko` from the pool's modules and the
+session's files in `drive/`). It mounts the data partition and the pool image read-only,
+makes the root an overlay of the base with its upper layer in memory, takes every
+`glassine-*` service but `glassine-font-cache` out of the runlevels and logs the first
+console in. Its command line names no system partition or userdata (the nil identity), so
+no boot tool in the session finds one. In the session, `glassine-drive inspect`, `plan`
+and `install` run the installer's commands; `install` mounts the data partition
+read-write for the record and the backup only, and the installer asks for its
+confirmation. The installer refuses the drive as a target: it runs from the drive's data
+partition, so its inspection names that disk.
+
+`scripts/test-installer-drive-qemu.sh (--drive IMAGE | RELEASE_DIR)` (CI: boot-qemu's
+`pc-release` job, after the release test) starts the drive as a USB stick on a virtual PC
+(QEMU q35, OVMF) with a blank NVMe disk. **The test hook**, for this test only: it writes
+`glassine.drive.test=install:<serial>` (and the serial console) into the session's
+`set.rec` on its copy of the drive; the session then checks that the installer runs from
+the drive and refuses a plan onto it, installs on the disk with that serial with
+`--developer`, answering the confirmation itself, and powers off. It acts only on a disk
+whose serial begins with `glassine-ci-`, and no drive as made carries it. The disk then
+starts alone through its firmware entry, the first start and the first deployment's
+accept. On `main`, the tested drive is published with its PC release as
+`glassine-drive.img.zst`, named in the published `release.json` under `installer_drive`
+(docs/artifacts.md, "Published PC releases").
+
 ## License
 
 GPL-2.0-or-later (`LICENSE`). Images contain software under many licenses; each

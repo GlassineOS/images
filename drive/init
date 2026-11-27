@@ -69,7 +69,7 @@ REL=${1%/release.json}
 pool=$(ls "$REL"/base/*.pool.img 2>/dev/null | head -n 1)
 [ -f "$pool" ] || fail "$REL: no base/*.pool.img"
 base=$(basename "$pool" .pool.img)
-loopdev=$(losetup -r -f --show "$pool") || fail "$pool: no read-only loop device"
+loopdev=$(losetup -f) && losetup -r "$loopdev" "$pool" || fail "$pool: no read-only loop device ($loopdev)"
 mount -t btrfs -o ro "$loopdev" /pool || fail "$pool: can't mount the pool read-only"
 [ -d "/pool/bases/$base" ] || fail "the pool has no bases/$base"
 krel=$(uname -r)
