@@ -8,3 +8,4 @@
 /etc/glassine/deploy.conf SYSTEM_DEV=/dev/disk/by-partlabel/system_b
 /etc/glassine/deploy.conf USERDATA_DEV=/dev/disk/by-partlabel/userdata
 /etc/glassine/deploy.conf USERDATA_RESERVE_KIB=16
+/etc/glassine/deploy.conf KEEP_UPDATES=1
