@@ -119,7 +119,8 @@ so the page can download it and check it before it is written to a stick.
   release's base with its upper layer in memory; the kernel's modules and firmware come
   from the pool's modules subvolume, as on an installed system. The drive's mounts are
   under `/run/glassine-drive/`. Nothing is written to the drive while the session runs,
-  except by the install (FR-008). A start that fails says why on the console and stays
+  except by the install (FR-008) and the kernel's replay of the data file system's
+  journal when an install was cut off. A start that fails says why on the console and stays
   in a shell there.
 - **FR-006**: In the session none of GlassineOS's boot, deployment, update, hibernation
   or restart services runs: every OpenRC service of the base whose name starts with
@@ -131,7 +132,8 @@ so the page can download it and check it before it is written to a stick.
 - **FR-007**: The first console logs in as root by itself and greets the person with the
   release, the installer and the command `glassine-drive`, whose subcommands are
   `status`, `inspect` and `plan` (the installer's read-only commands on this PC) and
-  `install`. Their options go to `glassine-install` unchanged.
+  `install`, and how a disk is chosen. Their options go to `glassine-install` unchanged.
+  The first console shows the cursor.
 
 ### The install
 
@@ -170,7 +172,7 @@ so the page can download it and check it before it is written to a stick.
   and the record is on the data partition.
 - **FR-012**: The test hook, for the test only: the kernel command-line word
   `glassine.drive.test=install:<serial>` makes the session, at its start, run the checks
-  of FR-011 and install on the disk with that serial number with `--developer`,
+  of FR-011 (the first console's shell, the greeting, the plan) and install on the disk with that serial number with `--developer`,
   answering the installer's confirmation itself, print the outcome on the console and
   power the machine off. It acts only on a disk whose serial number begins with
   `glassine-ci-` (QEMU's disks in the test). The word is on no drive as made: the test

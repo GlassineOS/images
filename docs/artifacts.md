@@ -37,6 +37,7 @@ and are never artifacts.
 │   ├── <release>.btrfs.zst                the modules subvolume's full stream
 │   └── <release>.manifest                 its content manifest (owner 0:0)
 │   └── releases/<build-id>/               a release for the installer (below), on request
+│   └── drives/<release name>/             uefi-pc: an installer drive and its SHA256SUMS (scripts/installer-drive)
 ├── bootimg/<id>.img, <id>.manifest        boot images and their boot records
 └── boot/
     ├── dtb/<device>@<id>.dtb, .manifest
@@ -381,7 +382,9 @@ drive, download it and check it before it is written:
 
 The image is written to a disk as it is. The release folder can't name the drive in its
 own `release.json`, since the drive carries the folder; GlassineOS/installer ignores the
-key (it reads only the keys it knows).
+key (it reads only the keys it knows). A release published before the drive was, or a tag
+that was already published with the same bytes, has no `installer_drive`: a page takes the
+newest release that has the key.
 
 The URL of each is `https://github.com/GlassineOS/images/releases/download/uefi-pc-<base-id>/<name>`.
 After unpacking, `release.json`'s per-role sha256 check every file (docs: "Releases").

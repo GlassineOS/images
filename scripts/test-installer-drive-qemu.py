@@ -83,6 +83,8 @@ def main():
     # 1. the drive, with the console and the hook in its session's set.rec
     drive = cw / 'drive.img'
     R.run('cp', '--sparse=always', args.drive, drive)
+    # a stick is larger than the image: its backup GPT header then isn't at the disk's end
+    os.truncate(drive, max(os.path.getsize(drive), 8 * GIB))
     by = {e[6]: e for e in R.gpt(drive)}
     if not res(sorted(by) == ['glassine-drive-data', 'glassine-drive-esp'], f'the drive\'s partitions: {sorted(by)}'):
         return finish(T)
@@ -117,9 +119,11 @@ def main():
     g = R.Guest(cmd, cw / 'session.log')
     t0 = time.monotonic()
     try:
-        g.p.wait(timeout=args.session_timeout)
-    except subprocess.TimeoutExpired:
-        print(f'  the session didn\'t power off within {args.session_timeout} s', flush=True)
+        g.until(('test hook: install on disk', 'test hook: no single disk', 'not a test disk',
+                 "the session can't start", 'NOTHING_STARTED', 'Kernel panic'), args.session_timeout)
+        g.stop(300)
+    except RuntimeError as e:
+        print(f'  the session: {e}', flush=True)
         g.p.kill()
         g.p.wait()
     time.sleep(1)
@@ -135,6 +139,13 @@ def main():
     failed = sorted(set(re.findall(r'ERROR: (\S+) failed to start', text)))
     print(f'QTEST info services that failed to start in the session: {failed or "none"}', flush=True)
     res(not {'machine-id', 'dbus', 'bootmisc'} & set(failed), f'the session\'s machine id, dbus and bootmisc started ({failed})')
+    res('test hook: the first console\'s inittab line: yes' in text, 'the first console logs in to the drive\'s shell (inittab)')
+    m0 = re.search(r'test hook: a shell on the first console: (\S+) \(cursor (\S*)\)', text)
+    res(m0 is not None and m0.group(1) != 'none' and m0.group(2) == '1', f'a shell on the first console, the cursor on ({m0.group(0) if m0 else "none"})')
+    mw = re.search(r'test hook: welcome: exit (\d+): (\d+) line', text)
+    res(mw is not None and mw.group(1) == '0' and mw.group(2) != '0', f'the greeting names the release ({mw.group(0) if mw else "none"})')
+    mp = re.search(r'test hook: glassine-drive plan onto disk (\d+): exit (\d+)', text)
+    res(mp is not None and mp.group(2) == '0', f'glassine-drive plan onto the NVMe disk ({mp.group(0) if mp else "none"})')
     m = re.search(r'test hook: the installer runs from disk: (\d+) (\S+)', text)
     res(m is not None and m.group(2) == 'executable', f'the installer names the drive as the disk it runs from ({m.group(0) if m else "none"})')
     m2 = re.search(r'test hook: a plan onto the drive: exit (\d+): (.*)', text)
