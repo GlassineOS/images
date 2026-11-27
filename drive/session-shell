@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The installer drive's first console (specs/004-installer-drive FR-007): logged in as
+# root by getty -n -l, the greeting, then a login shell.
+cd /root 2>/dev/null || cd /
+export HOME=/root
+/usr/sbin/glassine-drive welcome
+exec /bin/sh -l

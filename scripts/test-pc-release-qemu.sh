@@ -52,25 +52,11 @@ fi
 [ -f "$REL/release.json" ] || die "$REL: no release.json"
 echo "release: $REL"
 
-# --- the installer: the pinned commit, built static in its own toolchain's base image
-INSTALLER_COMMIT=$(sed -n 's/^commit=//p' "$P/scripts/test-pc-release-qemu.installer")
-if [ -n "${INSTALLER_CHECKOUT:-}" ]; then
-	I=$(cd "$INSTALLER_CHECKOUT" && pwd)
-else
-	[ -n "$INSTALLER_COMMIT" ] || die "scripts/test-pc-release-qemu.installer: no commit="
-	I=$O/installer
-	[ -d "$I/.git" ] || git clone -q https://github.com/GlassineOS/installer "$I"
-	git -C "$I" cat-file -e "$INSTALLER_COMMIT^{commit}" 2>/dev/null || git -C "$I" fetch -q origin "$INSTALLER_COMMIT"
-	git -C "$I" checkout -q --detach "$INSTALLER_COMMIT"
-fi
+# --- the installer: the pinned commit, built static (scripts/installer-build.sh)
+"$P/scripts/installer-build.sh" "$O" > "$O/installer-build.out" || die "the installer's build failed"
+I=$(sed -n 's/^installer-build: checkout \([^ ]*\) .*/\1/p' "$O/installer-build.out")
+B=$(sed -n 's/^installer-build: binary //p' "$O/installer-build.out")
 echo "installer: $(git -C "$I" rev-parse HEAD)"
-RUST=$(sed -n 's/^FROM \(rust:[^ ]*\).*/\1/p' "$I/Dockerfile" | head -n 1)
-[ -n "$RUST" ] || die "$I/Dockerfile: no rust image"
-docker run --rm -e CARGO_HOME=/w/.cargo-home -e "OWNER=$(id -u):$(id -g)" -v "$I":/w -w /w "$RUST" sh -c \
-	'apk add -q musl-dev; rc=0; cargo build -q --release -p glassine-install || rc=$?; chown -R "$OWNER" target .cargo-home; exit $rc' \
-	> "$O/installer-build.log" 2>&1 || { tail -30 "$O/installer-build.log" >&2; die "the installer's build failed"; }
-B=$I/target/release/glassine-install
-[ -x "$B" ] || die "no $B"
 
 # --- the host: the installer's check and plan read the release's least sizes
 fail=0

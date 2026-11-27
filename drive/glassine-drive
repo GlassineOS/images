@@ -1,0 +1,152 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# glassine-drive: the installer drive's session command (specs/004-installer-drive
+# FR-007 to FR-010, FR-013). Put into the session by the drive's start archive.
+#
+#   glassine-drive status              what the drive holds
+#   glassine-drive inspect [OPTION...] this PC as the installer sees it (read only)
+#   glassine-drive plan [OPTION...]    the installer's plan for this PC (read only)
+#   glassine-drive install [OPTION...] install the drive's release on this PC
+#
+# OPTIONs go to glassine-install unchanged (--choice K=V, --developer, ...); what to
+# install on, what to keep and how is the installer's to ask and to refuse. install mounts
+# the data partition read-write for the command only, for the installer's record and
+# backup (records/<time>/), and asks for the installer's confirmation.
+# Internal: start (the OpenRC service: the test hook), welcome (the first console).
+set -u
+R=/run/glassine-drive
+D=$R/data
+B=$D/installer/glassine-install
+DESC=$D/installer/uefi-pc.toml
+say() { echo "glassine-drive: $*"; }
+die() { echo "glassine-drive: $*" >&2; exit 1; }
+
+sess() { sed -n "s/^$1=//p" "$R/session" 2>/dev/null; }
+REL=$D/release/$(sess release)
+
+# ---- the disks ------------------------------------------------------------------
+# The installer never reads serial numbers; the session does, from sysfs and udev, and
+# maps each disk to the installer's index by the installer's own order (the block
+# devices' names sorted, loops, RAM disks, mappers, optical drives and the like left
+# out, as glassine-install's pc inspection does), checked against its size in the
+# installer's facts.
+serial_of() {
+	s=$(cat "/sys/block/$1/device/serial" 2>/dev/null)
+	if [ -z "$s" ]; then
+		mm=$(cat "/sys/block/$1/dev" 2>/dev/null)
+		s=$(sed -n 's/^E:ID_SERIAL_SHORT=//p' "/run/udev/data/b$mm" 2>/dev/null)
+	fi
+	printf '%s' "$s" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+# disks: "INDEX NAME BYTES SERIAL" per disk, in the installer's order
+disks() {
+	i=0
+	for x in $(ls /sys/block | sort); do
+		case $x in loop* | ram* | zram* | dm-* | md* | sr* | nbd* | fd* | mtdblock* | zd*) continue ;; mmcblk*boot* | mmcblk*rpmb*) continue ;; esac
+		[ "$(cat "/sys/block/$x/hidden" 2>/dev/null)" = 1 ] && continue
+		sz=$(cat "/sys/block/$x/size" 2>/dev/null || echo 0)
+		[ "$sz" -gt 0 ] 2>/dev/null || continue
+		echo "$i $x $((sz * 512)) $(serial_of "$x")"
+		i=$((i + 1))
+	done
+}
+# disk_of_serial SERIAL: the installer's index of the one disk with that serial number
+disk_of_serial() {
+	m=$(disks | awk -v want="$1" '$4 == want')
+	case $(printf '%s\n' "$m" | grep -c .) in 0) return 3 ;; 1) ;; *) return 4 ;; esac
+	set -- $m
+	"$B" inspect --pc --json > "$R/facts.json" 2>/dev/null || return 2
+	# the installer's size for that index must be the same disk's (its facts are
+	# pretty-printed: a disk's own keys at eight spaces)
+	sz=$(awk -v want="$1" '
+		/^        "index": / { gsub(/[^0-9]/, "", $2); idx = $2; next }
+		/^        "size": / && idx == want && !done { gsub(/[^0-9]/, "", $2); print $2; done = 1 }' "$R/facts.json")
+	[ "$sz" = "$3" ] || return 5
+	echo "$1"
+}
+
+efivars() {
+	[ -d /sys/firmware/efi ] || return 0
+	mountpoint -q /sys/firmware/efi/efivars && return 0
+	modprobe efivarfs 2>/dev/null
+	mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null || say "the firmware's variables couldn't be mounted"
+}
+
+cmd_install() {
+	[ -f "$REL/release.json" ] || die "no release on the drive"
+	efivars
+	mount -o remount,rw "$D" || die "the data partition can't be mounted read-write for the record"
+	rec=$D/records/$(date -u +%Y%m%dT%H%M%SZ)
+	mkdir -p "$rec"
+	say "the record and the backup go to records/${rec##*/}/ on the drive"
+	rc=0
+	"$B" install --pc --description "$DESC" --release-dir "$REL" --record "$rec/record.json" --backup "$rec/backup" "$@" || rc=$?
+	sync
+	mount -o remount,ro "$D" || say "the data partition stays read-write"
+	return $rc
+}
+
+cmd_status() {
+	say "release $(sess release) (base $(sess base)), from $(sess data); the root is in memory"
+	say "installer: GlassineOS/installer $(cat "$D/installer/COMMIT" 2>/dev/null)"
+	return 0
+}
+
+# The test hook (FR-011): glassine.drive.test=install:<serial> on the command line, which
+# only the test writes. It acts only on a disk whose serial number begins with
+# glassine-ci- (QEMU's in the test): it checks that the installer names the drive as the
+# disk it runs from and refuses a plan onto it, installs on the disk with --developer,
+# answering the confirmation itself, and powers the machine off.
+test_hook() {
+	exec > /dev/console 2>&1
+	s=$1
+	case $s in glassine-ci-*) ;; *) say "test hook: '$s' is not a test disk: nothing done"; return 0 ;; esac
+	efivars
+	"$B" inspect --pc > "$R/inspect.txt" 2>&1
+	own=$(sed -n 's/^disk \([0-9]*\):.*(the installer runs from it, told by its \([a-z-]*\)).*/\1 \2/p' "$R/inspect.txt")
+	say "test hook: the installer runs from disk: ${own:-none}"
+	if [ -n "$own" ]; then
+		rc=0; "$B" plan --dry-run --pc --release "$REL/release.json" --developer --choice "target-disk=disk${own% *}" > "$R/plan-own.txt" 2>&1 || rc=$?
+		say "test hook: a plan onto the drive: exit $rc: $(grep -m1 'runs from' "$R/plan-own.txt")"
+	fi
+	rc=0; n=$(disk_of_serial "$s") || rc=$?
+	if [ $rc != 0 ]; then say "test hook: no single disk $s (exit $rc)"; else
+		rc=0
+		echo install | cmd_install --developer --choice "target-disk=disk$n" > "$R/install.log" 2>&1 || rc=$?
+		tail -n 20 "$R/install.log"
+		say "test hook: install on disk $n: exit $rc"
+	fi
+	sync
+	poweroff
+}
+
+cmd_start() {
+	for w in $(cat /proc/cmdline); do
+		case $w in glassine.drive.test=install:*) test_hook "${w#glassine.drive.test=install:}" < /dev/null & ;; esac
+	done
+	return 0
+}
+
+cmd_welcome() {
+	echo
+	echo "GlassineOS installer drive. The root is in memory: nothing here is kept."
+	cmd_status
+	echo
+	echo "  glassine-drive inspect   the disks and systems of this PC (reads only)"
+	echo "  glassine-drive plan      what an install would do (reads only)"
+	echo "  glassine-drive install   install GlassineOS (shows the plan, asks for the confirmation)"
+	echo
+	return 0
+}
+
+c=${1:-}
+[ $# -gt 0 ] && shift
+case $c in
+status) cmd_status ;;
+inspect) "$B" inspect --pc "$@" ;;
+plan) "$B" plan --dry-run --pc --release "$REL/release.json" "$@" ;;
+install) cmd_install "$@" ;;
+start) cmd_start ;;
+welcome) cmd_welcome ;;
+*) sed -n 's/^#   //p' "$0" >&2; exit 2 ;;
+esac
