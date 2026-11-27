@@ -63,7 +63,7 @@ ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-n
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=e7620ab0cf2d4eb9dcd341b58bece62dc5c70669
+ARG BOOT_COMMIT=648ca86caae6f0b3049e74a765423f40d2e91428
 # GlassineOS/installer: the device descriptions, for what a device stage derives from its
 # own (the UEFI PC's keep_updates; a device with a package derives in the package). The
 # same commit as scripts/test-pc-release-qemu.installer (the installer the PC release is
