@@ -45,10 +45,10 @@ ARG LINUX=https://github.com/GlassineOS/linux
 # Each git input's commit has the branch it follows on the line above it, as
 # "# branch: <name>" (the pins, read by scripts/glassine_pins.py).
 # branch: glassine/sdm660-7.3
-ARG LINUX_SDM660=68057162029c31bf4b49122a884c5dc8383060cd
+ARG LINUX_SDM660=086adc7428c4f415ab2931e8f4e92dc195e8a561
 # the commit device trees build from: a fixed tree ships without a new kernel
 # branch: glassine/sdm660-7.3
-ARG DTB_COMMIT=86d41754372a1fbe65097ea7aa1dacb06e8dd2aa
+ARG DTB_COMMIT=65b3a2a0824765198d098daab89c5e7bd38d82b7
 ARG KERNEL=sdm660
 ARG LINUX_FIRMWARE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/20250509
 # the license texts of the PC kernel's linux-firmware packages: upstream's repository at
@@ -63,7 +63,7 @@ ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-n
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=479d20a98041477e34c412136b62ed071e27b20f
+ARG BOOT_COMMIT=d40f66ba0ceab0a83be667e2f0a3c9999a66e4db
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history

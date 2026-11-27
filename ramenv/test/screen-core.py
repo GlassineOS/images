@@ -49,7 +49,7 @@ def state_of(i):
 
 def status_text():
     s = ['glassine-recovery 3', 'connection local',
-         'recovery boot=2b6cb72d5ec555b3713e8ba2b3d53aa5118331fe device=onyx-noteair build=4f1e09c2a7b3d851',
+         'recovery boot=83f77a9d84ce146ad5b8b5d2757386198d46398e device=onyx-noteair build=4f1e09c2a7b3d851',
          'kernel 7.3.0-sdm660.4098b5-g2c96773f2662', 'machine Onyx Boox Note Air', 'compatible onyx,noteair',
          'serial unknown', 'emmc-cid 150100444a54443452045a8d2f13a700', 'system /dev/mmcblk0p50',
          'userdata /dev/mmcblk0p48', 'actions select rollback reset reset-full remove']
