@@ -463,7 +463,7 @@ the drive and refuses a plan onto it, installs on the disk with that serial with
 whose serial begins with `glassine-ci-`, and no drive as made carries it. The disk then
 starts alone through its firmware entry, the first start and the first deployment's
 accept. On `main`, the tested drive is published with its PC release as
-`glassine-drive.img.zst`, named in the published `release.json` under `installer_drive`
+`glassine-drive-<base-id>.img.xz`, named in the published `release.json` under `installer_drive`
 (docs/artifacts.md, "Published PC releases").
 
 ## License

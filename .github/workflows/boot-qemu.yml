@@ -123,7 +123,7 @@ jobs:
       - name: the drive compressed, for the publish job (main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         run: |
-          zstd -q -T0 -10 --rm "$RUNNER_TEMP"/installer-drive/glassine-drive-*.img
+          xz -T0 -6 "$RUNNER_TEMP"/installer-drive/glassine-drive-*.img
           ls -l "$RUNNER_TEMP/installer-drive"
       - name: the drive, for the publish job (main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'

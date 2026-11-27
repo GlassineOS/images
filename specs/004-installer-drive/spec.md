@@ -74,8 +74,9 @@ off in the firmware's set-up.
 
 **Given** a web page or a tool that knows only this repository,
 **When** it lists the published PC releases,
-**Then** the newest one's `release.json` names its drive image's file, size and SHA-256,
-so the page can download it and check it before it is written to a stick.
+**Then** the newest one carries the drive image as an asset of its own, whose size and
+SHA-256 the release's listing gives (and, for tools, its `release.json`), so the page can
+offer it and the download can be checked before it is written to a stick.
 
 ## Requirements
 
@@ -154,11 +155,12 @@ so the page can download it and check it before it is written to a stick.
 
 - **FR-010**: Where a PC release is published (docs/artifacts.md, "Published PC
   releases"), the drive made from that release folder is published with it, after it
-  passed the test of FR-011: the image compressed with zstd as the asset
-  `glassine-drive.img.zst`, listed in the release's `SHA256SUMS`. The published
+  passed the test of FR-011: the image packed with xz, which common image writers read as
+  it is, as its own asset `glassine-drive-<base-id>.img.xz` (the release's base id), listed
+  in the release's `SHA256SUMS`; the release's notes give its unpacked size and sha256. The published
   `release.json` is the folder's with one more top-level key, `installer_drive`: the
   asset's `file`, `size` and `sha256`, the image's `image_size` and `image_sha256`, and
-  `compression` (`zstd`). The release folder's own `release.json` doesn't name the drive
+  `compression` (`xz`). The release folder's own `release.json` doesn't name the drive
   (the drive carries the folder).
 
 ### Testing

@@ -363,20 +363,21 @@ drive made from it and tested (`scripts/installer-drive`,
 | kind | prerelease (GlassineOS is unreviewed) |
 | `release.json` | the folder's, with one more top-level key, `installer_drive` (below): read it to see the roles' sizes and the drive before downloading |
 | `uefi-pc-release.tar.zst` | the whole folder under one directory `uefi-pc-<base-id>/` (tar: names sorted, owner 0:0, time 0; zstd); its `release.json` is the folder's own, without `installer_drive` |
-| `glassine-drive.img.zst` | the installer drive's disk image, zstd-compressed |
+| `glassine-drive-<base-id>.img.xz` | the installer drive's disk image, packed with xz (image writers read it as it is) |
 | `SHA256SUMS` | sha256 of the three |
 
-`installer_drive` names the drive, so a page that lists the releases can show the newest
-drive, download it and check it before it is written:
+`installer_drive` names the drive for tools. A browser page can't read release assets
+(their downloads carry no CORS headers): it takes the asset's `size` and `digest` from
+GitHub's release API instead, which name the same bytes:
 
 ```json
 "installer_drive": {
-  "file": "glassine-drive.img.zst",
+  "file": "glassine-drive-<base-id>.img.xz",
   "size": 612345678,
   "sha256": "<sha256 of the asset>",
   "image_size": 2593128448,
   "image_sha256": "<sha256 of the image, decompressed>",
-  "compression": "zstd"
+  "compression": "xz"
 }
 ```
 
