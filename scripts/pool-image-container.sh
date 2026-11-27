@@ -13,7 +13,8 @@
 #             <commit12>@<id>.cpio.gz, each with its .manifest), checked by pool-image
 #   IMG       the largest pool tried (the first try is the streams' size + 256 MiB)
 #   TMPFS     tmpfs size                    HOST_UID, HOST_GID  owner of the outputs
-# Outputs in /o: pool.img, result (key=value: size, sha256, used_*, min_partition_bytes).
+# Outputs in /o: pool.img, result (key=value: size, sha256, used_*, keep_updates,
+# min_partition_bytes).
 set -eu
 W=/w
 P=$W/p
@@ -141,18 +142,31 @@ truncate -s "$size" $W/pool.img
 btrfs check --readonly $W/pool.img > $W/check.log 2>&1 || { tail -20 $W/check.log >&2; die "btrfs check failed"; }
 tock "shrink + check"
 
+# keep_updates: how many base updates the device keeps (GlassineOS/boot spec 007), as its
+# glassine-deploy reads it: KEEP_UPDATES in the base's /etc/glassine/deploy.conf, which
+# the device's package derives from its description's [data_partition] keep_updates
+# (installer spec 002 FR-018c; on a PC the device stage derives it from the same
+# description, scripts/keep-updates.sh). Read as text, the
+# last assignment; missing or not a whole number of 1 or more: 1, as glassine-deploy.
+keep_of() {
+	_k=$(sed -n 's/^[[:space:]]*KEEP_UPDATES=//p' "$1" 2>/dev/null | tail -n 1 | sed "s/[[:space:]]*\(#.*\)\{0,1\}\$//; s/^[\"']//; s/[\"']\$//")
+	case "$_k" in ''|*[!0-9]*|0*) echo 1 ;; *) echo "$_k" ;; esac
+}
+
 # 5. read back what the installer writes: mounted read-only, the same layout
 tick
 mount -o loop,ro $W/pool.img $P
 layout_ok
+keep=$(keep_of "$P/bases/$BASE/etc/glassine/deploy.conf")
 umount $P
 tock "read back"
+say "the base keeps $keep update(s) (KEEP_UPDATES in its /etc/glassine/deploy.conf, else 1)"
 
 # min_partition_bytes (GlassineOS/installer spec 002, FR-019a): one base as received
-# (its used bytes) + 64 MiB for each of 4 kept updates + the modules, x 1.25, at least
-# 1 GiB, rounded up to a whole MiB; never below the image itself
+# (its used bytes) + 64 MiB for each of keep_updates kept updates + the modules, x 1.25,
+# at least 1 GiB, rounded up to a whole MiB; never below the image itself
 ub=$((U1 - U0)); um=$((U2 - U1))
-min=$(( (ub + 4 * 64 * MIB + um) * 5 / 4 ))
+min=$(( (ub + keep * 64 * MIB + um) * 5 / 4 ))
 [ $min -ge $((1024 * MIB)) ] || min=$((1024 * MIB))
 min=$(( (min + MIB - 1) / MIB * MIB ))
 [ $min -ge "$size" ] || min=$size
@@ -161,6 +175,7 @@ mv $W/pool.img /o/pool.img
 res size "$size"
 res sha256 "$(sha256sum /o/pool.img | cut -c1-64)"
 res used_empty "$U0"; res used_base "$ub"; res used_modules "$um"
+res keep_updates "$keep"
 res min_partition_bytes "$min"
 res fsid "$(super /o/pool.img fsid)"
 tock "hash"

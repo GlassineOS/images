@@ -98,7 +98,9 @@ mkdir -p /r/etc /r/usr/lib /r/lib/apk/db && cd /r
 printf "P:busybox\nV:1.0-r0\n\n" > lib/apk/db/installed
 echo one > etc/config; head -c 2000000 /dev/urandom > usr/lib/blob
 tar --numeric-owner -cf /o/a.tar $(ls -A)
-echo two > etc/config; tar --numeric-owner -cf /o/b.tar $(ls -A)
+echo two > etc/config; mkdir -p etc/glassine
+printf "# the device keeps 16\nKEEP_UPDATES=1\nKEEP_UPDATES=\"16\" # the last one counts\n" > etc/glassine/deploy.conf
+tar --numeric-owner -cf /o/b.tar $(ls -A)
 chown "$HOST" /o/a.tar /o/b.tar'
 A=$O/art
 M() { "$P/scripts/materialize" --repo "$R" "$@" > "$O/m.log" 2>&1 || { cat "$O/m.log"; exit 1; }; }
@@ -144,6 +146,7 @@ assert sorted(r['artifacts']) == ['base', 'boot-loader', 'kernel', 'partition-la
 b = r['artifacts']['base']
 assert b['kind'] == 'btrfs-pool-image' and b['file'] == f'base/{ida}.pool.img' and b['base'] == ida, b
 assert b['received_uuid'] == ruuid, b
+assert b['keep_updates'] == 1, b
 assert b['min_partition_bytes'] >= 1 << 30 and b['min_partition_bytes'] % (1 << 20) == 0, b
 assert b['size'] % (1 << 20) == 0 and b['size'] < 512 << 20, b['size']
 k = r['artifacts']['kernel']
@@ -169,6 +172,26 @@ check "release.json: format 1, entries by the installer's rules, kinds, min_part
 check "a target without pins, no --ramenv, no --recovery: those roles missing" "[ $rc = 0 ] && python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); assert r[\"missing\"] == [\"ram-environment\", \"boot-loader\", \"partition-layout\", \"recovery\"], r[\"missing\"]; assert sorted(r[\"artifacts\"]) == [\"base\", \"kernel\"]' '$O/rel-nopins/release.json'"
 PI --build 20260101-100000 --boot "$BOOT" --out "$O/rel" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
 check "an existing --out: exit 1" "[ $rc = 1 ] && grep -q exists '$O/o'"
+
+# --- keep_updates (boot spec 007, installer spec 002 FR-019a): B's deploy.conf keeps 16
+# updates, A's has none (1): B's least system partition counts 16 x 64 MiB, above the
+# 1 GiB floor that A's small base stays at
+PI --build 20260102-100000 --boot "$BOOT" --out "$O/rel-b" "$A" fixture > "$O/o" 2>&1 && rc=0 || rc=$?
+check "a base whose deploy.conf keeps 16: release.json keep_updates 16, said" "[ $rc = 0 ] && grep -q 'keeps 16 update' '$O/o'"
+python3 -I - "$O/rel/release.json" "$O/rel-b/release.json" > "$O/keep.log" 2>&1 <<'EOF2' && krc=0 || krc=$?
+import json, sys
+a = json.load(open(sys.argv[1]))['artifacts']['base']
+b = json.load(open(sys.argv[2]))['artifacts']['base']
+assert a['keep_updates'] == 1 and b['keep_updates'] == 16, (a, b)
+mib = 1 << 20
+# B: (its used bytes + 16 x 64 MiB) x 1.25 = 1280 MiB and a little: above the floor
+assert b['min_partition_bytes'] >= 1280 * mib and b['min_partition_bytes'] < 1280 * mib + 64 * mib, b
+assert b['min_partition_bytes'] % mib == 0 and b['min_partition_bytes'] > a['min_partition_bytes'], (a, b)
+assert a['min_partition_bytes'] == 1024 * mib, a
+print('keep 1:', a['min_partition_bytes'], 'keep 16:', b['min_partition_bytes'])
+EOF2
+sed 's/^/    /' "$O/keep.log"
+check "keep_updates sizes the base's least partition: 16 kept updates = 16 x 64 MiB x 1.25 more than the base's own size" "[ $krc = 0 ]"
 
 # --- the image: read-only check, then the first start's growth and B's delta onto A
 MIN=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["artifacts"]["base"]["min_partition_bytes"])' "$O/rel/release.json" 2>/dev/null || echo 0)

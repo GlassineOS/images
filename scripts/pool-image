@@ -50,8 +50,10 @@ space for the partition: the first start grows the file system to the partition.
 
 release.json (release_format 1):
   base             kind btrfs-pool-image, min_partition_bytes by spec 002 FR-019a (one
-                   base's used bytes + 4 x 64 MiB + the modules' used bytes, x 1.25, at
-                   least 1 GiB, a whole MiB; never below the image)
+                   base's used bytes + keep_updates x 64 MiB + the modules' used bytes,
+                   x 1.25, at least 1 GiB, a whole MiB; never below the image), and
+                   keep_updates: KEEP_UPDATES of the base's /etc/glassine/deploy.conf (the
+                   device's description's keep_updates; 1 when missing)
   kernel           the build's boot image, for boot_b: kind raw-image,
                    min_partition_bytes = the target's board.conf PART_SIZE (every later
                    boot image is packed to that limit)
@@ -593,6 +595,7 @@ def main(argv):
         os.rename(os.path.join(stage, 'o', 'pool.img'), os.path.join(stage, pool_rel))
         arts['base'] = entry(os.path.join(stage, pool_rel), pool_rel, 'btrfs-pool-image',
                              int(res['min_partition_bytes']), base=base, received_uuid=ruuid,
+                             keep_updates=int(res['keep_updates']),
                              kernel_release=rel, layout_boot_commit=boot_commit)
         if arts['base']['sha256'] != res['sha256'] or arts['base']['size'] != int(res['size']):
             raise Fail('the pool image changed after the container hashed it')
