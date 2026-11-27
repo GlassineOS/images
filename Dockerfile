@@ -63,7 +63,16 @@ ARG RPI_FIRMWARE_NONFREE=https://raw.githubusercontent.com/RPi-Distro/firmware-n
 # GlassineOS/boot: the initramfs and the boot image packer
 ARG BOOT=https://github.com/GlassineOS/boot
 # branch: main
-ARG BOOT_COMMIT=d40f66ba0ceab0a83be667e2f0a3c9999a66e4db
+ARG BOOT_COMMIT=e7620ab0cf2d4eb9dcd341b58bece62dc5c70669
+# GlassineOS/installer: the device descriptions, for what a device stage derives from its
+# own (the UEFI PC's keep_updates; a device with a package derives in the package). The
+# same commit as scripts/test-pc-release-qemu.installer (the installer the PC release is
+# installed with in CI); move both together.
+ARG INSTALLER=https://github.com/GlassineOS/installer
+# No "# branch:" line: only device-uefi-pc reads it, no export scripts/build makes, so
+# it isn't one of the build's git inputs (a base records it as arg.INSTALLER_COMMIT).
+# At least 02b4429 (description format 5: keep_updates).
+ARG INSTALLER_COMMIT=4356891056b5eaf81fd6342dcca0a0fdf367c57d
 
 # The source at the pinned commit, with a shallow .git (one commit: the build checks it
 # is that commit, unchanged). BuildKit's own git source would fetch the whole history
@@ -276,6 +285,16 @@ RUN --mount=type=bind,source=stages/device-example,target=/run/stage \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-example/rootfs/ /
 
+# GlassineOS/installer at INSTALLER_COMMIT, fetched on the build computer's own platform,
+# as boot-src: only the device descriptions are read, and only by the stages that need
+# them (a Note Air build never fetches it)
+FROM --platform=$BUILDPLATFORM ${ALPINE} AS installer-src
+ARG INSTALLER INSTALLER_COMMIT
+RUN --mount=type=bind,source=scripts/git-fetch.sh,target=/run/git-fetch.sh \
+    apk add -q --no-cache git \
+    && sh /run/git-fetch.sh installer-src "$INSTALLER" "$INSTALLER_COMMIT" /src/installer
+WORKDIR /src/installer
+
 # A generic x86-64 PC that boots by UEFI (--platform linux/amd64): what every such PC
 # needs and nothing of a display, a panel or a vendor. On glassine-common, not on eink.
 FROM glassine-common AS device-uefi-pc
@@ -285,6 +304,12 @@ RUN --mount=type=bind,source=stages/device-uefi-pc,target=/run/stage \
     --mount=type=cache,target=/var/cache/apk,sharing=locked \
     LOCK=$LOCK sh /run/apk-stage.sh
 COPY stages/device-uefi-pc/rootfs/ /
+# how many earlier deployments it keeps (GlassineOS/boot spec 007): KEEP_UPDATES derived
+# from its description's [data_partition] keep_updates (installer's devices/uefi-pc.toml,
+# FR-002: never by hand), appended to the deploy.conf above
+RUN --mount=type=bind,from=installer-src,source=/src/installer/devices/uefi-pc.toml,target=/run/uefi-pc.toml \
+    --mount=type=bind,source=scripts/keep-updates.sh,target=/run/keep-updates.sh \
+    sh /run/keep-updates.sh /run/uefi-pc.toml /etc/glassine/deploy.conf
 # the board keys the booted system reads: the target's board.conf, the same file a PC
 # release names as its board role (the kernel set's board archive and command line)
 COPY --chmod=644 targets/uefi-pc/board.conf /etc/glassine-bootimg/board.conf

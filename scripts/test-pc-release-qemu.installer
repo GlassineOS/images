@@ -2,5 +2,6 @@
 # with (its glassine-install, its tests/qemu/run.py harness, its uefi-pc description).
 # Pinned so an installer change can't break this repository's CI unseen. To bump: a
 # pull request here that changes the commit below to a commit on the installer's main;
-# its boot-qemu run (the pc-release job) is the check.
-commit=00c17acdd74067e21fd3612b656fe8c3e78728a7
+# its boot-qemu run (the pc-release job) is the check. The Dockerfile's INSTALLER_COMMIT
+# (the descriptions the PC's stage derives from) is the same commit: move both together.
+commit=4356891056b5eaf81fd6342dcca0a0fdf367c57d

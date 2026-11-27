@@ -7,7 +7,8 @@
 # installer's release folder, the pool image and a delta received into it) and
 # scripts/test-apk-stage.sh (a stage's locked install, in an Alpine container on a
 # made-up repository) and scripts/test-kernel-lock.sh (a distribution kernel's firmware
-# held with it by the lock refresh, and one release, one tree).
+# held with it by the lock refresh, and one release, one tree) and
+# scripts/test-keep-updates.sh (KEEP_UPDATES derived from made-up device descriptions).
 name: host-tests
 on:
   pull_request:
@@ -36,6 +37,8 @@ on:
       - scripts/kernel-lock.sh
       - scripts/kernel-release-check
       - scripts/test-kernel-lock.sh
+      - scripts/keep-updates.sh
+      - scripts/test-keep-updates.sh
       - Dockerfile
       - targets/**
       - .github/workflows/host-tests.yml
@@ -66,6 +69,8 @@ on:
       - scripts/kernel-lock.sh
       - scripts/kernel-release-check
       - scripts/test-kernel-lock.sh
+      - scripts/keep-updates.sh
+      - scripts/test-keep-updates.sh
       - Dockerfile
       - targets/**
       - .github/workflows/host-tests.yml
@@ -115,3 +120,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: sh scripts/test-kernel-lock.sh
+  keep-updates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: sh scripts/test-keep-updates.sh

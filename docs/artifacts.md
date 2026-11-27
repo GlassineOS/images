@@ -323,7 +323,7 @@ the folder), `sha256`, `size`, `kind` and `min_partition_bytes`:
 
 | Role | kind | min_partition_bytes |
 |---|---|---|
-| `base` | `btrfs-pool-image` | spec 002's rule: the base's used bytes as received + 4 × 64 MiB + the modules' used bytes, × 1.25, at least 1 GiB, a whole MiB; never below the image |
+| `base` | `btrfs-pool-image` | spec 002's rule: the base's used bytes as received + `keep_updates` × 64 MiB + the modules' used bytes, × 1.25, at least 1 GiB, a whole MiB; never below the image. `keep_updates` is the device's (installer spec 002 FR-018c, boot spec 007): `KEEP_UPDATES` in the base's `/etc/glassine/deploy.conf`, read as text (the last assignment), the value the installed glassine-deploy reads; missing or not a whole number of 1 or more: 1 |
 | `kernel` | `raw-image` | the target's `board.conf` `PART_SIZE` (every later boot image is packed to that limit) |
 | `ram-environment` | `raw-image` | its size |
 | `boot-loader` | `raw-image` | the pin's `BOOT_LOADER_PART_SIZE`; a larger file is refused |
@@ -335,12 +335,13 @@ build's, plus `boot:<commit12>`), `missing` (the roles this folder doesn't suppl
 `ram-environment` without `--ramenv`, `recovery` without `--recovery`, `boot-loader` and
 `partition-layout` for a target that doesn't pin them), and per role where it came from
 (`base`, `received_uuid`, `kernel_release`, `layout_boot_commit`, `bootimg`, `ramenv`,
-`recovery`, `url`).
+`recovery`, `url`), and the base's `keep_updates`.
 
 `scripts/test-pool-image.sh` tests it on fixtures: the folder and release.json with all
 six roles (the boot loader from `--boot-loader`, the layout fetched from a `file://`
 pin), wrong pinned bytes and an unpinned target's `--boot-loader` refused, the missing
-roles of a target without pins, the image read-only (the base read-only with its received UUID, the modules, the marker,
+roles of a target without pins, the base's `keep_updates` (none: 1; a base that keeps 16:
+its least partition 16 × 64 MiB × 1.25 above its own size), the image read-only (the base read-only with its received UUID, the modules, the marker,
 `boot/` with exactly the boot image's device tree and initramfs, a PC's initramfs), an
 initramfs or device tree whose manifest doesn't match refused,
 and, on a copy grown to `min_partition_bytes`, a delta made by materialize (a base and

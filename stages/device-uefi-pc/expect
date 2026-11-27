@@ -8,3 +8,6 @@
 /etc/glassine-bootimg/board.conf ROOT_PART=glassine-system
 /etc/glassine-bootimg/board.conf USERDATA_PART=glassine-userdata
 /etc/glassine-bootimg/board.conf ROOT_LAYOUT=deployments
+# the description's keep_updates as the build derived it (scripts/keep-updates.sh): a
+# change in devices/uefi-pc.toml shows here first
+/etc/glassine/deploy.conf KEEP_UPDATES=4
