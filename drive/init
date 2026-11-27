@@ -107,6 +107,9 @@ ln -sf /etc/init.d/glassine-drive "$NEW/etc/runlevels/default/glassine-drive"
 sed -i -e 's|^tty1::respawn:.*|tty1::respawn:/sbin/getty -n -l /usr/lib/glassine-drive-shell 38400 tty1|' \
 	-e '/^::restart:/d' "$NEW/etc/inittab"
 echo glassine-drive > "$NEW/etc/hostname"
+# the base's fstab makes / a read-only bind (a deployment's lock); the session's root
+# stays writable (its changes are in memory)
+sed -i '\|^[^#[:space:]]*[[:space:]]\+/[[:space:]]|d' "$NEW/etc/fstab"
 
 mkdir -p "$NEW/run"
 mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$NEW/run" || fail "no /run"

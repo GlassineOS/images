@@ -125,7 +125,9 @@ so the page can download it and check it before it is written to a stick.
   or restart services runs: every OpenRC service of the base whose name starts with
   `glassine-` is taken out of the runlevels in the memory layer, save
   `glassine-font-cache`, and the drive's own service `glassine-drive` is added. A service
-  the base adds later stays out until this list names it.
+  the base adds later stays out until this list names it. The base's file system table
+  line that locks a deployment's root read-only is left out in the memory layer: the
+  session's root stays writable, its changes in memory.
 - **FR-007**: The first console logs in as root by itself and greets the person with the
   release, the installer and the command `glassine-drive`, whose subcommands are
   `status`, `inspect` and `plan` (the installer's read-only commands on this PC) and

@@ -101,6 +101,7 @@ test_hook() {
 	exec > /dev/console 2>&1
 	s=$1
 	case $s in glassine-ci-*) ;; *) say "test hook: '$s' is not a test disk: nothing done"; return 0 ;; esac
+	say "test hook: root: $(awk '$2 == "/" { print $1, $3, substr($4, 1, 2) }' /proc/mounts | tail -n 1)"
 	efivars
 	"$B" inspect --pc > "$R/inspect.txt" 2>&1
 	own=$(sed -n 's/^disk \([0-9]*\):.*(the installer runs from it, told by its \([a-z-]*\)).*/\1 \2/p' "$R/inspect.txt")

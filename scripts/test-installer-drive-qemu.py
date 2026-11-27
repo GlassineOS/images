@@ -131,6 +131,10 @@ def main():
     res('no loader record: the recovery' in text and f'START recovery {sid}' in text,
         f'the firmware started the drive\'s loader, which started the session {sid} as the recovery found by itself')
     res('glassine-drive: session: release ' in text, 'the session\'s root assembled (base read-only, upper layer in memory)')
+    res('test hook: root: overlay overlay rw' in text, 'the session\'s root is the writable overlay (its changes in memory)')
+    failed = sorted(set(re.findall(r'ERROR: (\S+) failed to start', text)))
+    print(f'QTEST info services that failed to start in the session: {failed or "none"}', flush=True)
+    res(not {'machine-id', 'dbus', 'bootmisc'} & set(failed), f'the session\'s machine id, dbus and bootmisc started ({failed})')
     m = re.search(r'test hook: the installer runs from disk: (\d+) (\S+)', text)
     res(m is not None and m.group(2) == 'executable', f'the installer names the drive as the disk it runs from ({m.group(0) if m else "none"})')
     m2 = re.search(r'test hook: a plan onto the drive: exit (\d+): (.*)', text)
