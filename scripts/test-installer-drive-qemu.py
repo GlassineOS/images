@@ -62,6 +62,7 @@ def main():
         ap.add_argument('--' + a, type=Path, required=True)
     ap.add_argument('--boot-timeout', type=int, default=900)
     ap.add_argument('--session-timeout', type=int, default=int(os.environ.get('QTEST_SESSION_TIMEOUT', 5400)))
+    ap.add_argument('--firmware-timeout', type=int, default=int(os.environ.get('QTEST_FIRMWARE_TIMEOUT', 600)))
     ap.add_argument('--accept-wait', type=int, default=int(os.environ.get('QTEST_ACCEPT_WAIT', 240)))
     args = ap.parse_args()
     sys.dont_write_bytecode = True
@@ -117,9 +118,10 @@ def main():
     cmd = R.qemu_cmd(args, None, None, vars_fd, [('nvme', disk)], drive, None)
     cmd[cmd.index('-m') + 1] = '3072'
     # OVMF under KVM sometimes finds no file system on the emulated USB stick at its
-    # first look ("failed to load ... Not Found", then "No bootable option"): a start
-    # that ends there is tried again, then with the stick not removable, and last at the
-    # image's own size (which fails the stick-size check); the try that started is reported.
+    # first look ("failed to load ... Not Found", then "No bootable option"), or starts
+    # nothing at all: a start that doesn't reach the loader is tried again, then with the
+    # stick not removable, and last at the image's own size (which fails the stick-size
+    # check); the try that started is reported.
     t0 = time.monotonic()
     tries = [('removable', cmd)] * 2 + [('not removable', [a.replace('removable=on', 'removable=off') for a in cmd]),
                                          ('at the image\'s own size', cmd)]
@@ -129,14 +131,19 @@ def main():
         log = cw / ('session.log' if n == 1 else f'session-{n}.log')
         g = R.Guest(c, log)
         try:
-            got = g.until(('test hook: install on disk', 'test hook: no single disk', 'not a test disk',
-                           "the session can't start", 'NOTHING_STARTED', 'Kernel panic',
-                           'No bootable option or device was found'), args.session_timeout)
-            if 'No bootable option' in got[-1]:
+            try:
+                got = g.until(('LOADER_START', 'No bootable option or device was found'), args.firmware_timeout)
+            except RuntimeError:
+                got = ['the firmware started nothing within %d s' % args.firmware_timeout]
+            if 'LOADER_START' not in got[-1]:
                 g.p.kill()
                 g.p.wait()
-                print(f'    start {n} (the stick {how}): the firmware found nothing to start', flush=True)
-                continue
+                print(f'    start {n} (the stick {how}): {got[-1].strip()}', flush=True)
+                if n < len(tries):
+                    continue
+                raise RuntimeError('the firmware didn\'t start the loader')
+            g.until(('test hook: install on disk', 'test hook: no single disk', 'not a test disk',
+                     "the session can't start", 'NOTHING_STARTED', 'Kernel panic'), args.session_timeout)
             g.stop(300)
         except RuntimeError as e:
             print(f'  the session: {e}', flush=True)
