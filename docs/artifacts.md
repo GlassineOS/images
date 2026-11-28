@@ -37,6 +37,7 @@ and are never artifacts.
 │   ├── <release>.btrfs.zst                the modules subvolume's full stream
 │   └── <release>.manifest                 its content manifest (owner 0:0)
 │   └── releases/<build-id>/               a release for the installer (below), on request
+│   └── drives/<release name>/             uefi-pc: an installer drive and its SHA256SUMS (scripts/installer-drive)
 ├── bootimg/<id>.img, <id>.manifest        boot images and their boot records
 └── boot/
     ├── dtb/<device>@<id>.dtb, .manifest
@@ -352,15 +353,39 @@ its child) received onto the base inside the image.
 On `main`, boot-qemu's `pc-release` job makes the generic x86-64 UEFI PC's release folder
 (`scripts/pc-release`) and tests it (`scripts/test-pc-release-qemu.sh`); the
 `pc-release-publish` job then publishes that folder, as it was tested, as a GitHub
-Release of this repository (`scripts/pc-release-publish`):
+Release of this repository (`scripts/pc-release-publish`), together with the installer
+drive made from it and tested (`scripts/installer-drive`,
+`scripts/test-installer-drive-qemu.sh`; specs/004-installer-drive):
 
 | | |
 |---|---|
 | tag | `uefi-pc-<base-id>` (the `base` role's `base`), at the tested commit |
 | kind | prerelease (GlassineOS is unreviewed) |
-| `release.json` | the folder's, byte for byte: read it to see the roles' sizes before downloading |
-| `uefi-pc-release.tar.zst` | the whole folder under one directory `uefi-pc-<base-id>/` (tar: names sorted, owner 0:0, time 0; zstd) |
-| `SHA256SUMS` | sha256 of both |
+| `release.json` | the folder's, with one more top-level key, `installer_drive` (below): read it to see the roles' sizes and the drive before downloading |
+| `uefi-pc-release.tar.zst` | the whole folder under one directory `uefi-pc-<base-id>/` (tar: names sorted, owner 0:0, time 0; zstd); its `release.json` is the folder's own, without `installer_drive` |
+| `glassine-drive-<base-id>.img.xz` | the installer drive's disk image, packed with xz (image writers read it as it is) |
+| `SHA256SUMS` | sha256 of the three |
+
+`installer_drive` names the drive for tools. A browser page can't read release assets
+(their downloads carry no CORS headers): it takes the asset's `size` and `digest` from
+GitHub's release API instead, which name the same bytes:
+
+```json
+"installer_drive": {
+  "file": "glassine-drive-<base-id>.img.xz",
+  "size": 612345678,
+  "sha256": "<sha256 of the asset>",
+  "image_size": 2593128448,
+  "image_sha256": "<sha256 of the image, decompressed>",
+  "compression": "xz"
+}
+```
+
+The image is written to a disk as it is. The release folder can't name the drive in its
+own `release.json`, since the drive carries the folder; GlassineOS/installer ignores the
+key (it reads only the keys it knows). A release published before the drive was, or a tag
+that was already published with the same bytes, has no `installer_drive`: a page takes the
+newest release that has the key.
 
 The URL of each is `https://github.com/GlassineOS/images/releases/download/uefi-pc-<base-id>/<name>`.
 After unpacking, `release.json`'s per-role sha256 check every file (docs: "Releases").
@@ -371,7 +396,9 @@ After unpacking, `release.json`'s per-role sha256 check every file (docs: "Relea
   replace it. A trial is never published.
 - **Whole or not at all.** The release is made as a draft and published only once every
   asset is up; a draft a cancelled run left is deleted first.
-- **Size.** GitHub's limit is 2 GiB per asset; the job fails on a larger archive.
+- **Size.** GitHub's limit is 2 GiB per asset; the job fails on a larger archive or
+  compressed drive (the raw drive image is larger than that; only its compressed form is
+  published).
 - **Retention.** Only the newest three published `uefi-pc-*` releases are kept; older
   ones are deleted with their tags. A URL holds for as long as its release is among the
   three: readers find the current ones by listing the repository's releases and taking

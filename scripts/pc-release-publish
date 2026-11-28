@@ -6,11 +6,17 @@
 # scripts/test-pc-release-qemu.sh; needs gh (GH_TOKEN with contents: write), python3,
 # tar and zstd.
 #
-#   scripts/pc-release-publish RELEASE_DIR [--keep N] [--repo OWNER/NAME] [--dry-run]
+#   scripts/pc-release-publish RELEASE_DIR [--drive DIR] [--keep N] [--repo OWNER/NAME] [--dry-run]
 #
 # - Tag uefi-pc-<base-id>, at GITHUB_SHA (or this checkout's HEAD). Assets: release.json
-#   (the folder's, as it is), uefi-pc-release.tar.zst (the whole folder under one
-#   directory uefi-pc-<base-id>/) and SHA256SUMS of both.
+#   (the folder's), uefi-pc-release.tar.zst (the whole folder under one directory
+#   uefi-pc-<base-id>/) and SHA256SUMS of the assets.
+# - With --drive DIR (the installer drive made from this folder and tested,
+#   specs/004-installer-drive FR-010): DIR holds one glassine-drive-*.img.xz and the
+#   SHA256SUMS that names its raw image. The image is checked against that sum, published
+#   under its own name (glassine-drive-<base-id>.img.xz), and the published
+#   release.json gets the top-level key installer_drive (file, size, sha256 of the
+#   asset; image_size, image_sha256; compression). The folder's own release.json, in the archive, stays as it is.
 # - A release of that tag that exists already: its release.json's per-role sha256 must be
 #   the folder's (then nothing is done), else it fails: one tag, one set of bytes.
 # - Made as a draft, published once every asset is up; a draft left by a cancelled run is
@@ -19,10 +25,11 @@
 #   are deleted with their tags.
 set -eu
 die() { echo "pc-release-publish: $*" >&2; exit 1; }
-REL='' KEEP=3 REPO=${GITHUB_REPOSITORY:-GlassineOS/images} DRY=''
+REL='' KEEP=3 REPO=${GITHUB_REPOSITORY:-GlassineOS/images} DRY='' DRIVE=''
 while [ $# -gt 0 ]; do
 	case $1 in
 	--keep) KEEP=$2; shift 2 ;;
+	--drive) DRIVE=$(cd "$2" && pwd); shift 2 ;;
 	--repo) REPO=$2; shift 2 ;;
 	--dry-run) DRY=1; shift ;;
 	-*) sed -n 's/^#   //p' "$0" >&2; exit 2 ;;
@@ -71,11 +78,32 @@ fi
 # the assets
 mkdir -p "$W/a"
 cp "$REL/release.json" "$W/a/release.json"
+if [ -n "$DRIVE" ]; then
+	set -- "$DRIVE"/glassine-drive-*.img.xz
+	[ $# = 1 ] && [ -f "$1" ] || die "$DRIVE: not one glassine-drive-*.img.xz"
+	raw=$(basename "$1" .xz)
+	asset=$raw.xz
+	want=$(awk -v n="$raw" '$2 == n { print $1 }' "$DRIVE/SHA256SUMS" 2>/dev/null)
+	[ -n "$want" ] || die "$DRIVE/SHA256SUMS names no $raw"
+	isha=$(xz -dc "$1" | sha256sum | cut -d' ' -f1)
+	[ "$isha" = "$want" ] || die "$1: the image's sha256 $isha is not SHA256SUMS's $want"
+	isize=$(xz -dc "$1" | wc -c)
+	cp "$1" "$W/a/$asset"
+	dsize=$(stat -c %s "$W/a/$asset")
+	[ "$dsize" -lt 2147483648 ] || die "$asset is $dsize bytes, over GitHub's 2 GiB per asset"
+	dsha=$(sha256sum "$W/a/$asset" | cut -d' ' -f1)
+	python3 -I -c 'import json,sys
+p,f,s,h,isz,ih=sys.argv[1:]
+d=json.load(open(p))
+d["installer_drive"]={"file":f,"size":int(s),"sha256":h,"image_size":int(isz),"image_sha256":ih,"compression":"xz"}
+open(p,"w").write(json.dumps(d,indent=2,sort_keys=True)+"\n")' "$W/a/release.json" "$asset" "$dsize" "$dsha" "$isize" "$isha"
+	echo "pc-release-publish: the installer drive: $raw ($isize bytes), $asset ($dsize bytes)"
+fi
 tar -C "$REL" --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 \
 	--transform "s|^\.|$TAG|" -cf - . | zstd -q -T0 -10 -o "$W/a/uefi-pc-release.tar.zst"
 size=$(stat -c %s "$W/a/uefi-pc-release.tar.zst")
 [ "$size" -lt 2147483648 ] || die "uefi-pc-release.tar.zst is $size bytes, over GitHub's 2 GiB per asset"
-(cd "$W/a" && sha256sum release.json uefi-pc-release.tar.zst > SHA256SUMS && cat SHA256SUMS)
+(cd "$W/a" && sha256sum release.json uefi-pc-release.tar.zst $( [ -z "$DRIVE" ] || echo "$asset") > SHA256SUMS && cat SHA256SUMS)
 cat > "$W/notes.md" <<EOF
 A GlassineOS release for generic x86-64 UEFI PCs, made by this repository's boot-qemu workflow (pc-release job) at $SHA from build $BUILD.
 
@@ -89,13 +117,19 @@ Before it was published, GlassineOS/installer installed this folder on a blank v
 
 **Not reviewed, and never run on a real PC.** GlassineOS is a hobby project, written largely with AI coding agents and not reviewed by subsystem experts. This release has been tested only in QEMU. Installing it on real hardware is at your own risk. Only the newest $KEEP PC releases are kept.
 EOF
+if [ -n "$DRIVE" ]; then
+	cat >> "$W/notes.md" <<EOF
+
+**The installer drive**: \`$asset\` is a disk image packed with xz ($isize bytes unpacked, sha256 \`$isha\`) to write to a USB stick as it is: with an image writer that reads \`.xz\` (balenaEtcher, Fedora Media Writer, Raspberry Pi Imager), or \`xz -dc $asset | dd of=/dev/sdX bs=4M conv=fsync\`. Started on a UEFI PC with **Secure Boot off** (with it on, the firmware doesn't start the drive), it runs GlassineOS from memory and installs this release with \`glassine-drive install\` (GlassineOS/installer), without a network. Before it was published, it installed this release on a blank virtual PC (QEMU, OVMF), which then started from that disk alone. \`release.json\` names it under \`installer_drive\`.
+EOF
+fi
 if [ -n "$DRY" ]; then
 	echo "pc-release-publish: --dry-run: would publish $TAG with $(ls "$W/a" | tr '\n' ' ')"
 	cat "$W/notes.md"
 	exit 0
 fi
 gh release create "$TAG" -R "$REPO" --draft --prerelease --target "$SHA" --title "GlassineOS PC $BASE" \
-	--notes-file "$W/notes.md" "$W/a/release.json" "$W/a/uefi-pc-release.tar.zst" "$W/a/SHA256SUMS"
+	--notes-file "$W/notes.md" "$W"/a/*
 gh release edit "$TAG" -R "$REPO" --draft=false
 echo "pc-release-publish: published https://github.com/$REPO/releases/tag/$TAG"
 

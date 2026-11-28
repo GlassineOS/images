@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The installer drive's session service (specs/004-installer-drive): runs the session's
+# test hook (glassine-drive start).
+description="GlassineOS installer drive session"
+
+depend() {
+	after networkmanager
+}
+
+start() {
+	ebegin "Starting the installer drive's session"
+	/usr/sbin/glassine-drive start
+	eend $?
+}

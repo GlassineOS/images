@@ -1,0 +1,131 @@
+#!/bin/busybox sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The installer drive's start (specs/004-installer-drive FR-004 to FR-006): /init of the
+# session's initrd. The release's initramfs comes before this archive in the initrd and
+# supplies busybox and its libraries; the release's boot-modules archive supplies the
+# disk and file-system drivers; this archive replaces its /init and adds loop.ko and the
+# session's files (lib/glassine-drive/).
+#
+#   1. load the boot modules and loop;
+#   2. find the data partition by its file system's UUID (glassine.drive=UUID=...) and
+#      mount it read-only;
+#   3. the release's pool image through a read-only loop device, mounted read-only;
+#   4. the root: an overlay of the pool's base with an upper layer in memory, the pool's
+#      modules (and their firmware) bound read-only;
+#   5. in the memory layer: every glassine-* OpenRC service out of the runlevels but the
+#      kept ones, the session's service and commands in, the first console logged in;
+#   6. switch_root.
+#
+# Nothing here writes to a disk. A failure prints why and stays in a shell on the
+# console (no reboot loop).
+
+/bin/busybox mkdir -p /bin /sbin /usr/bin /usr/sbin /proc /sys /dev /tmp /run
+/bin/busybox --install -s
+export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+say() { echo "glassine-drive: $*" > /dev/console; echo "<3>glassine-drive: $*" > /dev/kmsg 2>/dev/null; }
+fail() {
+	say "$*"
+	say "the session can't start; a shell follows (power off with: poweroff -f)"
+	exec sh < /dev/console > /dev/console 2>&1
+}
+word() { for w in $(cat /proc/cmdline); do case $w in "$1"=*) echo "${w#*=}"; return 0 ;; esac; done; return 1; }
+
+# 1. the modules
+for d in /lib/glassine-boot/modules/*/; do
+	[ -f "$d/load" ] || continue
+	while read -r m; do
+		[ -n "$m" ] && insmod "$d/$m.ko" 2>/dev/null
+	done < "$d/load"
+done
+insmod /lib/glassine-drive/loop.ko 2>/dev/null
+[ -e /sys/module/loop ] || [ -e /dev/loop-control ] || fail "no loop device (loop.ko didn't load)"
+
+# 2. the data partition
+spec=$(word glassine.drive) || fail "the command line has no glassine.drive="
+case $spec in UUID=????????-????-????-????-????????????) ;; *) fail "glassine.drive=$spec is not UUID=<uuid>" ;; esac
+NEW=/newroot
+D=/drive
+mkdir -p $NEW $D /pool /mem
+dev=''
+i=0
+while [ $i -lt 60 ]; do
+	dev=$(findfs "$spec" 2>/dev/null) && [ -b "$dev" ] && break
+	dev=''
+	sleep 1
+	i=$((i + 1))
+done
+[ -n "$dev" ] || fail "no file system $spec after 60 s: the drive's data partition is missing"
+mount -t ext4 -o ro "$dev" $D || fail "$dev: can't mount the data partition read-only"
+say "data partition $dev"
+
+# 3. the release's pool, read-only
+set -- $D/release/*/release.json
+[ $# = 1 ] && [ -f "$1" ] || fail "the data partition holds no single release (release/*/release.json)"
+REL=${1%/release.json}
+pool=$(ls "$REL"/base/*.pool.img 2>/dev/null | head -n 1)
+[ -f "$pool" ] || fail "$REL: no base/*.pool.img"
+base=$(basename "$pool" .pool.img)
+loopdev=$(losetup -f) && losetup -r "$loopdev" "$pool" || fail "$pool: no read-only loop device ($loopdev)"
+mount -t btrfs -o ro "$loopdev" /pool || fail "$pool: can't mount the pool read-only"
+[ -d "/pool/bases/$base" ] || fail "the pool has no bases/$base"
+krel=$(uname -r)
+
+# 4. the root
+mount -t tmpfs -o mode=0755 tmpfs /mem || fail "no memory layer"
+mkdir -p /mem/upper /mem/work
+mount -t overlay overlay -o "lowerdir=/pool/bases/$base,upperdir=/mem/upper,workdir=/mem/work" $NEW \
+	|| fail "the overlay root didn't mount"
+if [ -d "/pool/modules/$krel" ]; then
+	mkdir -p "$NEW/lib/modules/$krel"
+	mount --bind "/pool/modules/$krel" "$NEW/lib/modules/$krel" && mount -o remount,bind,ro "$NEW/lib/modules/$krel"
+	if [ -d "/pool/modules/$krel/firmware" ]; then
+		mkdir -p "$NEW/lib/firmware/updates"
+		mount --bind "/pool/modules/$krel/firmware" "$NEW/lib/firmware/updates" && mount -o remount,bind,ro "$NEW/lib/firmware/updates"
+	fi
+else
+	say "the pool has no modules for $krel (starting without them)"
+fi
+
+# 5. the session
+S=/lib/glassine-drive
+for rl in "$NEW"/etc/runlevels/*/; do
+	for s in "$rl"glassine-*; do
+		[ -e "$s" ] || [ -L "$s" ] || continue
+		case ${s##*/} in glassine-font-cache) ;; *) rm -f "$s" ;; esac
+	done
+done
+install -m 0755 $S/glassine-drive "$NEW/usr/sbin/glassine-drive"
+install -m 0755 $S/glassine-drive.initd "$NEW/etc/init.d/glassine-drive"
+install -m 0755 $S/session-shell "$NEW/usr/lib/glassine-drive-shell"
+mkdir -p "$NEW/etc/runlevels/default"
+ln -sf /etc/init.d/glassine-drive "$NEW/etc/runlevels/default/glassine-drive"
+# the first console logs in by itself; no soft restart in a session
+sed -i -e 's|^tty1::respawn:.*|tty1::respawn:/sbin/getty -n -l /usr/lib/glassine-drive-shell 38400 tty1|' \
+	-e '/^::restart:/d' "$NEW/etc/inittab"
+echo glassine-drive > "$NEW/etc/hostname"
+# the base's fstab makes / a read-only bind (a deployment's lock); the session's root
+# stays writable (its changes are in memory)
+sed -i '\|^[^#[:space:]]*[[:space:]]\+/[[:space:]]|d' "$NEW/etc/fstab"
+
+mkdir -p "$NEW/run"
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$NEW/run" || fail "no /run"
+R=$NEW/run/glassine-drive
+mkdir -p "$R/data" "$R/pool" "$R/memory"
+mount --move $D "$R/data" && mount --move /pool "$R/pool" && mount --move /mem "$R/memory" \
+	|| fail "can't move the drive's mounts into the session"
+{
+	echo "release=${REL##*/}"
+	echo "base=$base"
+	echo "data=$dev"
+	echo "loop=$loopdev"
+} > "$R/session"
+say "session: release ${REL##*/}, base $base, root in memory"
+
+mount --move /dev $NEW/dev
+mount --move /sys $NEW/sys
+mount --move /proc $NEW/proc
+exec switch_root $NEW /sbin/init

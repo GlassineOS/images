@@ -1,0 +1,60 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# The PC installer drive (specs/004-installer-drive): one raw disk image a person writes
+# to a USB stick, which starts a GlassineOS live session on a UEFI PC and installs the
+# release it carries with GlassineOS/installer, without a network.
+#
+#   scripts/installer-drive [--out DIR] [RELEASE_DIR]
+#
+#   RELEASE_DIR  a PC release folder (scripts/pc-release's, or a published PC release
+#                unpacked: zstd -dc uefi-pc-release.tar.zst | tar -x); without it,
+#                scripts/pc-release makes one first, into the artifacts folder
+#   --out DIR    where the image and its SHA256SUMS go (default:
+#                artifacts/uefi-pc/drives/<release folder's name>/)
+#
+# The installer is built static at the commit pinned in
+# scripts/test-pc-release-qemu.installer (scripts/installer-build.sh), and its
+# devices/uefi-pc.toml goes with it. The drive's own files are in drive/: the session's
+# start (init), its command and its service. The image is
+# made in a privileged Alpine container (scripts/installer-drive.py: it mounts the pool
+# image and the data file system through loop devices). Prints the image as its last
+# line: "installer-drive: image <file>". Needs docker, git and python3 on the host.
+set -eu
+P=$(cd "$(dirname "$0")/.." && pwd)
+ALPINE=$(sed -n 's/^ARG ALPINE=//p' "$P/Dockerfile" | head -n 1)
+die() { echo "installer-drive: $*" >&2; exit 1; }
+OUT='' REL=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	--out) OUT=$2; shift 2 ;;
+	-*) sed -n 's/^#   //p' "$0" >&2; exit 2 ;;
+	*) REL=$1; shift ;;
+	esac
+done
+W=$P/.out/installer-drive
+mkdir -p "$W"
+if [ -z "$REL" ]; then
+	"$P/scripts/pc-release" > "$W/pc-release.log" 2>&1 || { cat "$W/pc-release.log" >&2; die "pc-release failed"; }
+	REL=$(sed -n 's/^pc-release: //p' "$W/pc-release.log" | tail -n 1)
+fi
+[ -f "$REL/release.json" ] || die "$REL: no release.json"
+REL=$(cd "$REL" && pwd)
+[ -n "$OUT" ] || OUT=$P/artifacts/uefi-pc/drives/$(basename "$REL")
+mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
+
+"$P/scripts/installer-build.sh" "$W" > "$W/installer-build.out" || die "the installer's build failed"
+I=$(sed -n 's/^installer-build: checkout \([^ ]*\) .*/\1/p' "$W/installer-build.out")
+C=$(sed -n 's/^installer-build: checkout [^ ]* //p' "$W/installer-build.out")
+[ -f "$I/devices/uefi-pc.toml" ] || die "$I: no devices/uefi-pc.toml"
+
+docker run --rm --privileged -e "OWNER=$(id -u):$(id -g)" \
+	-v "$REL":/r:ro -v "$I":/i:ro -v "$P/drive":/d:ro -v "$P/scripts":/s:ro -v "$OUT":/o "$ALPINE" sh -c '
+apk add -q --no-progress python3 coreutils sgdisk dosfstools mtools e2fsprogs btrfs-progs zstd xz >/dev/null || exit 1
+rc=0
+python3 /s/installer-drive.py --release /r --installer /i/target/release/glassine-install \
+	--description /i/devices/uefi-pc.toml --commit '"$C"' --name '"$(basename "$REL")"' --drive /d --out /o || rc=$?
+chown -R "$OWNER" /o
+exit $rc' 2>&1 | tee "$W/drive.log"
+img=$(sed -n 's|^installer-drive: image /o/|'"$OUT"'/|p' "$W/drive.log")
+[ -n "$img" ] && [ -f "$img" ] || die "no image made"
+echo "installer-drive: image $img"

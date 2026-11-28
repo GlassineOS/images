@@ -14,7 +14,10 @@
 # through the firmware's entry and the loader into the first deployment
 # (scripts/test-pc-release-qemu.sh). On main the folder is kept as the run's artifact
 # uefi-pc-release, which the pc-release-publish job publishes as the GitHub Release
-# uefi-pc-<base-id> (scripts/pc-release-publish; the newest 3 kept).
+# uefi-pc-<base-id> (scripts/pc-release-publish; the newest 3 kept). The same job makes
+# the installer drive from that folder (scripts/installer-drive, specs/004) and tests it
+# (scripts/test-installer-drive-qemu.sh: the drive's session installs on a blank virtual
+# PC, which then starts from that disk alone); the drive is published with the release.
 # The x86_64 job (scripts/test-boot-qemu-x86_64.sh): the generic x86-64 UEFI PC's base,
 # Alpine's linux-lts and the initramfs built for x86-64, booted under UEFI firmware
 # (OVMF, the kernel's EFI stub) in qemu-system-x86_64 with KVM, through the same
@@ -22,10 +25,10 @@
 name: boot-qemu
 on:
   pull_request:
-    paths: [Dockerfile, stages/**, targets/**, keys/**, scripts/**, .github/workflows/boot-qemu.yml]
+    paths: [Dockerfile, stages/**, targets/**, keys/**, scripts/**, drive/**, .github/workflows/boot-qemu.yml]
   push:
     branches: [main]
-    paths: [Dockerfile, stages/**, targets/**, keys/**, scripts/**, .github/workflows/boot-qemu.yml]
+    paths: [Dockerfile, stages/**, targets/**, keys/**, scripts/**, drive/**, .github/workflows/boot-qemu.yml]
   schedule:
     - cron: '41 4 * * 2'
   workflow_dispatch:
@@ -94,7 +97,7 @@ jobs:
           if-no-files-found: ignore
   pc-release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
@@ -108,6 +111,29 @@ jobs:
         run: scripts/pc-release --artifacts "$RUNNER_TEMP/artifacts" --no-parent --out "$RUNNER_TEMP/uefi-pc-release"
       - name: the installer installs it on a blank virtual PC, which starts it
         run: sh scripts/test-pc-release-qemu.sh "$RUNNER_TEMP/uefi-pc-release"
+      # the installer the release test built (the same pinned commit), not built again
+      - name: the installer drive made from that folder
+        env:
+          INSTALLER_CHECKOUT: .out/test-pc-release-qemu/installer
+        run: scripts/installer-drive --out "$RUNNER_TEMP/installer-drive" "$RUNNER_TEMP/uefi-pc-release"
+      - name: the drive's session installs on a blank virtual PC, which starts it
+        env:
+          INSTALLER_CHECKOUT: .out/test-pc-release-qemu/installer
+        run: sh scripts/test-installer-drive-qemu.sh --drive "$(ls "$RUNNER_TEMP"/installer-drive/glassine-drive-*.img)"
+      - name: the drive compressed, for the publish job (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          xz -T0 -6 "$RUNNER_TEMP"/installer-drive/glassine-drive-*.img
+          ls -l "$RUNNER_TEMP/installer-drive"
+      - name: the drive, for the publish job (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-drive
+          path: ${{ runner.temp }}/installer-drive
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
       - name: the release folder, for the publish job (main only)
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
@@ -124,6 +150,8 @@ jobs:
           path: |
             .out/test-pc-release-qemu/*.log
             .out/test-pc-release-qemu/*.json
+            .out/test-installer-drive-qemu/*.log
+            .out/installer-drive/*.log
           if-no-files-found: ignore
   # The tested folder as a GitHub Release uefi-pc-<base-id> (scripts/pc-release-publish,
   # docs/artifacts.md "Published PC releases"): the only job with write access.
@@ -143,7 +171,11 @@ jobs:
         with:
           name: uefi-pc-release
           path: ${{ runner.temp }}/uefi-pc-release
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer-drive
+          path: ${{ runner.temp }}/installer-drive
       - name: publish (the newest 3 kept)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/pc-release-publish "$RUNNER_TEMP/uefi-pc-release" --keep 3
+        run: scripts/pc-release-publish "$RUNNER_TEMP/uefi-pc-release" --drive "$RUNNER_TEMP/installer-drive" --keep 3
