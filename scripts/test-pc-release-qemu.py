@@ -273,6 +273,10 @@ def loader_record(cw, disk, bootp):
     return best or {}
 
 
+FIRMWARE_TRIES = 3
+FIRMWARE_STARTED = ('LOADER_START',)
+
+
 def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, then=0, quit=False):
     """One start of the kernel set; QEMU ends by itself (-no-reboot), or, `then` seconds
     after `until` is on the console, the guest's power button is pressed (QMP), or with
@@ -295,7 +299,33 @@ def boot_set(args, cw, n, disk, vmlinuz, initrd, cmdline, vars_fd, until=None, t
                '-net', 'none', '-qmp', f'unix:{qmp},server=on,wait=off']
     log = cw / f'boot{n}.log'
     R = args.R
-    g = R.Guest(cmd, log)
+    # OVMF under KVM sometimes starts nothing: the console stops after its first screen
+    # set-up, no boot option is loaded, and the machine sits there. A start from the disk
+    # whose console doesn't show the loader within the firmware timeout is that hang: it
+    # is started again on the same machine, unchanged (same disk, same firmware variables,
+    # nothing varied), at most FIRMWARE_TRIES times; every try's console is kept.
+    ft = getattr(args, 'firmware_timeout', 600)
+    for t in range(1, FIRMWARE_TRIES + 1 if vmlinuz is None else 2):
+        tlog = log if t == 1 else cw / f'boot{n}-try{t}.log'
+        g = R.Guest(cmd, tlog)
+        if vmlinuz is not None:
+            break  # OVMF starts the kernel itself: nothing to wait for here
+        try:
+            got = g.until(FIRMWARE_STARTED + ('No bootable option or device was found',), ft)
+            if any(m in got[-1] for m in FIRMWARE_STARTED):
+                break
+            why = got[-1].strip()
+        except RuntimeError as e:
+            why = str(e)
+        g.p.kill()
+        g.p.wait()
+        print(f'  boot {n}: try {t}: the firmware started nothing ({why})', flush=True)
+    else:
+        print(f'  boot {n}: the firmware started nothing in {FIRMWARE_TRIES} tries', flush=True)
+        return -9, log.read_text(errors='replace')
+    if t > 1:
+        print(f'QTEST info boot {n}: started on try {t} of {FIRMWARE_TRIES} (the same machine, unchanged)', flush=True)
+        log = tlog
     lines = []
     try:
         if until:
@@ -474,6 +504,7 @@ def main():
     for a in ('installer', 'binary', 'release', 'work', 'cache'):
         ap.add_argument('--' + a, type=Path, required=True)
     ap.add_argument('--boot-timeout', type=int, default=900)
+    ap.add_argument('--firmware-timeout', type=int, default=int(os.environ.get('QTEST_FIRMWARE_TIMEOUT', 600)))
     ap.add_argument('--direct-kernel', action='store_true', default=os.environ.get('QTEST_DIRECT_KERNEL') == '1',
                     help='start the kernel set with -kernel/-initrd, not through the release\'s loader')
     ap.add_argument('--run-timeout', type=int, default=1800)
