@@ -118,11 +118,14 @@ def main():
     cmd[cmd.index('-m') + 1] = '3072'
     # OVMF under KVM sometimes finds no file system on the emulated USB stick at its
     # first look ("failed to load ... Not Found", then "No bootable option"): a start
-    # that ends there is tried again, the last time with the stick not removable; the
-    # try that started the loader is reported.
+    # that ends there is tried again, then with the stick not removable, and last at the
+    # image's own size (which fails the stick-size check); the try that started is reported.
     t0 = time.monotonic()
-    tries = [('removable', cmd)] * 2 + [('not removable', [a.replace('removable=on', 'removable=off') for a in cmd])]
+    tries = [('removable', cmd)] * 2 + [('not removable', [a.replace('removable=on', 'removable=off') for a in cmd]),
+                                         ('at the image\'s own size', cmd)]
     for n, (how, c) in enumerate(tries, 1):
+        if how == 'at the image\'s own size':
+            os.truncate(drive, os.path.getsize(args.drive))  # to tell the stick's size from the rest
         log = cw / ('session.log' if n == 1 else f'session-{n}.log')
         g = R.Guest(c, log)
         try:
@@ -143,6 +146,7 @@ def main():
     time.sleep(1)
     print(f'QTEST info the session started on try {n} of {len(tries)} (the stick {how})', flush=True)
     text = log.read_text(errors='replace')
+    res(how != 'at the image\'s own size', f'the drive starts from a stick larger than the image (started: the stick {how})')
     for x in text.splitlines():
         if any(k in x for k in ('LOADER_START', 'START recovery', 'NOTHING_STARTED', 'no loader record', 'glassine-drive:', 'efi: EFI v')):
             print('    ' + x.strip(), flush=True)
