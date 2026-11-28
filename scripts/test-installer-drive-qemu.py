@@ -116,18 +116,33 @@ def main():
     shutil.copyfile(args.ovmf_vars, vars_fd)
     cmd = R.qemu_cmd(args, None, None, vars_fd, [('nvme', disk)], drive, None)
     cmd[cmd.index('-m') + 1] = '3072'
-    g = R.Guest(cmd, cw / 'session.log')
+    # OVMF under KVM sometimes finds no file system on the emulated USB stick at its
+    # first look ("failed to load ... Not Found", then "No bootable option"): a start
+    # that ends there is tried again, the last time with the stick not removable; the
+    # try that started the loader is reported.
     t0 = time.monotonic()
-    try:
-        g.until(('test hook: install on disk', 'test hook: no single disk', 'not a test disk',
-                 "the session can't start", 'NOTHING_STARTED', 'Kernel panic'), args.session_timeout)
-        g.stop(300)
-    except RuntimeError as e:
-        print(f'  the session: {e}', flush=True)
-        g.p.kill()
-        g.p.wait()
+    tries = [('removable', cmd)] * 2 + [('not removable', [a.replace('removable=on', 'removable=off') for a in cmd])]
+    for n, (how, c) in enumerate(tries, 1):
+        log = cw / ('session.log' if n == 1 else f'session-{n}.log')
+        g = R.Guest(c, log)
+        try:
+            got = g.until(('test hook: install on disk', 'test hook: no single disk', 'not a test disk',
+                           "the session can't start", 'NOTHING_STARTED', 'Kernel panic',
+                           'No bootable option or device was found'), args.session_timeout)
+            if 'No bootable option' in got[-1]:
+                g.p.kill()
+                g.p.wait()
+                print(f'    start {n} (the stick {how}): the firmware found nothing to start', flush=True)
+                continue
+            g.stop(300)
+        except RuntimeError as e:
+            print(f'  the session: {e}', flush=True)
+            g.p.kill()
+            g.p.wait()
+        break
     time.sleep(1)
-    text = (cw / 'session.log').read_text(errors='replace')
+    print(f'QTEST info the session started on try {n} of {len(tries)} (the stick {how})', flush=True)
+    text = log.read_text(errors='replace')
     for x in text.splitlines():
         if any(k in x for k in ('LOADER_START', 'START recovery', 'NOTHING_STARTED', 'no loader record', 'glassine-drive:', 'efi: EFI v')):
             print('    ' + x.strip(), flush=True)
